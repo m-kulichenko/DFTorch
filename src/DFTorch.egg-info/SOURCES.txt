@@ -1,0 +1,9 @@
+README.md
+pyproject.toml
+setup.py
+src/DFTorch.egg-info/PKG-INFO
+src/DFTorch.egg-info/SOURCES.txt
+src/DFTorch.egg-info/dependency_links.txt
+src/DFTorch.egg-info/not-zip-safe
+src/DFTorch.egg-info/requires.txt
+src/DFTorch.egg-info/top_level.txt
