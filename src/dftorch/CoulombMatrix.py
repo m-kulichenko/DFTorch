@@ -2,8 +2,8 @@ import torch
 import math
 import time
 
-def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms, HDIM,
-                  Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType,
+def CoulombMatrix_vectorized(structure, RX, RY, RZ, LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
+                  Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
                   H_INDEX_START, H_INDEX_END):
     """
     Computes the real-space and reciprocal-space (k-space) Ewald-summed Coulomb matrix and its 
@@ -21,7 +21,7 @@ def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms
         Simulation box dimensions (Lx, Ly, Lz).
     Hubbard_U : torch.Tensor of shape (Nr_atoms,)
         Hubbard U parameters for the atomic species.
-    Element_Type : torch.Tensor of shape (Nr_atoms,)
+    TYPE : torch.Tensor of shape (Nr_atoms,)
         Integer identifiers of the atomic element types.
     Nr_atoms : int
         Number of atoms in the system.
@@ -71,11 +71,6 @@ def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms
     if COULCUT > 50.0:
         COULCUT = 50.0
         CALPHA = SQRTX / COULCUT
-    CALPHA2 = CALPHA * CALPHA
-    RELPERM = 1.0
-    KECONST = 14.3996437701414 * RELPERM
-    TFACT = 16.0 / (5.0 * KECONST)
-    SQRTPI = math.sqrt(math.pi)
     
     Ra = torch.stack((RX.unsqueeze(-1), RY.unsqueeze(-1), RZ.unsqueeze(-1)), dim=-1)
     Rb = torch.stack((nnRx, nnRy, nnRz), dim=-1)
@@ -86,10 +81,13 @@ def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms
     
     ##################
     
-    CC_real, dCC_dxyz_real = Ewald_Real_Space_vectorized(RX, RY, RZ, dR, dR_dxyz, dist_mask, 
-                                                         LBox, Hubbard_U, Element_Type, Nr_atoms, HDIM,
-                  Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType,
-                  H_INDEX_START, H_INDEX_END, CALPHA)
+    CC_real, dCC_dxyz_real = Ewald_Real_Space_vectorized2(structure,
+                                RX, RY, RZ, dR, dR_dxyz, dist_mask, 
+                                LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
+                                Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
+                                H_INDEX_START, H_INDEX_END, CALPHA)
+
+    CC_real_sr, dCC_dxyz_real_sr = Ewald_Real_Space_vectorized_sr(structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA)
     ##################
 
     dq_J = torch.zeros(Nr_atoms, dtype=RX.dtype, device = RX.device)
@@ -114,7 +112,7 @@ def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms
         
 #         pot, dc_dxyz = Ewald_Real_Space_vectorized_less(J, dR[mask_pert_neigh_vec], dR_dxyz[mask_pert_neigh_vec],
 #                   dist_mask[mask_pert_neigh_vec],
-#                   LBox, dq_J, Hubbard_U, Element_Type, Nr_atoms, Coulomb_acc, TIMERATIO, nrnnlist, nnType[mask_pert_neigh_vec],
+#                   LBox, dq_J, Hubbard_U, TYPE, Nr_atoms, Coulomb_acc, TIMERATIO, nrnnlist, nnType[mask_pert_neigh_vec],
 #                   mask_pert_neigh_vec.clone(), mask_to_match_IJ, CALPHA, CALPHA2, COULCUT, time_dict)
 
 #         torch.cuda.synchronize()
@@ -140,16 +138,471 @@ def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms
     print('  Doing Coulomb k')
 
     CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, dq_J, Nr_atoms, Coulomb_acc, TIMERATIO)
+    idx = torch.arange(CC_k.size(0), device = RX.device).repeat_interleave(structure.n_shells_per_atom)
+
+    CC_k_expanded = CC_k[idx][:, idx]
+    dCC_dR_k_expanded = dCC_dR_k[:,idx][:,:, idx]
     print("  Coulomb_k t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
     
     
     #CC = CC_real + CC_real.T - torch.diag(torch.diagonal(CC_real)) + CC_k # this is for a less vectorized code
-    CC = CC_real + CC_k
+    CC = CC_real #+ CC_k
     dCC_dxyz = dCC_dxyz_real + dCC_dR_k
-    return CC, -dCC_dxyz
+
+    CC_sr = CC_real_sr #+ CC_k_expanded
+    dCC_dxyz_sr = dCC_dxyz_real_sr + dCC_dR_k_expanded
 
 
-def Ewald_Real_Space_vectorized(RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbard_U, Element_Type, Nr_atoms, HDIM,
+    return CC, -dCC_dxyz, CC_sr, -dCC_dxyz_sr
+
+def Ewald_Real_Space_vectorized_sr(structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA):
+    """
+    Shell-resolved Coulomb matrix. This one is vectorized in a fashion of SlaterKosterPair.py.
+    Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its 
+    derivatives using a fully vectorized implementation with neighbor lists.
+
+    This function evaluates pairwise interactions between atoms and their neighbors within a
+    specified real-space cutoff. It includes analytical short-range damping corrections for 
+    same-element and different-element pairs as required in DFTB-like models.
+
+    Parameters
+    ----------
+    RX, RY, RZ : torch.Tensor of shape (Nr_atoms,)
+        Cartesian coordinates of atoms along x, y, and z directions.
+    dR : torch.Tensor of shape (Nr_atoms, MAXNN)
+        Scalar distances between atoms and their neighbors.
+    dR_dxyz : torch.Tensor of shape (Nr_atoms, MAXNN, 3)
+        Normalized displacement vectors (dR_x, dR_y, dR_z) between atoms and their neighbors (d_dR/dxyz).
+    dist_mask : torch.BoolTensor of shape (Nr_atoms, MAXNN)
+        Boolean mask indicating which neighbor distances fall within the real-space Ewald cutoff.
+    LBox : tuple of floats
+        Simulation box lengths (Lx, Ly, Lz) used to define periodic boundary conditions.
+    Hubbard_U : torch.Tensor of shape (Nr_atoms,)
+        Hubbard U parameters for the atoms, used in short-range corrections.
+    TYPE : torch.Tensor of shape (Nr_atoms,)
+        Integer element type identifiers for atoms.
+    Nr_atoms : int
+        Total number of atoms in the system.
+    HDIM : int
+        Hamiltonian matrix size (used for context, but not used directly in this function).
+    Coulomb_acc : float
+        Desired accuracy threshold for the Ewald summation.
+    TIMERATIO : float
+        Empirical scaling constant used to determine the Ewald damping parameter.
+    nnRx, nnRy, nnRz : torch.Tensor
+        Neighbor coordinates (not used directly here but passed for API consistency).
+    nrnnlist : torch.Tensor
+        Number of neighbors per atom (not used directly).
+    nnType : torch.Tensor of shape (Nr_atoms, MAXNN)
+        Indices of neighbor atoms for each atom.
+    H_INDEX_START, H_INDEX_END : torch.Tensor
+        Index mappings for block matrix ranges (not used directly).
+    CALPHA : float
+        Ewald real-space damping parameter (α), typically precomputed externally.
+
+    Returns
+    -------
+    CC_real : torch.Tensor of shape (Nr_atoms, Nr_atoms)
+        Real-space contribution to the Coulomb interaction matrix.
+    dCC_dxyz_real : torch.Tensor of shape (3, Nr_atoms, Nr_atoms)
+        Derivatives of the real-space Coulomb interaction with respect to x, y, and z.
+
+    Notes
+    -----
+    - This function computes the pairwise Coulomb interactions between atoms and their neighbors 
+      within a real-space cutoff derived from the Ewald α parameter.
+    - It includes analytical short-range corrections for both same-element and different-element 
+      atomic pairs using atom-dependent Hubbard U parameters.
+    - Derivatives (dCC/dR) are calculated analytically using the chain rule applied to screened 
+      Coulomb functions and short-range exponential terms.
+    - Output matrices are assembled via scatter operations using index_put_ with accumulation.
+    - Only the upper triangle of the interaction matrix is filled; symmetry must be enforced externally if needed.
+    """
+    CALPHA2 = CALPHA ** 2
+    RELPERM = 1.0
+    KECONST = 14.3996437701414 * RELPERM
+    TFACT = 16.0 / (5.0 * KECONST)
+    SQRTPI = math.sqrt(math.pi)
+
+    CDIM = len(structure.Hubbard_U_sr)
+    max_ang_I = structure.const.max_ang[TYPE[neighbor_I]]
+    max_ang_J = structure.const.max_ang[TYPE[neighbor_J]]
+
+    pair_mask_HH = (max_ang_I == 1)*(max_ang_J == 1)
+    pair_mask_HX = (max_ang_I == 1)*(max_ang_J == 2)
+    pair_mask_XH = (max_ang_I == 2)*(max_ang_J == 1)    
+    pair_mask_XX = (max_ang_I == 2)*(max_ang_J == 2)
+
+    pair_mask_HY = (max_ang_I == 1)*(max_ang_J == 3)
+    pair_mask_XY = (max_ang_I == 2)*(max_ang_J == 3)
+    pair_mask_YH = (max_ang_I == 3)*(max_ang_J == 1)
+    pair_mask_YX = (max_ang_I == 3)*(max_ang_J == 2)
+    pair_mask_YY = (max_ang_I == 3)*(max_ang_J == 3)
+    CC_real = torch.zeros((CDIM**2), device=dR.device, dtype=dR.dtype)
+    dCC_dxyz_real = torch.zeros((3, CDIM**2), device=dR.device, dtype=dR.dtype)
+
+    # Pair indices
+    nn_mask = nnType!=-1 # mask to exclude zero padding from the neigh list
+    dR_mskd = dR[nn_mask]
+    dR_dxyz_mskd = dR_dxyz[nn_mask].T
+    CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
+    tmp1 = CA.clone()
+    dtmp1 = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI)/dR_mskd
+
+    ### s-s ###
+    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J]]
+    mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
+    if mask_same_elem.any():
+        dR_mskd_same = dR_mskd[mask_same_elem]
+        Ti_same_el = Ti[mask_same_elem]
+        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
+        tmp1[ mask_same_elem] -= t1
+        dtmp1[mask_same_elem] -= dt1
+    if (~mask_same_elem).any():
+        dR_mskd_diff = dR_mskd[~mask_same_elem]
+        Ti_diff_el = Ti[~mask_same_elem]
+        Tj_diff_el = Tj[~mask_same_elem]
+        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
+        tmp1[ ~mask_same_elem] -= t1
+        dtmp1[~mask_same_elem] -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = structure.H_INDEX_START_U[neighbor_I]*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J]
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd  )
+
+    ### s-p ###
+    tmp_mask = pair_mask_HX + pair_mask_XX + pair_mask_HY + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = structure.H_INDEX_START_U[neighbor_I[tmp_mask]]*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+
+    ### p-s ###
+    tmp_mask = pair_mask_XH + pair_mask_XX + pair_mask_YH + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]]+1)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### p-p ###
+    tmp_mask = pair_mask_XX + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
+    #mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
+    if mask_same_elem.any():
+        dR_mskd_same = dR_mskd[mask_same_elem & tmp_mask]
+        Ti_same_el = Ti[mask_same_elem[tmp_mask]]
+        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
+        tmp1[ mask_same_elem[tmp_mask]] -= t1
+        dtmp1[mask_same_elem[tmp_mask]] -= dt1
+    if (~mask_same_elem).any():
+        dR_mskd_diff = dR_mskd[(~mask_same_elem) & tmp_mask]
+        Ti_diff_el = Ti[~mask_same_elem[tmp_mask]]
+        Tj_diff_el = Tj[~mask_same_elem[tmp_mask]]
+        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
+        tmp1[ ~mask_same_elem[tmp_mask]] -= t1
+        dtmp1[~mask_same_elem[tmp_mask]] -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]]+1)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]+1
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### s-d ###
+    tmp_mask = pair_mask_HY + pair_mask_XY + pair_mask_YY
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = structure.H_INDEX_START_U[neighbor_I[tmp_mask]]*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### d-s ###
+    tmp_mask = pair_mask_YH + pair_mask_YX + pair_mask_YY
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### p-d ###
+    tmp_mask = pair_mask_XY + pair_mask_YY
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### d-p ###
+    tmp_mask = pair_mask_YX + pair_mask_YY
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
+    dR_mskd_diff = dR_mskd[tmp_mask]
+    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    tmp1 -= t1
+    tmp1 *= KECONST
+    dtmp1 -= dt1
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  )
+
+    ### d-d ###
+    tmp_mask = pair_mask_YY
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask]**2) / SQRTPI)/dR_mskd[tmp_mask]
+    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
+    #mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
+    if mask_same_elem.any():
+        dR_mskd_same = dR_mskd[mask_same_elem & tmp_mask]
+        Ti_same_el = Ti[mask_same_elem[tmp_mask]]
+        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
+        tmp1[ mask_same_elem[tmp_mask]] -= t1
+        dtmp1[mask_same_elem[tmp_mask]] -= dt1
+    if (~mask_same_elem).any():
+        dR_mskd_diff = dR_mskd[(~mask_same_elem) & tmp_mask]
+        Ti_diff_el = Ti[~mask_same_elem[tmp_mask]]
+        Tj_diff_el = Tj[~mask_same_elem[tmp_mask]]
+        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
+        tmp1[ ~mask_same_elem[tmp_mask]] -= t1
+        dtmp1[~mask_same_elem[tmp_mask]] -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]]+2)*CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]+2
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1);
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1*dR_dxyz_mskd[:,tmp_mask]  );
+    CC_real = CC_real.reshape(CDIM, CDIM)
+    dCC_dxyz_real = dCC_dxyz_real.reshape(3,CDIM, CDIM)
+    return CC_real, dCC_dxyz_real
+
+def coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff):
+    TI2 = Ti_diff_el ** 2
+    TI4 = TI2 ** 2
+    TI6 = TI4 * TI2
+    TJ2 = Tj_diff_el ** 2
+    TJ4 = TJ2 ** 2
+    TJ6 = TJ4 * TJ2
+    EXPTI = torch.exp(-Ti_diff_el * dR_mskd_diff)
+    EXPTJ = torch.exp(-Tj_diff_el * dR_mskd_diff)
+    TI2MTJ2 = TI2 - TJ2
+    TJ2MTI2 = -TI2MTJ2
+    SB = TJ4 * Ti_diff_el / (2 * TI2MTJ2 ** 2)
+    SC = (TJ6 - 3 * TJ4 * TI2) / (TI2MTJ2 ** 3)
+    SE = TI4 * Tj_diff_el / (2 * TJ2MTI2 ** 2)
+    SF = (TI6 - 3 * TI4 * TJ2) / (TJ2MTI2 ** 3)
+    COULOMBV_tmp1 = (SB - SC / dR_mskd_diff)
+    COULOMBV_tmp2 = (SE - SF / dR_mskd_diff)
+    t1  = EXPTI * COULOMBV_tmp1 + EXPTJ * COULOMBV_tmp2
+    dt1 = EXPTI * ((-Ti_diff_el)*COULOMBV_tmp1 + SC/dR_mskd_diff**2) + \
+            EXPTJ * ((-Tj_diff_el)*COULOMBV_tmp2 + SF/dR_mskd_diff**2)
+    return t1, dt1
+
+def coul_same_elem_and_ang(Ti_same_el, dR_mskd_same):
+    TI2 = Ti_same_el ** 2
+    TI3 = TI2 * Ti_same_el
+    SSB = TI3 / 48.0
+    SSC = 3 * TI2 / 16.0
+    SSD = 11 * Ti_same_el / 16.0
+    EXPTI = torch.exp(-Ti_same_el * dR_mskd_same)
+    tmp = (SSB * dR_mskd_same**2 + SSC * dR_mskd_same + SSD + 1. / dR_mskd_same)
+    t1 = EXPTI * tmp
+    dt1 = EXPTI * (
+            (-Ti_same_el) * tmp + (2 * SSB * dR_mskd_same + SSC - 1. / dR_mskd_same**2))
+    return t1, dt1
+
+def Ewald_Real_Space_vectorized2(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
+                  Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
+                  H_INDEX_START, H_INDEX_END, CALPHA):
+    """
+    This one is vectorized in a fashion of SlaterKosterPair.py.
+    Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its 
+    derivatives using a fully vectorized implementation with neighbor lists.
+
+    This function evaluates pairwise interactions between atoms and their neighbors within a
+    specified real-space cutoff. It includes analytical short-range damping corrections for 
+    same-element and different-element pairs as required in DFTB-like models.
+
+    Parameters
+    ----------
+    RX, RY, RZ : torch.Tensor of shape (Nr_atoms,)
+        Cartesian coordinates of atoms along x, y, and z directions.
+    dR : torch.Tensor of shape (Nr_atoms, MAXNN)
+        Scalar distances between atoms and their neighbors.
+    dR_dxyz : torch.Tensor of shape (Nr_atoms, MAXNN, 3)
+        Normalized displacement vectors (dR_x, dR_y, dR_z) between atoms and their neighbors (d_dR/dxyz).
+    dist_mask : torch.BoolTensor of shape (Nr_atoms, MAXNN)
+        Boolean mask indicating which neighbor distances fall within the real-space Ewald cutoff.
+    LBox : tuple of floats
+        Simulation box lengths (Lx, Ly, Lz) used to define periodic boundary conditions.
+    Hubbard_U : torch.Tensor of shape (Nr_atoms,)
+        Hubbard U parameters for the atoms, used in short-range corrections.
+    TYPE : torch.Tensor of shape (Nr_atoms,)
+        Integer element type identifiers for atoms.
+    Nr_atoms : int
+        Total number of atoms in the system.
+    HDIM : int
+        Hamiltonian matrix size (used for context, but not used directly in this function).
+    Coulomb_acc : float
+        Desired accuracy threshold for the Ewald summation.
+    TIMERATIO : float
+        Empirical scaling constant used to determine the Ewald damping parameter.
+    nnRx, nnRy, nnRz : torch.Tensor
+        Neighbor coordinates (not used directly here but passed for API consistency).
+    nrnnlist : torch.Tensor
+        Number of neighbors per atom (not used directly).
+    nnType : torch.Tensor of shape (Nr_atoms, MAXNN)
+        Indices of neighbor atoms for each atom.
+    H_INDEX_START, H_INDEX_END : torch.Tensor
+        Index mappings for block matrix ranges (not used directly).
+    CALPHA : float
+        Ewald real-space damping parameter (α), typically precomputed externally.
+
+    Returns
+    -------
+    CC_real : torch.Tensor of shape (Nr_atoms, Nr_atoms)
+        Real-space contribution to the Coulomb interaction matrix.
+    dCC_dxyz_real : torch.Tensor of shape (3, Nr_atoms, Nr_atoms)
+        Derivatives of the real-space Coulomb interaction with respect to x, y, and z.
+
+    Notes
+    -----
+    - This function computes the pairwise Coulomb interactions between atoms and their neighbors 
+      within a real-space cutoff derived from the Ewald α parameter.
+    - It includes analytical short-range corrections for both same-element and different-element 
+      atomic pairs using atom-dependent Hubbard U parameters.
+    - Derivatives (dCC/dR) are calculated analytically using the chain rule applied to screened 
+      Coulomb functions and short-range exponential terms.
+    - Output matrices are assembled via scatter operations using index_put_ with accumulation.
+    - Only the upper triangle of the interaction matrix is filled; symmetry must be enforced externally if needed.
+    """
+    #torch.cuda.synchronize()
+    start_time1 = time.perf_counter()
+    
+    # Constants
+    CALPHA2 = CALPHA ** 2
+    RELPERM = 1.0
+    KECONST = 14.3996437701414 * RELPERM
+    TFACT = 16.0 / (5.0 * KECONST)
+    SQRTPI = math.sqrt(math.pi)
+    
+    # Pair indices
+    nn_mask = nnType!=-1 # mask to exclude zero padding from the neigh list
+    dR_mskd = dR[nn_mask]
+    Ti = TFACT * structure.Hubbard_U[neighbor_I]
+    Tj = TFACT * structure.Hubbard_U[neighbor_J]
+    CC_real = torch.zeros((structure.Nats * structure.Nats), device=RX.device, dtype=RX.dtype)
+    CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
+    tmp1 = CA.clone()
+    dtmp1 = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI)/dR_mskd
+
+    mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
+    if mask_same_elem.any():
+        dR_mskd_same = dR_mskd[mask_same_elem]
+        Ti_same_el = Ti[mask_same_elem]
+        TI2 = Ti_same_el ** 2
+        TI3 = TI2 * Ti_same_el
+        SSB = TI3 / 48.0
+        SSC = 3 * TI2 / 16.0
+        SSD = 11 * Ti_same_el / 16.0
+        EXPTI = torch.exp(-Ti_same_el * dR_mskd_same)
+        tmp = (SSB * dR_mskd_same**2 + SSC * dR_mskd_same + SSD + 1. / dR_mskd_same)
+        tmp1[ mask_same_elem] -= EXPTI * tmp
+        dtmp1[mask_same_elem] -= EXPTI * (
+                (-Ti_same_el) * tmp + (2 * SSB * dR_mskd_same + SSC - 1. / dR_mskd_same**2)
+            )
+    if (~mask_same_elem).any():
+        dR_mskd_diff = dR_mskd[~mask_same_elem]
+        Ti_diff_el = Ti[~mask_same_elem]
+        Tj_diff_el = Tj[~mask_same_elem]
+        TI2 = Ti_diff_el ** 2
+        TI4 = TI2 ** 2
+        TI6 = TI4 * TI2
+        TJ2 = Tj_diff_el ** 2
+        TJ4 = TJ2 ** 2
+        TJ6 = TJ4 * TJ2
+        EXPTI = torch.exp(-Ti_diff_el * dR_mskd_diff)
+        EXPTJ = torch.exp(-Tj_diff_el * dR_mskd_diff)
+        TI2MTJ2 = TI2 - TJ2
+        TJ2MTI2 = -TI2MTJ2
+        SB = TJ4 * Ti_diff_el / (2 * TI2MTJ2 ** 2)
+        SC = (TJ6 - 3 * TJ4 * TI2) / (TI2MTJ2 ** 3)
+        SE = TI4 * Tj_diff_el / (2 * TJ2MTI2 ** 2)
+        SF = (TI6 - 3 * TI4 * TJ2) / (TJ2MTI2 ** 3)
+        COULOMBV_tmp1 = (SB - SC / dR_mskd_diff)
+        COULOMBV_tmp2 = (SE - SF / dR_mskd_diff)
+        tmp1[ ~mask_same_elem] -= EXPTI * COULOMBV_tmp1 + EXPTJ * COULOMBV_tmp2
+        dtmp1[~mask_same_elem] -= EXPTI * ((-Ti_diff_el)*COULOMBV_tmp1 + SC/dR_mskd_diff**2) + \
+                EXPTJ * ((-Tj_diff_el)*COULOMBV_tmp2 + SF/dR_mskd_diff**2)
+
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    CC_real.index_add_(0, neighbor_I*(structure.Nats) + neighbor_J, tmp1 )
+    CC_real = CC_real.reshape(structure.Nats,structure.Nats)
+
+    dCC_dxyz_real = torch.zeros((3, structure.Nats*structure.Nats), device=RX.device, dtype=RX.dtype)
+    dCC_dxyz_real.index_add_(1, neighbor_I*(structure.Nats) + neighbor_J, dtmp1*dR_dxyz[nn_mask].T  )
+    dCC_dxyz_real = dCC_dxyz_real.reshape(3,structure.Nats,structure.Nats)
+    return CC_real, dCC_dxyz_real
+
+def Ewald_Real_Space_vectorized(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
                   Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType,
                   H_INDEX_START, H_INDEX_END, CALPHA):
     """
@@ -174,7 +627,7 @@ def Ewald_Real_Space_vectorized(RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbar
         Simulation box lengths (Lx, Ly, Lz) used to define periodic boundary conditions.
     Hubbard_U : torch.Tensor of shape (Nr_atoms,)
         Hubbard U parameters for the atoms, used in short-range corrections.
-    Element_Type : torch.Tensor of shape (Nr_atoms,)
+    TYPE : torch.Tensor of shape (Nr_atoms,)
         Integer element type identifiers for atoms.
     Nr_atoms : int
         Total number of atoms in the system.
@@ -228,32 +681,42 @@ def Ewald_Real_Space_vectorized(RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbar
     dR_dist_mskd = dR[dist_mask]
     MAGR2_dist_mskd = dR_dist_mskd **2
 
+    
+    
     # Pair indices
+    nn_mask = nnType!=-1 # mask to exclude zero padding from the neigh list
     i_atoms = torch.arange(Nr_atoms, device=RX.device).view(-1, 1)  # (N, 1)
     j_atoms = nnType  # (N, MAXNN)
+    
 
     # Element and U type
     Ti = TFACT * Hubbard_U[i_atoms]  # (N, 1)
     Tj = TFACT * Hubbard_U[j_atoms]  # (N, MAXNN)
 
-    same_elem_mask = (Element_Type[i_atoms] == Element_Type[j_atoms]) & dist_mask  # (N, MAXNN)
-    diff_elem_mask = (~same_elem_mask) & dist_mask  # (N, MAXNN)
+    dist_mask = dist_mask & nn_mask
+    same_elem_mask = (TYPE[i_atoms] == TYPE[j_atoms]) & dist_mask  # (N, MAXNN)
+    #diff_elem_mask = (~same_elem_mask) & dist_mask  # (N, MAXNN)
     
-    mask_same_elem_type_inside_dist_mask = (Element_Type[i_atoms] == Element_Type[j_atoms])[dist_mask]
-    
-    MAGR2 = dR ** 2 + (~dist_mask) * 1e10
+    mask_same_elem_type_inside_dist_mask = (TYPE[i_atoms] == TYPE[j_atoms])[dist_mask]
 
+    #########
+
+    #########
+
+    
     # Initialize potential
     CA = torch.erfc(CALPHA * dR_dist_mskd) / dR_dist_mskd
     COULOMBV = CA.clone()
     
-    CA += 2 * CALPHA * torch.exp(-CALPHA2 * MAGR2_dist_mskd) / SQRTPI
-    dC_dR = -CA / dR_dist_mskd
+    dCA = CA + 2 * CALPHA * torch.exp(-CALPHA2 * MAGR2_dist_mskd) / SQRTPI
+    dC_dR = -dCA / dR_dist_mskd
 
     ## Same-element correction
     if mask_same_elem_type_inside_dist_mask.any():
         dR_dist_mskd_same = dR_dist_mskd[mask_same_elem_type_inside_dist_mask]
         MAGR2_dist_mskd_same = MAGR2_dist_mskd[mask_same_elem_type_inside_dist_mask]
+
+
         TI_same = Ti.expand_as(Tj)[dist_mask][mask_same_elem_type_inside_dist_mask]
         TI2 = TI_same ** 2
         TI3 = TI2 * TI_same
@@ -492,7 +955,7 @@ def Ewald_k_Space_vectorized(RX, RY, RZ, LBox, DELTAQ, Nr_atoms, COULACC, TIMERA
     COULOMBV -= CORRFACT*DELTAQ_vec
     return COULOMBV, dC_dR
 
-def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTAQ, U, Element_Type, Nr_atoms, COULACC, TIMERATIO, nrnnlist, nnType, mask_pert_neigh_vec, mask_to_match_IJ, CALPHA, CALPHA2, COULCUT, time_dict):
+def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTAQ, U, TYPE, Nr_atoms, COULACC, TIMERATIO, nrnnlist, nnType, mask_pert_neigh_vec, mask_to_match_IJ, CALPHA, CALPHA2, COULCUT, time_dict):
     '''
     # this is a less vectorized option. may be more memory efficient?
     '''
@@ -514,7 +977,7 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
     
     
     dR_dist_mskd = dR[dist_mask]
-    mask_same_elem_type_inside_dist_mask = (Element_Type[mask_to_match_IJ[dist_mask]] == Element_Type[pert_J])
+    mask_same_elem_type_inside_dist_mask = (TYPE[mask_to_match_IJ[dist_mask]] == TYPE[pert_J])
     MAGR2_dist_mskd = dR_dist_mskd **2
     
     TI = TFACT * U[mask_to_match_IJ][dist_mask]
@@ -688,7 +1151,7 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
 #     return COULOMBV, dC_dR
 
 
-# def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, Element_Type, Nr_atoms, HDIM,
+# def CoulombMatrix_vectorized(RX, RY, RZ, LBox, Hubbard_U, TYPE, Nr_atoms, HDIM,
 #                   Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType,
 #                   H_INDEX_START, H_INDEX_END):
 #     # Initialize charge deviation vector
@@ -719,7 +1182,7 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
 #         mask_to_match_IJ = torch.repeat_interleave(torch.arange(Nr_atoms, device = RX.device), torch.sum(mask_pert_neigh_vec, dim=-1))
         
 #         pot, dc_dxyz = Ewald_Real_Space_vectorized_MORE(J, RX[mask_to_match_IJ], RY[mask_to_match_IJ], RZ[mask_to_match_IJ], LBox, dq_J, Hubbard_U,
-#                                           Element_Type, Nr_atoms, Coulomb_acc,
+#                                           TYPE, Nr_atoms, Coulomb_acc,
 #                                           TIMERATIO, nnRx[mask_pert_neigh_vec], nnRy[mask_pert_neigh_vec], nnRz[mask_pert_neigh_vec], nrnnlist, nnType[mask_pert_neigh_vec], mask_pert_neigh_vec.clone(), mask_to_match_IJ)
 
 #         print(Coulomb_Pot_Real.shape, J+1, pot.shape)
@@ -741,7 +1204,7 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
         
 #     return CC, -dCC_dxyz
 
-# def Ewald_Real_Space_vectorized_MORE(pert_J, RX, RY, RZ, LBox, DELTAQ, U, Element_Type, Nr_atoms, COULACC, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, mask_pert_neigh_vec, mask_to_match_IJ):
+# def Ewald_Real_Space_vectorized_MORE(pert_J, RX, RY, RZ, LBox, DELTAQ, U, TYPE, Nr_atoms, COULACC, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, mask_pert_neigh_vec, mask_to_match_IJ):
 
 #     COULVOL = LBox[0] * LBox[1] * LBox[2]
 #     SQRTX = math.sqrt(-math.log(COULACC))
@@ -778,8 +1241,8 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
 #     MAGR2 = dR * dR
     
 #     dist_mask = (dR <= COULCUT)*(dR > 1e-12)
-#     mask_diff_elem_type_global = (Element_Type[mask_to_match_IJ] != Element_Type[J])*dist_mask
-#     mask_same_elem_type_global = (Element_Type[mask_to_match_IJ] == Element_Type[J])*dist_mask
+#     mask_diff_elem_type_global = (TYPE[mask_to_match_IJ] != TYPE[J])*dist_mask
+#     mask_same_elem_type_global = (TYPE[mask_to_match_IJ] == TYPE[J])*dist_mask
 #     mask_pert_neigh_vec = mask_pert_neigh_vec.masked_scatter(mask_pert_neigh_vec, dist_mask)
 #     num_per_atom = torch.sum(mask_pert_neigh_vec, dim = -1)
 #     num_per_atom = num_per_atom[num_per_atom!=0]
@@ -816,7 +1279,7 @@ def Ewald_Real_Space_vectorized_less(pert_J, dR, dR_dxyz, dist_mask, LBox, DELTA
     
 #     ## handle same elements ##
     
-#     mask_same_elem_type_inside_dist_mask = (Element_Type[mask_to_match_IJ[dist_mask]] == Element_Type[J[dist_mask]])
+#     mask_same_elem_type_inside_dist_mask = (TYPE[mask_to_match_IJ[dist_mask]] == TYPE[J[dist_mask]])
 #     COULOMBV_tmp = (SSB * MAGR2[mask_same_elem_type_global] + SSC * dR[mask_same_elem_type_global] + SSD + SSE / dR[mask_same_elem_type_global])
     
 #     COULOMBV[mask_same_elem_type_inside_dist_mask] -= EXPTI[mask_same_elem_type_global] * COULOMBV_tmp

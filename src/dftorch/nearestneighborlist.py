@@ -1,5 +1,8 @@
 import torch
-def vectorized_nearestneighborlist(Rx, Ry, Rz, LBox, Rcut, N, upper_tri_only=True, remove_self_neigh=False):
+import time
+from dftorch.Tools import ordered_pairs_from_TYPE
+from .BondIntegral import read_skf_table, channels_to_matrix, cubic_spline_coeffs
+def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper_tri_only=True, remove_self_neigh=False, min_image_only=False, verbose=False):
     """
     Computes the neighbor list for a set of atoms using periodic boundary conditions (PBC) 
     and a cutoff radius, in a fully vectorized manner.
@@ -55,39 +58,48 @@ def vectorized_nearestneighborlist(Rx, Ry, Rz, LBox, Rcut, N, upper_tri_only=Tru
     # % nnStruct(I,J): The neigbors J to I within Rcut that are all within the box (not in the skin).
     # % nrnnStruct(I): Number of neigbors to I within Rcut that are all within the box (not in the skin).
 
+    start_time1 = time.perf_counter()
     Lx, Ly, Lz = LBox
     R = torch.stack((Rx, Ry, Rz), dim=1)  # (N, 3)
 
+    #shift = [-2, -1, 0, 1, 2]
+    shift = [-1, 0, 1]
+    #shift = [0]
     shifts = torch.tensor([
-        [i, j, k] for i in [-1, 0, 1]
-                  for j in [-1, 0, 1]
-                  for k in [-1, 0, 1]
+        [i, j, k] for i in shift
+                  for j in shift
+                  for k in shift
     ], dtype=Rx.dtype, device=R.device)  # (27, 3)
     
     box = torch.tensor([Lx, Ly, Lz], dtype=Rx.dtype, device=R.device)
 
     R_translated = R.unsqueeze(1) + shifts.unsqueeze(0) * box.view(1, 1, 3)  # (N, 27, 3)
     
-    # diff = R.view(N, 1, 1, 3) - R_translated.view(1, N, 27, 3)  # (N, N, 27, 3)
-    # dist = torch.norm(diff, dim=-1)  # (N, N, 27)
+    diff = R.view(N, 1, 1, 3) - R_translated.view(1, N, len(shift)**3, 3)  # (N, N, 27, 3)
+    dist = torch.norm(diff, dim=-1)  # (N, N, 27)
     
-    A = R.view(N, 3)                          # shape (N, 3)
-    B = R_translated.view(N * 27, 3)         # shape (N*27, 3)
+    # A = R.view(N, 3)                          # shape (N, 3)
+    # B = R_translated.view(N * len(shift)**3, 3)         # shape (N*27, 3)
 
-    A_norm_sq = A.pow(2).sum(1, keepdim=True)         # (N, 1)
-    B_norm_sq = B.pow(2).sum(1, keepdim=True).T       # (1, N*27)
-    cross_term = 2*A @ B.T                              # (N, N*27)
+    # A_norm_sq = A.pow(2).sum(1, keepdim=True)         # (N, 1)
+    # B_norm_sq = B.pow(2).sum(1, keepdim=True).T       # (1, N*27)
+    # cross_term = 2*A @ B.T                              # (N, N*27)
+    # # Compute squared distances
+    # dists_sq = A_norm_sq + B_norm_sq - cross_term  # (N, N*27)
+    # dists = dists_sq.clamp(min=1e-8).sqrt()           # avoid sqrt(neg)
+    # # Reshape back to (N, N, len(shift)**3)
+    # dist = dists.view(N, N, len(shift)**3)
+
+    # mask minimum distance images
+    if min_image_only:
+        idx = dist.argmin(dim=2, keepdim=True)          # (N, N, 1)
+        mask_min_image = torch.zeros_like(dist, dtype=torch.bool) # (N, N, 27)
+        mask_min_image.scatter_(2, idx, True)                  # one-hot at argmin
+    else:
+        mask_min_image = torch.tensor([True], dtype=torch.bool, device=R.device)
 
 
-    # Compute squared distances
-    dists_sq = A_norm_sq + B_norm_sq - cross_term  # (N, N*27)
-    dists = dists_sq.clamp(min=1e-12).sqrt()           # avoid sqrt(neg)
-
-    # Reshape back to (N, N, 27)
-    dist = dists.view(N, N, 27)
-
-
-    neighbor_mask = dist < Rcut
+    neighbor_mask = (dist < Rcut) * (dist > 1e-4) * mask_min_image
     
     # remove self-neighbors
     if remove_self_neigh:
@@ -106,13 +118,14 @@ def vectorized_nearestneighborlist(Rx, Ry, Rz, LBox, Rcut, N, upper_tri_only=Tru
     max_neighbors = num_neighbors.max().item()
 
     nndist = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device)
-    nnRx = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0 # so zero padded neighs (-1) are far
-    nnRy = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device)
-    nnRz = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device)
+    # so zero padded neighs (-1) are far
+    nnRx = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0
+    nnRy = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0
+    nnRz = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0
     nnType = torch.full((N, max_neighbors), -1, dtype=torch.int64, device=R.device)
-    nnStruct = torch.full((N, max_neighbors), 0, dtype=torch.int64, device=R.device)
+    nnStruct = torch.full((N, max_neighbors), -1, dtype=torch.int64, device=R.device)
     nrnnStruct = torch.zeros((N,), dtype=torch.int64, device=R.device)
-    nrnnlist = num_neighbors
+    nrnnlist = num_neighbors.view(-1, 1)
 
     dist_vals = dist[i_idx, j_idx, s_idx]
     neighbor_pos = R_translated[j_idx, s_idx]  # (nnz, 3)
@@ -145,4 +158,50 @@ def vectorized_nearestneighborlist(Rx, Ry, Rz, LBox, Rcut, N, upper_tri_only=Tru
     #nrnnStruct = torch.bincount(i_idx_sorted[is_in_box], minlength=N)
     nrnnStruct = torch.bincount(i_idx_sorted, minlength=N)
 
-    return nrnnlist.view(-1, 1), nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct.view(-1, 1)
+    # === Vectorized neighbor type pair generation ===
+    max_neighbors = nnType.shape[-1]
+
+    # Create mask for valid neighbors
+    neighbor_mask = torch.arange(max_neighbors, device=Rx.device).unsqueeze(0) < nrnnlist
+    neighbor_J = nnType[neighbor_mask]
+    neighbor_I = torch.repeat_interleave(torch.arange(nrnnlist.squeeze(-1).shape[0], device=nrnnlist.device), nrnnlist.squeeze(-1))
+
+    ### Get tensors for SKF files ###
+    pairs_tensor, pairs_list, label_list = ordered_pairs_from_TYPE(TYPE, const)
+    # Allocate padded tensors
+    n_pairs = len(label_list)
+    coeffs_tensor = torch.zeros((n_pairs, 500, 20, 4), device=Rx.device)
+    #R_tensor = torch.zeros((n_pairs, 499), device=Rx.device) # not necessarily if all R are the same. Makes sense to use zero padding if not.
+
+    pair_type_dict = {}
+
+    for i in range(len(label_list)):
+        pair_type_dict[label_list[i]] = i
+
+    # IJ_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=Rx.device)
+    # JI_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=Rx.device)
+    # for i in range(len(neighbor_I)):
+    #     IJ_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_I[i]]] + '-' + const.label[TYPE[neighbor_J[i]]]]
+    #     JI_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_J[i]]] + '-' + const.label[TYPE[neighbor_I[i]]]]
+
+    # Build a 2D lookup table once (no function), then index it
+    labels = [s.strip() for s in const.label.tolist()]            # fix spaces like ' P', 'V ', etc.
+    label_to_idx = {lab: i for i, lab in enumerate(labels)}
+    Z = len(labels)
+    pair_lookup = torch.full((Z, Z), -1, dtype=torch.long, device=Rx.device)
+    for k, v in pair_type_dict.items():                           # keys like "C-H"
+        a, b = k.split('-')
+        ai = label_to_idx[a]
+        bi = label_to_idx[b]
+        pair_lookup[ai, bi] = int(v)
+        # If the mapping is symmetric and reverse might be missing, also do:
+        # pair_lookup[bi, ai] = int(v)
+    ti = TYPE[neighbor_I].long()
+    tj = TYPE[neighbor_J].long()
+    IJ_pair_type = pair_lookup[ti, tj]        # shape: (len(neighbor_I),)
+    JI_pair_type = pair_lookup[tj, ti]
+    if verbose: print("  t <neighbor list> {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+
+    return nrnnlist, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct.view(-1, 1),\
+           neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type
+

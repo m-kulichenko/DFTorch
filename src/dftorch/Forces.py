@@ -2,7 +2,7 @@ import torch
 from .Tools import fractional_matrix_power_symm
 
 def Forces(H, H0, S, C, D, D0, dH, dS,
-                   dC, Efield, U, q, Rx, Ry, Rz,
+                   dC, dVr, Efield, U, q, Rx, Ry, Rz,
                    Nats, H_INDEX_START, H_INDEX_END, const, TYPE):
     """
     Computes atomic forces from a DFTB-like total energy expression.
@@ -54,11 +54,12 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
     
     print('Doing Fcoul')
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
-    qvec = q.view(1, -1)  # shape [1, Nats]
     Fcoul = q * (q @ dC)
 
     print('Doing Fband0')
+    # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
@@ -77,6 +78,7 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
     
     print('Doing FScoul')
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ q
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
@@ -104,8 +106,11 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
     new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
     FSdipole -= 2*new_fs
+
+    print('Doing Repulsion')
+    Frep = dVr.sum(dim=2)
     
     # Total force
-    Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole
-    
-    return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole
+    Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+
+    return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep

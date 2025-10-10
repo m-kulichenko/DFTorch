@@ -1,0 +1,55 @@
+\documentclass[a4paper,11pt]{book}
+
+\include{packages}
+\makeindex
+\include{newcommands}
+
+\title{\textbf{{\dftbp}\\[0.5cm]Version 24.1\\[1.5cm]
+    {U\,S\,E\,R\,\ \, M\,A\,N\,U\,A\,L}}}
+\date{}
+\author{}
+
+\begin{document}
+\maketitle
+
+\setcounter{tocdepth}{2}
+\tableofcontents
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+
+\include{introduction}
+\include{dftbp}
+\include{transport}
+\include{modes}
+\include{phonons}
+\include{waveplot}
+\include{setupgeom}
+\include{api}
+
+\appendix
+\include{releases}
+\include{hsd}
+\include{unit_mod}
+\include{gen}
+\include{spin_constants}
+\include{disp_constants}
+\include{dftd3_constants}
+\include{dftd4_constants}
+\include{solvents}
+\include{onsite_constants}
+\include{hhubbard}
+\include{restart_files}
+\include{publications}
+\include{references}
+
+\phantomsection\addcontentsline{toc}{chapter}{Index}
+\printindex
+
+\end{document}
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: t
+%%% End:
