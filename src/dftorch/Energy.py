@@ -52,4 +52,4 @@ def Energy(H0, U, Efield, D0, C, D, q, Rx, Ry, Rz, f, Te):
     # Total energy
     Etot = Eband0 + Ecoul + Edipole - 2 * Te * S_ent
 
-    return Etot.item(), Eband0.item(), Ecoul.item(), Edipole.item(), S_ent.item()
+    return Etot, Eband0, Ecoul, Edipole, S_ent

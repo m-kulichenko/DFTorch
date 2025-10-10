@@ -1,7 +1,7 @@
 import torch
 import time
 
-def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt):
+def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     """
     Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
 
@@ -27,12 +27,11 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt):
         - The recursion approximates the Fermi function at finite temperature, avoiding costly exponentials.
         - The eigenbasis is used to construct the density matrix after recursion.
     """    
-    #torch.cuda.synchronize()
+    if debug: torch.cuda.synchronize()
     start_time1 = time.perf_counter()
     dtype = H0.dtype
     device = H0.device
     N = H0.shape[0]
-    I = torch.eye(N, dtype=dtype, device=device)
     
     if mu_0 == None:
         #h = torch.linalg.eigvalsh(H0)
@@ -41,8 +40,9 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt):
     else:
         mu0 = mu_0
         
-    #torch.cuda.synchronize()
-    print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
+    if debug: 
+        torch.cuda.synchronize()
+        print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
 
     start_time1 = time.perf_counter()
 
@@ -67,17 +67,22 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt):
             OccErr = 0.0
 
         Cnt += 1
-    #torch.cuda.synchronize()
-    print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
+    if Cnt == MaxIt:
+        print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, OccErr))
+    if debug:
+        torch.cuda.synchronize()
+        print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
     start_time1 = time.perf_counter()
     
     # Final adjustment of occupation    
     P0 = (v * p0.unsqueeze(0)) @ v.T # same as v@(torch.diag_embed(p0)@v.T)
-    #torch.cuda.synchronize()
-    print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
-
+    if debug:
+        torch.cuda.synchronize()
+        print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
 
     
+#     I = torch.eye(N, dtype=dtype, device=device)
+
 #     OccErr = 1.0
 #     Cnt = 0
 
