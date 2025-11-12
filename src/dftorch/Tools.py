@@ -16,6 +16,11 @@ def fractional_matrix_power_symm(A, power, method="auto", jitter: float = 1e-8):
     
     # Symmetric fractional matrix power using eigendecomposition
     eigvals, eigvecs = torch.linalg.eigh(A)
+    # eigvals, eigvecs = torch.linalg.eigh(A.to(torch.float64))
+    # eigvals = eigvals.to(torch.float32)
+    # eigvecs = eigvecs.to(torch.float32)
+
+
     eigvals_clamped = torch.clamp(eigvals, min=1e-12)
     D_power = torch.diag(eigvals_clamped ** power)
     return eigvecs @ D_power @ eigvecs.T
@@ -52,3 +57,23 @@ def ordered_pairs_from_TYPE(TYPE: torch.Tensor, const: Constants = None):
         label_list = [f"{_lab(a)}-{_lab(b)}" for a, b in pairs_list]
 
     return pairs_tensor, pairs_list, label_list
+    
+def list_global_tensors(ns=None):
+    ns = globals() if ns is None else ns
+    rows = []
+    for name, obj in ns.items():
+        t = None
+        if torch.is_tensor(obj):
+            t = obj
+        elif hasattr(obj, "data") and torch.is_tensor(obj.data):
+            t = obj.data
+        if t is None:
+            continue
+        bytes_ = t.element_size() * t.numel()
+        rows.append((bytes_, name, t))
+    rows.sort(key=lambda x: x[0], reverse=True)  # descending by size
+    total = 0
+    for bytes_, name, t in rows:
+        total += bytes_
+        print(f"{name:>24}  size={bytes_/1e6:9.2f} MB  shape={tuple(t.shape)}  dtype={t.dtype}  device={t.device}  grad={t.requires_grad}")
+    print(f"Total tensors: {len(rows)}  total size={total/1e6:.2f} MB")
