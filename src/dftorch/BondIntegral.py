@@ -178,7 +178,7 @@ def _expand_tokens(tokens):
             out.append(t)
     return out
 
-def read_skf_table(path):
+def read_skf_table(const, path):
     """
     Read an SKF file and extract R grid + 20 channel integrals as tensors.
 
@@ -195,9 +195,11 @@ def read_skf_table(path):
 
     # First line: step and number of points
     first = data_lines[0].replace(',', ' ').split()
-    step, npts = float(first[0]), int(first[1])
+    step, npts_read = float(first[0]), int(first[1])
+    npts_pad = 1001
 
-    npts = 519
+    if 'mio' in path:
+        npts_read = 519
 
     # Decide where the table starts
     base = os.path.basename(path)                # 'C-Ni.skf'
@@ -206,17 +208,30 @@ def read_skf_table(path):
     homonuclear = (elemA == elemB)
     start_idx = 3 if homonuclear else 2
 
+    if homonuclear:
+        tokens = data_lines[1].replace(',', ' ').split()
+        Ed, Ep, Es, SPE, Ud, Up, Us, fd, fp, fs = \
+        float(tokens[0]), float(tokens[1]), float(tokens[2]), float(tokens[3]), float(tokens[4]), float(tokens[5]), float(tokens[6]), float(tokens[7]), float(tokens[8]), float(tokens[9])
+        el_num = const.symbol_to_number[elemA]
+        const.Ud_dict_read[el_num] = Ud*27.21138625
+        const.Up_dict_read[el_num] = Up*27.21138625
+        const.U_dict_read[el_num] =  Us*27.21138625
+        const.Ed_dict_read[el_num] = Ed*27.21138625
+        const.Ep_dict_read[el_num] = Ep*27.21138625
+        const.Es_dict_read[el_num] = Es*27.21138625
+
     rows = []
     print(path)
-    for ln in data_lines[start_idx:start_idx+npts-1]:
+    for ln in data_lines[start_idx:start_idx+npts_read-1]:
         tokens = _expand_tokens(ln.replace(',', ' ').split())
+
         if len(tokens) != 20:
             raise ValueError(f"Expected 20 values, got {len(tokens)} in line: {ln}")
         rows.append([float(x) for x in tokens])
     rows.append([float(x)*0.0 for x in tokens])
     
     mat = torch.tensor(rows)*27.21138625  # (npts,20)
-    R = torch.arange(1, npts+1) * step * 0.52917721  # Convert to Angstrom
+    R = torch.arange(1, npts_pad+1) * step * 0.52917721  # Convert to Angstrom
     channels = {ch: mat[:, j] for j, ch in enumerate(_CHANNELS)}
 
     
@@ -229,7 +244,7 @@ def read_skf_table(path):
     ### Do repulsion splines
     first = data_lines[spline_start+1].replace(',', ' ').split()
     npts = int(first[0])
-    close_exp = torch.tensor([float(x) for x in data_lines[spline_start+2].replace(',', ' ').split()])
+    #close_exp = torch.tensor([float(x) for x in data_lines[spline_start+2].replace(',', ' ').split()])
     rows = []
     rows_R = []
     for ln in data_lines[spline_start+3:spline_start+3+npts-1]:
@@ -382,21 +397,22 @@ def get_skf_tensors(TYPE, const):
 
     # Allocate padded tensors
     n_pairs = len(label_list)
-    coeffs_tensor = torch.zeros((n_pairs, 518, 20, 4), device=TYPE.device)
-    R_tensor = torch.zeros((n_pairs, 519), device=TYPE.device) # not necessarily if all R are the same. Makes sense to use zero padding if not.
+    npts = 1000 # padded # old 518
+    coeffs_tensor = torch.zeros((n_pairs, npts, 20, 4), device=TYPE.device)
+    R_tensor = torch.zeros((n_pairs, npts+1), device=TYPE.device) # not necessarily if all R are the same. Makes sense to use zero padding if not.
     
-    rep_splines_tensor = torch.zeros((n_pairs, 120, 6), device=TYPE.device)
-    R_rep_tensor = torch.zeros((n_pairs, 120), device=TYPE.device) + 1e8
+    rep_splines_tensor = torch.zeros((n_pairs, 500, 6), device=TYPE.device) # old 120
+    R_rep_tensor = torch.zeros((n_pairs, 500), device=TYPE.device) + 1e8
 
     for i in range(len(label_list)):
-        try:
-            R_orb, channels, R_rep, rep_splines = read_skf_table("sk_orig/mio-1-1/mio-1-1/{}.skf".format(label_list[i]))
-        except:
-            R_orb, channels, R_rep, rep_splines = read_skf_table("sk_orig/trans3d-0-1/{}.skf".format(label_list[i]))
+        #try:
+        R_orb, channels, R_rep, rep_splines = read_skf_table(const, const.skfpath + "/{}.skf".format(label_list[i]))
+        # except:
+        #     R_orb, channels, R_rep, rep_splines = read_skf_table("sk_orig/trans3d-0-1/{}.skf".format(label_list[i]))
         channels_matrix = channels_to_matrix(channels)
         coeffs = cubic_spline_coeffs(R_orb, channels_matrix)
-        R_tensor[i] = R_orb
-        coeffs_tensor[i] = coeffs
+        R_tensor[i,:len(R_orb)] = R_orb
+        coeffs_tensor[i,:len(coeffs)] = coeffs
 
         R_rep_tensor[i,:len(R_rep)] = R_rep
         rep_splines_tensor[i,:len(rep_splines)] = rep_splines

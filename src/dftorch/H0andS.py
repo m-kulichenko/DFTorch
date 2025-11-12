@@ -4,8 +4,8 @@ from .BondIntegral import *
 from .SlaterKosterPair import Slater_Koster_Pair_vectorized, Slater_Koster_Pair_SKF_vectorized
 from .AtomicDensityMatrix import AtomicDensityMatrix, AtomicDensityMatrix_vectorized
 from .Tools import ordered_pairs_from_TYPE
-def H0_and_S_vectorized(TYPE, RX, RY, RZ, LBox, Nr_atoms, diagonal, H_INDEX_START, H_INDEX_END, Znuc,
-                        nrnnlist, nnRx, nnRy, nnRz, nnType,
+def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_INDEX_END, Znuc,
+                        nnRx, nnRy, nnRz, nnType,
                         const, neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type,
                         R_orb, coeffs_tensor,
                         verbose=False):
@@ -40,19 +40,11 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, LBox, Nr_atoms, diagonal, H_INDEX_STAR
     """
     # Map atom type to properties
     # Support both str and int input
-    print('H0_and_S')
+    if verbose: print('H0_and_S')
     start_time1 = time.perf_counter()
-    start_time2 = time.perf_counter()
-                            
-    print('  Do H diagonal')
-    hydro_mask = (const.n_orb[TYPE] == 1)  # True for hydrogen atoms (only s orbital)
-    non_hydro_mask = (const.n_orb[TYPE] == 4)
-    d_mask =  (const.n_orb[TYPE] == 9)
-
-    if verbose: print("  t <diagonal> {:.1f} s\n".format( time.perf_counter()-start_time2 ))
     start_time3 = time.perf_counter()
     
-    print('  Do H off-diag')
+    if verbose: print('  Do H off-diag')
     Rab_X = nnRx - RX.unsqueeze(-1)
     Rab_Y = nnRy - RY.unsqueeze(-1)
     Rab_Z = nnRz - RZ.unsqueeze(-1)
@@ -114,7 +106,7 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, LBox, Nr_atoms, diagonal, H_INDEX_STAR
     if verbose: print("  t <SKF> {:.1f} s\n".format( time.perf_counter()-start_time4 ))
     start_time5 = time.perf_counter()
 
-    print('  Do H and S')
+    if verbose: print('  Do H and S')
     H0, dH0 = Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR_mskd, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
                                             pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
                                             pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY,
@@ -148,14 +140,18 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, LBox, Nr_atoms, diagonal, H_INDEX_STAR
     
     D0 = 0.5 * D0
     if verbose: print("  t <D0> {:.1f} s\n".format( time.perf_counter()-start_time6 ))
-    print("t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+    print("H0_and_S t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
     return D0, H0, dH0, S, dS
 
 
 
 
 
-def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist, nnRx, nnRy, nnRz, nnType, const):
+def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, diagonal, H_INDEX_START, H_INDEX_END, Znuc,
+                        nrnnlist, nnRx, nnRy, nnRz, nnType,
+                        const, neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type,
+                        R_orb, coeffs_tensor,
+                        verbose=False):
     """
     OLDER VERSION TO GENERATE BOND INTS FROM POLYNOMIAL DATA
     Constructs the Hamiltonian (H0), overlap matrix (S), their derivatives, and other DFTB-related
@@ -193,20 +189,19 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
     
     n_orbitals_per_atom = const.n_orb[TYPE]
         
-    H_INDEX_START = torch.zeros(Nr_atoms, dtype=torch.int64, device=RX.device)
-    H_INDEX_START[1:] = torch.cumsum(n_orbitals_per_atom, dim=0)[:-1]
-    H_INDEX_END = H_INDEX_START + n_orbitals_per_atom - 1
+    # H_INDEX_START = torch.zeros(Nr_atoms, dtype=torch.int64, device=RX.device)
+    # H_INDEX_START[1:] = torch.cumsum(n_orbitals_per_atom, dim=0)[:-1]
+    # H_INDEX_END = H_INDEX_START + n_orbitals_per_atom - 1
     
-    Mnuc = const.mass[TYPE]
-    Znuc = const.tore[TYPE]
+    #Znuc = const.tore[TYPE]
             
     # === Vectorized neighbor type pair generation ===
-    max_neighbors = nnType.shape[-1]
+    #max_neighbors = nnType.shape[-1]
 
     # Create mask for valid neighbors
-    neighbor_mask = torch.arange(max_neighbors, device=RX.device).unsqueeze(0) < nrnnlist
-    neighbor_J = nnType[neighbor_mask]
-    neighbor_I = torch.repeat_interleave(torch.arange(nrnnlist.squeeze(-1).shape[0], device=nrnnlist.device), nrnnlist.squeeze(-1))
+    # neighbor_mask = torch.arange(max_neighbors, device=RX.device).unsqueeze(0) < nrnnlist
+    # neighbor_J = nnType[neighbor_mask]
+    # neighbor_I = torch.repeat_interleave(torch.arange(nrnnlist.squeeze(-1).shape[0], device=nrnnlist.device), nrnnlist.squeeze(-1))
     
     print('  Load H integral params')
     import os
@@ -220,80 +215,78 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
     
     
     
-    Es_dict = torch.as_tensor([ 0.00000,
-       -6.492650686,                                                                                                                                                                                    0.0,
-        0.0,       0.0,                                                                                                                     0.0,  -13.73881005,  -18.5565,  -23.9377,       0.0,       0.0,
-        0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -4.3392,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        ],
-       dtype=RX.dtype, device=RX.device)
+    # Es_dict = torch.as_tensor([ 0.00000,
+    #    -6.492650686,                                                                                                                                                                                    0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,  -13.73881005,  -18.5565,  -23.9377,       0.0,       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -4.3392,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     ],
+    #    dtype=RX.dtype, device=RX.device)
     
-    Ep_dict = torch.as_tensor([ 0.00000,
-        0.0,                                                                                                                                                                                       0.0,
-        0.0,       0.0,                                                                                                                     0.0,   -5.28867445,   -7.0625,   -9.0035,       0.0,       0.0,
-        0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -0.7580,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        ],
-       dtype=RX.dtype, device=RX.device)
+    # Ep_dict = torch.as_tensor([ 0.00000,
+    #     0.0,                                                                                                                                                                                       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,   -5.28867445,   -7.0625,   -9.0035,       0.0,       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -0.7580,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     ],
+    #    dtype=RX.dtype, device=RX.device)
 
-    Ed_dict = torch.as_tensor([ 0.00000,
-        0.0,                                                                                                                                                                                       0.0,
-        0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -4.7987,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        ],
-       dtype=RX.dtype, device=RX.device)
+    # Ed_dict = torch.as_tensor([ 0.00000,
+    #     0.0,                                                                                                                                                                                       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,   -4.7987,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     ],
+    #    dtype=RX.dtype, device=RX.device)
     
-    U_dict = torch.as_tensor([ 0.0,
-        11.4151819,                                                                                                                                                                                   0.0,
-        0.0,       0.0,                                                                                                                     0.0,   9.923997,   17.3729,   11.8761,       0.0,       0.0,
-        0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,    6.2979,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
-        ],
-       dtype=RX.dtype, device=RX.device)
+    # U_dict = torch.as_tensor([ 0.0,
+    #     11.4151819,                                                                                                                                                                                   0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,   9.923997,   17.3729,   11.8761,       0.0,       0.0,
+    #     0.0,       0.0,                                                                                                                     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,    6.2979,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,       0.0,
+    #     ],
+    #    dtype=RX.dtype, device=RX.device)
     
-    Hubbard_U = torch.zeros(Nr_atoms, dtype=RX.dtype, device = RX.device)
-    Hubbard_U = U_dict[TYPE]
+    # Hubbard_U = torch.zeros(Nr_atoms, dtype=RX.dtype, device = RX.device)
+    # Hubbard_U = U_dict[TYPE]
     
-    print('  Do H diagonal')
-    hydro_mask = (const.n_orb[TYPE] == 1)  # True for hydrogen atoms (only s orbital)
-    non_hydro_mask = (const.n_orb[TYPE] == 4)
-    d_mask =  (const.n_orb[TYPE] == 9)
+    # print('  Do H diagonal')
+    # hydro_mask = (const.n_orb[TYPE] == 1)  # True for hydrogen atoms (only s orbital)
+    # non_hydro_mask = (const.n_orb[TYPE] == 4)
+    # d_mask =  (const.n_orb[TYPE] == 9)
 
-    # Shell on-site energies per atom (pulled from your dicts)
-    EsA = Es_dict[TYPE]   # (Nr_atoms,)
-    EpA = Ep_dict[TYPE]   # (Nr_atoms,)
-    EdA = Ed_dict[TYPE]   # (Nr_atoms,)
+    # # Shell on-site energies per atom (pulled from your dicts)
+    # EsA = Es_dict[TYPE]   # (Nr_atoms,)
+    # EpA = Ep_dict[TYPE]   # (Nr_atoms,)
+    # EdA = Ed_dict[TYPE]   # (Nr_atoms,)
 
-    # Which shells exist for each atom, based on your basis size:
-    # 1  -> H-like: s
-    # 4  -> main-group sp: s + 3*p
-    # 9  -> transition-metal spd: s + 3*p + 5*d
-    has_p = (const.n_orb[TYPE] >= 4)          # p present for 4 or 9
-    has_d = (const.n_orb[TYPE] == 9)          # d present only for 9 here
-    # (Optional: if you ever use sd-only (6 orbitals), set has_d |= (const.n_orb[TYPE] == 6)
-    #            and exclude p for that case.)
+    # # Which shells exist for each atom, based on your basis size:
+    # # 1  -> H-like: s
+    # # 4  -> main-group sp: s + 3*p
+    # # 9  -> transition-metal spd: s + 3*p + 5*d
+    # has_p = (const.n_orb[TYPE] >= 4)          # p present for 4 or 9
+    # has_d = (const.n_orb[TYPE] == 9)          # d present only for 9 here
+    # # (Optional: if you ever use sd-only (6 orbitals), set has_d |= (const.n_orb[TYPE] == 6)
+    # #            and exclude p for that case.)
 
-    # Build a per-atom template in the standard AO order: [s, px, py, pz, dxy, dyz, dzx, dx2-y2, dz2]
-    # (All p orbitals get EpA; all d orbitals get EdA.)
-    template = torch.stack(
-        (
-            EsA,             # s
-            EpA, EpA, EpA,   # p triplet
-            EdA, EdA, EdA, EdA, EdA  # d quintet
-        ),
-        dim=1,  # shape: (Nr_atoms, 9)
-    )
+    # # Build a per-atom template in the standard AO order: [s, px, py, pz, dxy, dyz, dzx, dx2-y2, dz2]
+    # # (All p orbitals get EpA; all d orbitals get EdA.)
+    # template = torch.stack(
+    #     (
+    #         EsA,             # s
+    #         EpA, EpA, EpA,   # p triplet
+    #         EdA, EdA, EdA, EdA, EdA  # d quintet
+    #     ),
+    #     dim=1,  # shape: (Nr_atoms, 9)
+    # )
 
-    # Per-atom mask telling which of the 9 positions are actually present
-    mask = torch.zeros_like(template, dtype=torch.bool)  # (Nr_atoms, 9)
-    mask[:, 0]    = True                                  # s always present
-    mask[:, 1:4]  = has_p.unsqueeze(1).expand(-1, 3)      # p block present?
-    mask[:, 4:9]  = has_d.unsqueeze(1).expand(-1, 5)      # d block present?
+    # # Per-atom mask telling which of the 9 positions are actually present
+    # mask = torch.zeros_like(template, dtype=torch.bool)  # (Nr_atoms, 9)
+    # mask[:, 0]    = True                                  # s always present
+    # mask[:, 1:4]  = has_p.unsqueeze(1).expand(-1, 3)      # p block present?
+    # mask[:, 4:9]  = has_d.unsqueeze(1).expand(-1, 5)      # d block present?
 
-    # Flatten row-by-row keeping only present orbitals for each atom.
-    # Result length = sum_i n_orb[i]
-    diagonal = template[mask]                              # 1-D tensor
+    #diagonal = template[mask]                              # 1-D tensor
 
 
 
@@ -329,7 +322,6 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
     #HDIM = sum(non_hydro_mask)*4 + sum(hydro_mask)
     HDIM = len(diagonal)
     H0 = torch.zeros((HDIM*HDIM), dtype=RX.dtype, device = RX.device)
-    H0_SKF = torch.zeros((HDIM*HDIM), dtype=RX.dtype, device = RX.device)
     pair_mask_HH = (const.n_orb[TYPE[neighbor_I]] == 1)*(const.n_orb[TYPE[neighbor_J]] == 1)
     pair_mask_HX = (const.n_orb[TYPE[neighbor_I]] == 1)*(const.n_orb[TYPE[neighbor_J]] == 4)
     pair_mask_XH = (const.n_orb[TYPE[neighbor_I]] == 4)*(const.n_orb[TYPE[neighbor_J]] == 1)    
@@ -360,32 +352,6 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
     pairs_tensor, pairs_list, label_list
 
     # Allocate padded tensors
-    n_pairs = len(label_list)
-    coeffs_tensor = torch.zeros((n_pairs, 499, 20, 4), device=RX.device)
-    #R_tensor = torch.zeros((n_pairs, 499), device=RX.device) # not necessarily if all R are the same. Makes sense to use zero padding if not.
-
-    pair_type_dict = {}
-
-    for i in range(len(label_list)):
-        pair_type_dict[label_list[i]] = i
-        R, channels = read_skf_table("sk_orig/mio-1-1/mio-1-1/{}.skf".format(label_list[i]))
-        channels_matrix = channels_to_matrix(channels)
-        coeffs = cubic_spline_coeffs(R, channels_matrix)
-        #R_tensor[i] = R
-        coeffs_tensor[i] = coeffs
-
-    
-    IJ_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=RX.device)
-    JI_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=RX.device)
-
-    for i in range(len(neighbor_I)):
-        IJ_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_I[i]]] + '-' + const.label[TYPE[neighbor_J[i]]]]
-        JI_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_J[i]]] + '-' + const.label[TYPE[neighbor_I[i]]]]
-
-    idx = torch.searchsorted(R, dR_mskd, right=True) - 1
-    idx = torch.clamp(idx, 0, len(R))
-    dx = (dR_mskd - R[idx])
-
     
     
     print('  Do H Slater-Koster')
@@ -394,26 +360,14 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
                                             fss_sigma, fsp_sigma, fps_sigma, fpp_sigma, fpp_pi,
                                             neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END)
     
-    print('  Do H Slater-Koster SKF')
-    H0_SKF, dH0_SKF = Slater_Koster_Pair_SKF_vectorized(H0_SKF, HDIM, dR_mskd, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
-                                            pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
-                                            dx, idx, IJ_pair_type, JI_pair_type, coeffs_tensor,
-                                            neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END,0)
-
 
     H0 = H0.reshape(HDIM,HDIM)
-    H0 = H0 + torch.transpose(H0, 0, 1) + torch.diag(diagonal)
+    H0 = H0 + torch.diag(diagonal)
     dH0 = dH0.reshape(3,HDIM,HDIM)
-    dH0 = dH0 - torch.transpose(dH0, 1, 2)
+    dH0 = dH0 #- torch.transpose(dH0, 1, 2)
     
-    H0_SKF = H0_SKF.reshape(HDIM,HDIM)
-    H0_SKF = H0_SKF + torch.transpose(H0_SKF, 0, 1) + torch.diag(diagonal)
-    dH0_SKF = dH0_SKF.reshape(3,HDIM,HDIM)
-    dH0_SKF = dH0_SKF - torch.transpose(dH0_SKF, 1, 2)
-
     #### S PART ###
     print('  Load S integral params')
-    import os
     param_dir = os.path.join(os.path.dirname(__file__), 'params')
     fss_sigma = LoadBondIntegralParameters(neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, 'S_fss_sigma.csv'))
     fsp_sigma = LoadBondIntegralParameters(neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, 'S_fsp_sigma.csv'))
@@ -428,20 +382,11 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
                                           fss_sigma, fsp_sigma, fps_sigma, fpp_sigma, fpp_pi,
                                           neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END)  
       
-    S_SKF = torch.zeros((HDIM*HDIM), dtype=RX.dtype, device = RX.device)
-    S_SKF, dS_SKF = Slater_Koster_Pair_SKF_vectorized(S_SKF, HDIM, dR_mskd, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
-                                            pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
-                                            dx, idx, IJ_pair_type, JI_pair_type, coeffs_tensor,
-                                            neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END,1)
     S = S.reshape(HDIM,HDIM)
-    S = S + torch.transpose(S, 0, 1) + torch.eye(HDIM, device=S.device)
+    S = S + torch.eye(HDIM, device=S.device)
     dS = dS.reshape(3,HDIM,HDIM)
-    dS = dS - torch.transpose(dS, 1, 2)
+    dS = dS #- torch.transpose(dS, 1, 2)
 
-    S_SKF = S_SKF.reshape(HDIM,HDIM)/27.21138625
-    S_SKF = S_SKF + torch.transpose(S_SKF, 0, 1) + torch.eye(HDIM, device=S_SKF.device)
-    dS_SKF = dS_SKF.reshape(3,HDIM,HDIM)/27.21138625
-    dS_SKF = dS_SKF - torch.transpose(dS_SKF, 1, 2)
 
     D0 = AtomicDensityMatrix(Nr_atoms, H_INDEX_START, H_INDEX_END, HDIM, Znuc)
 #     D0_ = AtomicDensityMatrix_vectorized(Nr_atoms, H_INDEX_START, H_INDEX_END, HDIM, Znuc)
@@ -455,4 +400,4 @@ def H0_and_S_vectorized_OLD_FOR_POLY(TYPE, RX, RY, RZ, LBox, Nr_atoms, nrnnlist,
 
 
 
-    return H0, dH0, S, dS, D0, H_INDEX_START, H_INDEX_END, TYPE, Mnuc, Znuc, Hubbard_U, neighbor_I, neighbor_J, H0_SKF, dH0_SKF, S_SKF, dS_SKF
+    return D0, H0, dH0, S, dS

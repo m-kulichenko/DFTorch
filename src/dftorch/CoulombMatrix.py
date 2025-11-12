@@ -4,7 +4,8 @@ import time
 
 def CoulombMatrix_vectorized(structure, RX, RY, RZ, LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
                   Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
-                  H_INDEX_START, H_INDEX_END):
+                  H_INDEX_START, H_INDEX_END,
+                  CALPHA, COULCUT, verbose=False):
     """
     Computes the real-space and reciprocal-space (k-space) Ewald-summed Coulomb matrix and its 
     derivatives for a system of atoms with periodic boundary conditions.
@@ -60,18 +61,9 @@ def CoulombMatrix_vectorized(structure, RX, RY, RZ, LBox, Hubbard_U, Hubbard_U_s
 
 
     print('CoulombMatrix_vectorized')
-    #torch.cuda.synchronize()
-    print('  Do Coulomb Real')
+    if verbose: print('  Do Coulomb Real')
     start_time1 = time.perf_counter()
-    
-    COULVOL = LBox[0] * LBox[1] * LBox[2]
-    SQRTX = math.sqrt(-math.log(Coulomb_acc))
-    CALPHA = math.sqrt(math.pi) * ((TIMERATIO * Nr_atoms / (COULVOL ** 2)) ** (1.0 / 6.0))
-    COULCUT = SQRTX / CALPHA
-    if COULCUT > 50.0:
-        COULCUT = 50.0
-        CALPHA = SQRTX / COULCUT
-    
+        
     Ra = torch.stack((RX.unsqueeze(-1), RY.unsqueeze(-1), RZ.unsqueeze(-1)), dim=-1)
     Rb = torch.stack((nnRx, nnRy, nnRz), dim=-1)
     Rab = Rb - Ra
@@ -83,16 +75,13 @@ def CoulombMatrix_vectorized(structure, RX, RY, RZ, LBox, Hubbard_U, Hubbard_U_s
     
     CC_real, dCC_dxyz_real = Ewald_Real_Space_vectorized2(structure,
                                 RX, RY, RZ, dR, dR_dxyz, dist_mask, 
-                                LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
-                                Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
-                                H_INDEX_START, H_INDEX_END, CALPHA)
+                                nnType, neighbor_I, neighbor_J,
+                                H_INDEX_START, H_INDEX_END, CALPHA, verbose)
 
-    CC_real_sr, dCC_dxyz_real_sr = Ewald_Real_Space_vectorized_sr(structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA)
     ##################
 
     dq_J = torch.zeros(Nr_atoms, dtype=RX.dtype, device = RX.device)
 
-    time_dict = {0:0, 1:0, 2:0, 3:0, 4:0, 5:0, 6:0}
 # this is a less vectorized option. may be more memory efficient?
 #     for J in range(Nr_atoms):
 #         torch.cuda.synchronize()
@@ -125,35 +114,21 @@ def CoulombMatrix_vectorized(structure, RX, RY, RZ, LBox, Hubbard_U, Hubbard_U_s
 #         torch.cuda.synchronize()
 #         time_dict[6] += time.perf_counter() - start_time2
         
-        
-#     print(CC_real_test - (CC_real + CC_real.T - torch.diag(torch.diagonal(CC_real))))
-#     print(torch.max(abs(CC_real_test - CC_real - CC_real.T)))
-#     print(torch.max(abs(dCC_dxyz_real_test - (dCC_dxyz_real - torch.transpose(dCC_dxyz_real, -1,-2) - torch.diag_embed(dCC_dxyz_real.diagonal(dim1=1, dim2=2)) )   )))
-
-    print("  Coulomb_Real t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+    print("  Coulomb_Real t {:.1f} s".format( time.perf_counter()-start_time1 ))
 
     
     ## Second, k-space
     start_time1 = time.perf_counter()
-    print('  Doing Coulomb k')
+    if verbose: print('  Doing Coulomb k')
 
-    CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, dq_J, Nr_atoms, Coulomb_acc, TIMERATIO)
-    idx = torch.arange(CC_k.size(0), device = RX.device).repeat_interleave(structure.n_shells_per_atom)
+    CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, dq_J, Nr_atoms, Coulomb_acc, TIMERATIO, CALPHA, COULCUT, verbose)
 
-    CC_k_expanded = CC_k[idx][:, idx]
-    dCC_dR_k_expanded = dCC_dR_k[:,idx][:,:, idx]
     print("  Coulomb_k t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
     
-    
-    #CC = CC_real + CC_real.T - torch.diag(torch.diagonal(CC_real)) + CC_k # this is for a less vectorized code
-    CC = CC_real #+ CC_k
+    CC = CC_real + CC_k
     dCC_dxyz = dCC_dxyz_real + dCC_dR_k
 
-    CC_sr = CC_real_sr #+ CC_k_expanded
-    dCC_dxyz_sr = dCC_dxyz_real_sr + dCC_dR_k_expanded
-
-
-    return CC, -dCC_dxyz, CC_sr, -dCC_dxyz_sr
+    return CC, -dCC_dxyz #, CC_sr, -dCC_dxyz_sr
 
 def Ewald_Real_Space_vectorized_sr(structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA):
     """
@@ -468,9 +443,8 @@ def coul_same_elem_and_ang(Ti_same_el, dR_mskd_same):
             (-Ti_same_el) * tmp + (2 * SSB * dR_mskd_same + SSC - 1. / dR_mskd_same**2))
     return t1, dt1
 
-def Ewald_Real_Space_vectorized2(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, LBox, Hubbard_U, Hubbard_U_sr, TYPE, Nr_atoms, HDIM,
-                  Coulomb_acc, TIMERATIO, nnRx, nnRy, nnRz, nrnnlist, nnType, neighbor_I, neighbor_J,
-                  H_INDEX_START, H_INDEX_END, CALPHA):
+def Ewald_Real_Space_vectorized2(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, nnType, neighbor_I, neighbor_J,
+                  H_INDEX_START, H_INDEX_END, CALPHA, verbose):
     """
     This one is vectorized in a fashion of SlaterKosterPair.py.
     Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its 
@@ -544,7 +518,9 @@ def Ewald_Real_Space_vectorized2(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, 
     SQRTPI = math.sqrt(math.pi)
     
     # Pair indices
-    nn_mask = nnType!=-1 # mask to exclude zero padding from the neigh list
+    nn_mask = nnType!=-1 #& dist_mask # mask to exclude zero padding from the neigh list
+    #neighbor_I = neighbor_I[nn_mask]; neighbor_J = neighbor_J[nn_mask]
+
     dR_mskd = dR[nn_mask]
     Ti = TFACT * structure.Hubbard_U[neighbor_I]
     Tj = TFACT * structure.Hubbard_U[neighbor_J]
@@ -783,7 +759,7 @@ def Ewald_Real_Space_vectorized(structure, RX, RY, RZ, dR, dR_dxyz, dist_mask, L
 
     return CC_real, dCC_dxyz_real
 
-def Ewald_k_Space_vectorized(RX, RY, RZ, LBox, DELTAQ, Nr_atoms, COULACC, TIMERATIO, do_vec=False):
+def Ewald_k_Space_vectorized(RX, RY, RZ, LBox, DELTAQ, Nr_atoms, COULACC, TIMERATIO, CALPHA, COULCUT, verbose, do_vec=False):
     """
     Computes the reciprocal-space (k-space) contribution to the Coulomb interaction matrix
     and its derivatives using the Ewald summation method.
@@ -831,12 +807,6 @@ def Ewald_k_Space_vectorized(RX, RY, RZ, LBox, DELTAQ, Nr_atoms, COULACC, TIMERA
 
     COULVOL = LBox[0] * LBox[1] * LBox[2]
     SQRTX = math.sqrt(-math.log(COULACC))
-    CALPHA = math.sqrt(math.pi) * ((TIMERATIO * Nr_atoms / (COULVOL ** 2)) ** (1/6))
-    COULCUT = SQRTX / CALPHA
-
-    if COULCUT > 50:
-        COULCUT = 50
-        CALPHA = SQRTX / COULCUT
 
     CALPHA2 = CALPHA * CALPHA
     KCUTOFF = 2 * CALPHA * SQRTX
@@ -898,9 +868,9 @@ def Ewald_k_Space_vectorized(RX, RY, RZ, LBox, DELTAQ, Nr_atoms, COULACC, TIMERA
         dC_dR[2] += (force_tmp*K_vectors[:, 2]).sum(-1)
     else:
         start_time = time.perf_counter()
-        print('   LMAX:', LMAX)
+        if verbose: print('   LMAX:', LMAX)
         for L in range(0, LMAX + 1):
-            print('  ',L)
+            if verbose: print('  ',L)
             MMIN = 0 if L == 0 else -MMAX
             for M in range(MMIN, MMAX + 1):
                 NMIN = 1 if (L == 0 and M == 0) else -NMAX

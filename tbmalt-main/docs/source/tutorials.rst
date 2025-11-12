@@ -1,4 +1,0 @@
-*********
-Tutorials
-*********
-:guilabel:`Placeholder Page`

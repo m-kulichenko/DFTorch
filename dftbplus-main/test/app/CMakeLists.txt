@@ -1,5 +1,0 @@
-add_subdirectory(dftb+)
-add_subdirectory(modes)
-if(WITH_TRANSPORT)
-  add_subdirectory(phonons)
-endif()

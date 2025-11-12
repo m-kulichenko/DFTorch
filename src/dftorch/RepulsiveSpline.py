@@ -5,9 +5,9 @@ def get_repulsion_energy(R_rep_tensor, rep_splines_tensor,
                          verbose
                          ):
 
-    nrnnlist_no_self, nndist_no_self, nnRx, nnRy, nnRz,\
-    nnType, nnStruct_no_self, nrnnStruct_no_self, neighbor_I, neighbor_J,\
-    IJ_pair_type, JI_pair_type  = \
+    _, _, nnRx, nnRy, nnRz,\
+    nnType, _, _, neighbor_I, neighbor_J,\
+    IJ_pair_type, _  = \
         vectorized_nearestneighborlist(TYPE, RX, RY, RZ, LBox, Rcut, Nats, const,
                                        upper_tri_only=True, remove_self_neigh=False, min_image_only=True,
                                        verbose=verbose);
@@ -41,5 +41,6 @@ def get_repulsion_energy(R_rep_tensor, rep_splines_tensor,
     # now, it's eV/A
     dVr = dVr.reshape(3,Nats,Nats)*27.21138625 /0.52917721
     dVr = dVr - torch.transpose(dVr, 1, 2)
+    del nnRx, nnRy, nnRz,nnType, neighbor_I, neighbor_J, IJ_pair_type, _
 
     return Vr, dVr

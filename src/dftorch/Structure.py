@@ -1,11 +1,11 @@
 import torch
 import time
 import copy
-from .readXYZ import read_xyz
 
 class Structure(torch.nn.Module):
     def __init__(self, TYPE, RX, RY, RZ,LBox,
                  const,
+                 charge=0,
                  device='cpu', *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.TYPE = TYPE
@@ -24,7 +24,7 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[TYPE]
         self.Znuc = const.tore[TYPE]
-        self.Nocc = int(const.tore[TYPE].sum()/2)
+        self.Nocc = int(const.tore[TYPE].sum()/2) - int(charge/2)
 
         self.Hubbard_U = const.U[TYPE]
 
