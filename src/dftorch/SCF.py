@@ -4,11 +4,16 @@ from .DM_Fermi import DM_Fermi
 from .DM_Fermi_x import DM_Fermi_x
 from .Kernel_Fermi import Kernel_Fermi
 from .Fermi_PRT import Canon_DM_PRT, Fermi_PRT
+from .Tools import calculate_dist_dips
+
+
+from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
+from sedacs.neighbor_list import NeighborState, calculate_displacement
 
 import time
 
 
-def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
+def SCFx(dftorch_params, structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
         U, Znuc, Nats, Te, alpha=0.5, MaxRank=3, start_Krylov=3, acc=1e-7, FelTol=1e-6, MAX_ITER=200, debug=False):
     """
     Performs a self-consistent field (SCF) cycle with finite electronic temperature
@@ -75,12 +80,19 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
     m = start_Krylov
     Fel = 100.0;
 
-    dtype = H0.dtype
     device = H0.device
     N = H0.shape[0]
     atom_ids = torch.repeat_interleave(torch.arange(len(structure.n_orbitals_per_atom), device=Rx.device), structure.n_orbitals_per_atom) # Generate atom index for each orbital
 
     Z = fractional_matrix_power_symm(S, -0.5)
+    if dftorch_params['coul_method'] == 'PME':
+        CALPHA, grid_dimensions = calculate_alpha_and_num_grids(structure.lattice_vecs.cpu().numpy(), dftorch_params['cutoff'], dftorch_params['Coulomb_acc'])
+        PME_data = init_PME_data(grid_dimensions, structure.lattice_vecs, CALPHA, dftorch_params['PME_order'])
+
+        nbr_state = NeighborState(torch.stack((structure.RX, structure.RY, structure.RZ)), structure.lattice_vecs, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=False)
+        disps, dists, nbr_inds = calculate_dist_dips(torch.stack((structure.RX, structure.RY, structure.RZ)), nbr_state, dftorch_params['cutoff'])
+
+
     #with torch.no_grad():
     if 1:
         Hdipole = torch.diag(-Rx[atom_ids] * Efield[0] - Ry[atom_ids] * Efield[1] - Rz[atom_ids] * Efield[2])
@@ -91,8 +103,6 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
         print('  Initial DM_Fermi')
 
         Dorth,Q,e,f,mu0 = DM_Fermi_x(Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
-        #torch.save(Z.T @ H0 @ Z, "/home/maxim/Projects/DFTB/DFTorch/tests/H0_orth.pt")
-        #torch.save(Dorth, "/home/maxim/Projects/DFTB/DFTorch/tests/Dorth.pt")
 
         D = Z @ Dorth @ Z.T
         DS = 2 * torch.diag(D @ S)
@@ -116,13 +126,30 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
             
             if debug: torch.cuda.synchronize()
             start_time1 = time.perf_counter()
-            #torch.save(q, "/home/maxim/Projects/DFTB/DFTorch/tests/q_iter_{}.pt".format(it))
-            CoulPot = C @ q
+
+            Ecoul_old = Ecoul.clone()
+            if dftorch_params['coul_method'] == 'PME':
+                ewald_e1, forces1, CoulPot =  calculate_PME_ewald(torch.stack((structure.RX, structure.RY, structure.RZ)),
+                    q,
+                    structure.lattice_vecs,
+                    nbr_inds,
+                    disps,
+                    dists,
+                    CALPHA,
+                    dftorch_params['cutoff'],
+                    PME_data,
+                	hubbard_u = structure.Hubbard_U,
+                    atomtypes = structure.TYPE,
+                    screening = 1,
+                    calculate_forces=1,
+                    calculate_dq=1,
+                                    )
+                Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * structure.Hubbard_U)
+            else:
+                CoulPot = C @ q
             Hcoul_diag = U[atom_ids] * q[atom_ids] + CoulPot[atom_ids]        
             Hcoul = 0.5 * (Hcoul_diag.unsqueeze(1) * S + S * Hcoul_diag.unsqueeze(0))  
             H = H0 + Hcoul
-
-            #torch.save(H, "/home/maxim/Projects/DFTB/DFTorch/tests/H_iter_{}.pt".format(it))
 
             if debug: torch.cuda.synchronize()
             print("  Hcoul {:.1f} s".format( time.perf_counter()-start_time1 ))
@@ -132,7 +159,6 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
             #Dorth,Q,e,f,mu0 = DM_Fermi_x((Z.T @ H @ Z).to(torch.float64), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
             Dorth,Q,e,f,mu0 = DM_Fermi_x((Z.T @ H @ Z), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
             Dorth = Dorth.to(torch.get_default_dtype())
-            #torch.save(Dorth, "/home/maxim/Projects/DFTB/DFTorch/tests/Dorth_iter_{}.pt".format(it))
 
             if it == m: # Calculate full kernel after m steps
                 #KK,D0 = Kernel_Fermi(structure, mu0,Te,structure.Nats,H,C,S,Z,Q,e)
@@ -141,12 +167,10 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
 
             if debug: torch.cuda.synchronize()
             print("  DM_Fermi {:.1f} s".format( time.perf_counter()-start_time1 ))
-
             start_time1 = time.perf_counter()
             
             #D = Z.to(torch.float32) @ Dorth.to(torch.float32) @ Z.T.to(torch.float32)
             D = Z @ Dorth @ Z.T
-
 
             if debug: torch.cuda.synchronize()
             print("  Z@Dorth@Z.T {:.1f} s".format( time.perf_counter()-start_time1 ))
@@ -160,7 +184,7 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
             Res = q - q_old
             ResNorm = torch.norm(Res)
             K0Res = KK@Res
-            #torch.save(Res, "/home/maxim/Projects/DFTB/DFTorch/tests/Res_iter_{}.pt".format(it))
+
             # Preconditioned Low-Rank Krylov SCF acceleration
             vi = torch.zeros(Nats,MaxRank, device=Rx.device)
             fi = torch.zeros(Nats,MaxRank, device=Rx.device)
@@ -168,10 +192,8 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
                 # Preconditioned residual
                 K0Res = KK0 @ Res
                 dr = K0Res.clone()
-                #torch.save(dr, "/home/maxim/Projects/DFTB/DFTorch/tests/dr_iter_{}.pt".format(it))
                 I = 0
                 Fel = torch.tensor(float('inf'), dtype=q.dtype, device=q.device)
-
                 while (I < MaxRank) and (Fel > FelTol):
                     
                     # Normalize current direction
@@ -190,32 +212,45 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
                         # vi[:, I] = vi[:, I] - Vprev @ (Vprev.T @ vi[:, I])
                         Vprev = vi[:, :I]                        # (Nats, I)
                         vi[:, I] = vi[:, I] - Vprev @ (Vprev.T @ vi[:, I])
-                        #vi[:, I] = vi[:, I] - Vprev @ (Vprev.T @ vi[:, I])
 
                     norm_vi = torch.norm(vi[:, I])
                     if norm_vi < 1e-8:
                         print('zero norm_vi')
                         break
                     vi[:, I] = vi[:, I] / norm_vi
-
                     v = vi[:, I].clone()  # current search direction
-                    #torch.save(v, "/home/maxim/Projects/DFTB/DFTorch/tests/v_{}.pt".format(I))
 
                     # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
-                    d_CoulPot = C @ v
                     
-                    #torch.save(d_CoulPot, "/home/maxim/Projects/DFTB/DFTorch/tests/d_CoulPot_{}.pt".format(I))
+                    if dftorch_params['coul_method'] == 'PME':
+                        ewald_e1, forces1, d_CoulPot =  calculate_PME_ewald(torch.stack((structure.RX, structure.RY, structure.RZ)),
+                            v,
+                            structure.lattice_vecs,
+                            nbr_inds,
+                            disps,
+                            dists,
+                            CALPHA,
+                            dftorch_params['cutoff'],
+                            PME_data,
+                            hubbard_u = structure.Hubbard_U,
+                            atomtypes = structure.TYPE,
+                            screening = 1,
+                            calculate_forces=1,
+                            calculate_dq=1,
+                                            )
+
+                    else:
+                        d_CoulPot = C @ v
+                    
                     d_Hcoul_diag = U[atom_ids] * v[atom_ids] + d_CoulPot[atom_ids]
                     d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
                     
-                    #torch.save(d_Hcoul, "/home/maxim/Projects/DFTB/DFTorch/tests/d_Hcoul_{}.pt".format(I))
                     H1_orth = Z.T @ d_Hcoul @ Z
 
                     # First-order density response (canonical Fermi PRT)
                     #D0, D1 = Canon_DM_PRT(H1_orth, Te, Q, e, mu0, 10)
                     D0, D1 = Fermi_PRT(H1_orth, Te, Q, e, mu0)
 
-                    #torch.save(D1, "/home/maxim/Projects/DFTB/DFTorch/tests/D1_{}.pt".format(I))
                     D1 = Z @ D1 @ Z.T
                     D1S = 2 * torch.diag(D1 @ S)
 
@@ -243,15 +278,12 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
                     # Qy, R = torch.linalg.qr(F_small, mode='reduced')   # F = Q R
                     # Y = torch.linalg.solve(R, Qy.T @ K0Res)
 
-
                     # Residual norm in the subspace
                     Fel = torch.norm(F_small @ Y - K0Res)
                     print('rank:', I, Fel.item())
                     I += 1
                     
-
                 # Combine correction: K0Res := V Y
-                
                 step = (vi[:, :rank_m] @ Y)
                 # ##### Trust region relative to the preconditioned residual
                 # base = torch.norm(KK0 @ Res)
@@ -263,14 +295,16 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
             # Mixing update (vector-form)
             q = q_old - K0Res
 
-
             if debug: torch.cuda.synchronize()
             #print("  update q {:.1f} s".format( time.perf_counter()-start_time1 ))
             
             Eband0_old = Eband0.clone()
-            Ecoul_old = Ecoul.clone()
             Eband0 = 2 * torch.trace(H0 @ (D-D0))
-            Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+            
+            if dftorch_params['coul_method'] == 'PME':
+                1
+            else:
+                Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
 
             dEb = torch.abs(Eband0_old - Eband0)
 
@@ -278,15 +312,34 @@ def SCFx(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
             if it == MAX_ITER:
                 print('Did not converge')
 
-            
         f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
 
     D = Z @ Dorth @ Z.T
     DS = 2 * (D * S.T).sum(dim=1)
     q = -1.0 * Znuc
     q.scatter_add_(0, atom_ids, DS)
+    if dftorch_params['coul_method'] == 'PME':
+        ewald_e1, forces1, dq_p1 =  calculate_PME_ewald(torch.stack((structure.RX, structure.RY, structure.RZ)),
+                        q,
+                        structure.lattice_vecs,
+                        nbr_inds,
+                        disps,
+                        dists,
+                        CALPHA,
+                        dftorch_params['cutoff'],
+                        PME_data,
+                        hubbard_u = structure.Hubbard_U,
+                        atomtypes = structure.TYPE,
+                        screening = 1,
+                        calculate_forces=1,
+                        calculate_dq=1,
+                    )
+        Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * structure.Hubbard_U)
+    else:
+        Ecoul, forces1, dq_p1 = None, None, None
 
-    return H, Hcoul, Hdipole, KK, D, q, f, mu0
+
+    return H, Hcoul, Hdipole, KK, D, q, f, mu0, Ecoul, forces1, dq_p1
 
 
 def SCF(structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,

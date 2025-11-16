@@ -1,6 +1,7 @@
 import torch
-
 from .Constants import Constants 
+
+from sedacs.neighbor_list import NeighborState, calculate_displacement
 
 def fractional_matrix_power_symm(A, power, method="auto", jitter: float = 1e-8):
     if power == -0.5 and method == "cholesky":
@@ -77,3 +78,12 @@ def list_global_tensors(ns=None):
         total += bytes_
         print(f"{name:>24}  size={bytes_/1e6:9.2f} MB  shape={tuple(t.shape)}  dtype={t.dtype}  device={t.device}  grad={t.requires_grad}")
     print(f"Total tensors: {len(rows)}  total size={total/1e6:.2f} MB")
+
+def calculate_dist_dips(pos_T, long_nbr_state, cutoff):
+    nbr_inds = long_nbr_state.nbr_inds
+    disps = calculate_displacement(pos_T.to(torch.float64), nbr_inds,
+                                long_nbr_state.lattice_lengths.to(torch.float64))
+    dists = torch.linalg.norm(disps, dim=0)
+    nbr_inds = torch.where((dists > cutoff) | (dists == 0.0), -1, nbr_inds)
+    dists = torch.where(dists == 0, 1, dists)
+    return disps.to(pos_T.dtype), dists.to(pos_T.dtype), nbr_inds
