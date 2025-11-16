@@ -49,7 +49,7 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     
     #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
-    start_time1 = time.perf_counter()
+    #start_time1 = time.perf_counter()
 
     dtype = H.dtype
     device = H.device
@@ -135,7 +135,7 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
-    print("Forces t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+    #print("Forces t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
 
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
