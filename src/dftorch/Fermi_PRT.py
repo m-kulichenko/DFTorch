@@ -4,8 +4,6 @@ def Fermi_PRT(H1, Te, Q, ev, mu0):
     kB = 8.61739e-5; # eV/K;
     beta = 1/(kB*Te)
 
-    N  = max(H1.shape)
-
     QH1Q = Q.T @ H1 @ Q
     fe = 1./(torch.exp(beta*(ev-mu0))+1.0)
     ei = ev[:, None]
