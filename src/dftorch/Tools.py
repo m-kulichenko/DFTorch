@@ -4,7 +4,7 @@ from .Constants import Constants
 from sedacs.neighbor_list import NeighborState, calculate_displacement
 
 @torch.compile
-def fractional_matrix_power_symm(A, power, method="auto", jitter: float = 1e-8):
+def fractional_matrix_power_symm(A, power=-0.5, method="auto", jitter: float = 1e-8):
     if power == -0.5 and method == "cholesky":
         # Promote to float64 for numerical stability
         n = A.shape[0]
