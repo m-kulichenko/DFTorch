@@ -4,6 +4,8 @@ from .BondIntegral import *
 from .SlaterKosterPair import Slater_Koster_Pair_vectorized, Slater_Koster_Pair_SKF_vectorized
 from .AtomicDensityMatrix import AtomicDensityMatrix, AtomicDensityMatrix_vectorized
 from .Tools import ordered_pairs_from_TYPE
+
+#@torch.compile
 def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_INDEX_END, Znuc,
                         nnRx, nnRy, nnRz, nnType,
                         const, neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type,
