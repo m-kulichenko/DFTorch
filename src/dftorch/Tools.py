@@ -3,29 +3,40 @@ from .Constants import Constants
 
 from sedacs.neighbor_list import NeighborState, calculate_displacement
 
+# compile options you can tweak:
+# - dynamic=True if matrix size can change between calls
+# - mode="reduce-overhead" or "max-autotune" for more perf after warmup
 @torch.compile
-def fractional_matrix_power_symm(A, power=-0.5, method="auto", jitter: float = 1e-8):
-    if power == -0.5 and method == "cholesky":
-        # Promote to float64 for numerical stability
-        n = A.shape[0]
-        I = torch.eye(n, device=A.device)
-        # Scale-aware jitter
-        diag_mean = torch.clamp(A.diagonal().abs().mean(), min=1.0)
-        J = (jitter * diag_mean).item()
-        L = torch.linalg.cholesky(A + J * I)          # A ≈ L L^T
-        Z = torch.linalg.inv(L)                         # canonical inverse factor (Z^T S Z = I)
-        return Z
+def fractional_matrix_power_symm(A: torch.Tensor, power: float = -0.5) -> torch.Tensor:
+    """
+    Compute A^power for (batch of) symmetric PSD matrices A using eigendecomposition.
+    Shape: A (..., n, n) -> (..., n, n)
+    """
+    # eigh handles symmetric real matrices; returns real eigenpairs
+    w, Q = torch.linalg.eigh(A)                   # w (..., n), Q (..., n, n)
+
+    # clamp tiny/negative eigenvalues to keep things real/stable for negative powers
+    eps = torch.finfo(A.dtype).eps
+    w = torch.clamp(w, min=eps)
+
+    # raise eigenvalues to the power; avoid torch.diag / torch.diag_embed to keep fusion
+    d = w.pow(power)                              # (..., n)
+
+    # Q @ diag(d) == column-scale Q by d
+    Q_scaled = Q * d.unsqueeze(-2)               # (..., n, n), scales columns by d_j
+
+    # A^p = Q @ diag(d) @ Q^T
+    return Q_scaled @ Q.transpose(-2, -1)
+
+# #@torch.compile
+# def fractional_matrix_power_symm(A, power=-0.5):
     
-    # Symmetric fractional matrix power using eigendecomposition
-    eigvals, eigvecs = torch.linalg.eigh(A)
-    # eigvals, eigvecs = torch.linalg.eigh(A.to(torch.float64))
-    # eigvals = eigvals.to(torch.float32)
-    # eigvecs = eigvecs.to(torch.float32)
+#     # Symmetric fractional matrix power using eigendecomposition
+#     eigvals, eigvecs = torch.linalg.eigh(A)
 
-
-    eigvals_clamped = torch.clamp(eigvals, min=1e-12)
-    D_power = torch.diag(eigvals_clamped ** power)
-    return eigvecs @ D_power @ eigvecs.T
+#     eigvals_clamped = torch.clamp(eigvals, min=1e-12)
+#     D_power = torch.diag(eigvals_clamped ** power)
+#     return eigvecs @ D_power @ eigvecs.T
 
 def ordered_pairs_from_TYPE(TYPE: torch.Tensor, const: Constants = None):
     """
