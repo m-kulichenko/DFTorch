@@ -2,7 +2,7 @@ import torch
 import time
 from .BondIntegral import *
 from .SlaterKosterPair import Slater_Koster_Pair_vectorized, Slater_Koster_Pair_SKF_vectorized
-from .AtomicDensityMatrix import AtomicDensityMatrix, AtomicDensityMatrix_vectorized
+from .AtomicDensityMatrix import AtomicDensityMatrix
 from .Tools import ordered_pairs_from_TYPE
 
 #@torch.compile
@@ -50,11 +50,7 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_I
     Rab_X = nnRx - RX.unsqueeze(-1)
     Rab_Y = nnRy - RY.unsqueeze(-1)
     Rab_Z = nnRz - RZ.unsqueeze(-1)
-    
-    # Rab_X = Rab_X - LBox[0] * torch.round(Rab_X / LBox[0])
-    # Rab_Y = Rab_Y - LBox[1] * torch.round(Rab_Y / LBox[1])
-    # Rab_Z = Rab_Z - LBox[2] * torch.round(Rab_Z / LBox[2])
-    
+        
     dR = torch.norm(torch.stack((Rab_X, Rab_Y, Rab_Z), dim=-1), dim=-1)
     
     L = Rab_X/dR
@@ -74,17 +70,16 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_I
     
     #HDIM = sum(non_hydro_mask)*4 + sum(hydro_mask)
     HDIM = len(diagonal)
-    H0 = torch.zeros((HDIM*HDIM), dtype=RX.dtype, device = RX.device)
-    pair_mask_HH = (const.n_orb[TYPE[neighbor_I]] == 1)*(const.n_orb[TYPE[neighbor_J]] == 1)
-    pair_mask_HX = (const.n_orb[TYPE[neighbor_I]] == 1)*(const.n_orb[TYPE[neighbor_J]] == 4)
-    pair_mask_XH = (const.n_orb[TYPE[neighbor_I]] == 4)*(const.n_orb[TYPE[neighbor_J]] == 1)    
-    pair_mask_XX = (const.n_orb[TYPE[neighbor_I]] == 4)*(const.n_orb[TYPE[neighbor_J]] == 4)
+    pair_mask_HH = (const.n_orb[TYPE[neighbor_I]] == 1)&(const.n_orb[TYPE[neighbor_J]] == 1)
+    pair_mask_HX = (const.n_orb[TYPE[neighbor_I]] == 1)&(const.n_orb[TYPE[neighbor_J]] == 4)
+    pair_mask_XH = (const.n_orb[TYPE[neighbor_I]] == 4)&(const.n_orb[TYPE[neighbor_J]] == 1)    
+    pair_mask_XX = (const.n_orb[TYPE[neighbor_I]] == 4)&(const.n_orb[TYPE[neighbor_J]] == 4)
 
-    pair_mask_HY = (const.n_orb[TYPE[neighbor_I]] == 1)*(const.n_orb[TYPE[neighbor_J]] == 9)
-    pair_mask_XY = (const.n_orb[TYPE[neighbor_I]] == 4)*(const.n_orb[TYPE[neighbor_J]] == 9)
-    pair_mask_YH = (const.n_orb[TYPE[neighbor_I]] == 9)*(const.n_orb[TYPE[neighbor_J]] == 1)
-    pair_mask_YX = (const.n_orb[TYPE[neighbor_I]] == 9)*(const.n_orb[TYPE[neighbor_J]] == 4)
-    pair_mask_YY = (const.n_orb[TYPE[neighbor_I]] == 9)*(const.n_orb[TYPE[neighbor_J]] == 9)
+    pair_mask_HY = (const.n_orb[TYPE[neighbor_I]] == 1)&(const.n_orb[TYPE[neighbor_J]] == 9)
+    pair_mask_XY = (const.n_orb[TYPE[neighbor_I]] == 4)&(const.n_orb[TYPE[neighbor_J]] == 9)
+    pair_mask_YH = (const.n_orb[TYPE[neighbor_I]] == 9)&(const.n_orb[TYPE[neighbor_J]] == 1)
+    pair_mask_YX = (const.n_orb[TYPE[neighbor_I]] == 9)&(const.n_orb[TYPE[neighbor_J]] == 4)
+    pair_mask_YY = (const.n_orb[TYPE[neighbor_I]] == 9)&(const.n_orb[TYPE[neighbor_J]] == 9)
 
     nn_mask = nnType!=-1 # mask to exclude zero padding from the neigh list
     dR_mskd = dR[nn_mask]
@@ -109,31 +104,26 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_I
     start_time5 = time.perf_counter()
 
     if verbose: print('  Do H and S')
-    H0, dH0 = Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR_mskd, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
+    H0, dH0 = Slater_Koster_Pair_SKF_vectorized(HDIM, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
                                             pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
                                             pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY,
                                             dx, idx, IJ_pair_type, JI_pair_type, coeffs_tensor,
-                                            neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END,0)
+                                            neighbor_I, neighbor_J, H_INDEX_START,0)
     
     H0 = H0.reshape(HDIM,HDIM)
-    #H0 = H0 + torch.transpose(H0, 0, 1) + torch.diag(diagonal)
     H0 = H0 + torch.diag(diagonal)
     dH0 = dH0.reshape(3,HDIM,HDIM)
-    #dH0 = dH0 - torch.transpose(dH0, 1, 2)
 
     #### S PART ###      
-    S = torch.zeros((HDIM*HDIM), dtype=RX.dtype, device = RX.device)
-    S, dS = Slater_Koster_Pair_SKF_vectorized(S, HDIM, dR_mskd, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
+    S, dS = Slater_Koster_Pair_SKF_vectorized(HDIM, dR_dxyz, L_mskd, M_mskd, N_mskd, L_dxyz, M_dxyz, N_dxyz,
                                             pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
                                             pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY,
                                             dx, idx, IJ_pair_type, JI_pair_type, coeffs_tensor,
-                                            neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END,1)
+                                            neighbor_I, neighbor_J, H_INDEX_START,1)
 
     S = S.reshape(HDIM,HDIM)/27.21138625
-    #S = S + torch.transpose(S, 0, 1) + torch.eye(HDIM, device=S.device)
     S = S + torch.eye(HDIM, device=S.device)
     dS = dS.reshape(3,HDIM,HDIM)/27.21138625
-    #dS = dS - torch.transpose(dS, 1, 2)
 
     if verbose: print("  t <H and S> {:.1f} s\n".format( time.perf_counter()-start_time5 ))
     start_time6 = time.perf_counter()
@@ -144,7 +134,6 @@ def H0_and_S_vectorized(TYPE, RX, RY, RZ, Nr_atoms, diagonal, H_INDEX_START, H_I
     if verbose: print("  t <D0> {:.1f} s\n".format( time.perf_counter()-start_time6 ))
     print("H0_and_S t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
     return D0, H0, dH0, S, dS
-
 
 
 

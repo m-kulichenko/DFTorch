@@ -89,7 +89,7 @@ def SCFx(dftorch_params, structure, D0, H0, S, Efield, C, Rx, Ry, Rz, nocc,
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(structure.lattice_vecs.cpu().numpy(), dftorch_params['cutoff'], dftorch_params['Coulomb_acc'])
         PME_data = init_PME_data(grid_dimensions, structure.lattice_vecs, CALPHA, dftorch_params['PME_order'])
 
-        nbr_state = NeighborState(torch.stack((structure.RX, structure.RY, structure.RZ)), structure.lattice_vecs, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=False)
+        nbr_state = NeighborState(torch.stack((structure.RX, structure.RY, structure.RZ)), structure.lattice_vecs, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=True)
         disps, dists, nbr_inds = calculate_dist_dips(torch.stack((structure.RX, structure.RY, structure.RZ)), nbr_state, dftorch_params['cutoff'])
 
 

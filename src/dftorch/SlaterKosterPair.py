@@ -1,12 +1,12 @@
 import torch
 from .BondIntegral import *
 
-
-def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_dxyz, N_dxyz,
+@torch.compile(fullgraph=True, dynamic=True)  # optional extra flags
+def Slater_Koster_Pair_SKF_vectorized(HDIM, dR_dxyz, L, M, N, L_dxyz, M_dxyz, N_dxyz,
                                   pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
                                   pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY,
                                   dx, idx, IJ_pair_type, JI_pair_type, coeffs_tensor,
-                                  neighbor_I, neighbor_J, nnType, H_INDEX_START, H_INDEX_END, SH_shift):
+                                  neighbor_I, neighbor_J, H_INDEX_START, SH_shift):
     """
     Compute the Slater-Koster matrix elements and their derivatives for pairs of atoms 
     using vectorized operations for efficiency.
@@ -86,12 +86,12 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1
     
+    H0 = torch.zeros((HDIM*HDIM), dtype=dR_dxyz.dtype, device = dR_dxyz.device)
     dH0 = torch.zeros(3,HDIM*HDIM, dtype=H0.dtype, device=H0.device)
     
     #######
     coeffs_selected = coeffs_tensor[IJ_pair_type, idx, 9 + SH_shift*10]
     HSSS_all  = coeffs_selected[:,0] + coeffs_selected[:,1]*dx + coeffs_selected[:,2]*dx**2 + coeffs_selected[:,3]*dx**3
-    #H0[ H_INDEX_START[neighbor_I]*HDIM + H_INDEX_START[neighbor_J] ] = HSSS_all
     H0.index_add_(0, H_INDEX_START[neighbor_I]*HDIM + H_INDEX_START[neighbor_J], HSSS_all)
     HSSS_dR  = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*dx + 3*coeffs_selected[:,3]*dx**2
     #######
@@ -99,20 +99,18 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     # H-H        
     ######### dH/dx
     HSSS_dxyz = HSSS_dR * dR_dxyz
-    #dH0[:, H_INDEX_START[neighbor_I]*HDIM + H_INDEX_START[neighbor_J] ] = HSSS_dxyz
     dH0.index_add_(1, H_INDEX_START[neighbor_I]*HDIM + H_INDEX_START[neighbor_J], HSSS_dxyz)
     #########
 
     # H-X
     ###### HSPS_all
-    tmp_mask = pair_mask_HX + pair_mask_XX + pair_mask_HY + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp_mask = pair_mask_HX | pair_mask_XX | pair_mask_HY | pair_mask_YY | pair_mask_XY | pair_mask_YX
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 8 + SH_shift*10]
+    sel_IJ = IJ_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 8 + SH_shift*10]
     HSPS_all = coeffs_selected[:,0] + coeffs_selected[:,1]*dx[tmp_mask] + coeffs_selected[:,2]*dx[tmp_mask]**2 + coeffs_selected[:,3]*dx[tmp_mask]**3
-    # H0[ idx_row*HDIM + idx_col +1] = L[tmp_mask]*HSPS_all
-    # H0[ idx_row*HDIM + idx_col +2] = M[tmp_mask]*HSPS_all
-    # H0[ idx_row*HDIM + idx_col +3] = N[tmp_mask]*HSPS_all
 
     H0.index_add_(0, idx_row*HDIM + idx_col +1, L[tmp_mask]*HSPS_all)
     H0.index_add_(0, idx_row*HDIM + idx_col +2, M[tmp_mask]*HSPS_all)
@@ -122,24 +120,19 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     HSPS_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*dx[tmp_mask] + 3*coeffs_selected[:,3]*dx[tmp_mask]**2
     HSPS_dxyz = HSPS_dR * dR_dxyz[:, tmp_mask]
             
-    # dH0[:, idx_row*HDIM + idx_col +1] = L[tmp_mask]*HSPS_dxyz + L_dxyz[:, tmp_mask]*HSPS_all
-    # dH0[:, idx_row*HDIM + idx_col +2] = M[tmp_mask]*HSPS_dxyz + M_dxyz[:, tmp_mask]*HSPS_all
-    # dH0[:, idx_row*HDIM + idx_col +3] = N[tmp_mask]*HSPS_dxyz + N_dxyz[:, tmp_mask]*HSPS_all
-
     dH0.index_add_(1, idx_row*HDIM + idx_col +1, L[tmp_mask]*HSPS_dxyz + L_dxyz[:, tmp_mask]*HSPS_all)
     dH0.index_add_(1, idx_row*HDIM + idx_col +2, M[tmp_mask]*HSPS_dxyz + M_dxyz[:, tmp_mask]*HSPS_all)
     dH0.index_add_(1, idx_row*HDIM + idx_col +3, N[tmp_mask]*HSPS_dxyz + N_dxyz[:, tmp_mask]*HSPS_all)
     #########
 
     ### HPSS_all ###
-    tmp_mask = pair_mask_XH + pair_mask_XX + pair_mask_YH + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp_mask = pair_mask_XH | pair_mask_XX | pair_mask_YH | pair_mask_YY | pair_mask_XY | pair_mask_YX
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
-    coeffs_selected = coeffs_tensor[JI_pair_type[tmp_mask], idx[tmp_mask], 8 + SH_shift*10]
+    sel_IJ = JI_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 8 + SH_shift*10]
     HPSS_all = coeffs_selected[:,0] + coeffs_selected[:,1]*dx[tmp_mask] + coeffs_selected[:,2]*dx[tmp_mask]**2 + coeffs_selected[:,3]*dx[tmp_mask]**3
-    # H0[ (idx_row +1)*HDIM + idx_col] = -L[tmp_mask]*HPSS_all
-    # H0[ (idx_row +2)*HDIM + idx_col] = -M[tmp_mask]*HPSS_all
-    # H0[ (idx_row +3)*HDIM + idx_col] = -N[tmp_mask]*HPSS_all
 
     H0.index_add_(0, (idx_row +1)*HDIM + idx_col, -L[tmp_mask]*HPSS_all)
     H0.index_add_(0, (idx_row +2)*HDIM + idx_col, -M[tmp_mask]*HPSS_all)
@@ -150,29 +143,25 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     HPSS_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*dx[tmp_mask] + 3*coeffs_selected[:,3]*dx[tmp_mask]**2
     HPSS_dxyz = HPSS_dR * dR_dxyz[:, tmp_mask]
         
-    # dH0[:, (idx_row +1)*HDIM + idx_col] = -L[tmp_mask]*HPSS_dxyz - L_dxyz[:,tmp_mask]*HPSS_all
-    # dH0[:, (idx_row +2)*HDIM + idx_col] = -M[tmp_mask]*HPSS_dxyz - M_dxyz[:,tmp_mask]*HPSS_all
-    # dH0[:, (idx_row +3)*HDIM + idx_col] = -N[tmp_mask]*HPSS_dxyz - N_dxyz[:,tmp_mask]*HPSS_all
-
     dH0.index_add_(1, (idx_row +1)*HDIM + idx_col, -L[tmp_mask]*HPSS_dxyz - L_dxyz[:,tmp_mask]*HPSS_all)
     dH0.index_add_(1, (idx_row +2)*HDIM + idx_col, -M[tmp_mask]*HPSS_dxyz - M_dxyz[:,tmp_mask]*HPSS_all)
     dH0.index_add_(1, (idx_row +3)*HDIM + idx_col, -N[tmp_mask]*HPSS_dxyz - N_dxyz[:,tmp_mask]*HPSS_all)
     #########
     
     # X-X
-    tmp_mask = pair_mask_XX + pair_mask_YY + pair_mask_XY + pair_mask_YX
+    tmp_mask = pair_mask_XX | pair_mask_YY | pair_mask_XY | pair_mask_YX
     L_XX = L[tmp_mask]
     M_XX = M[tmp_mask]
     N_XX = N[tmp_mask]
-    dR_XX = dR[tmp_mask]
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
-
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 5 + SH_shift*10]
+    sel_IJ = IJ_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 5 + SH_shift*10]
     HPPS = coeffs_selected[:,0] + coeffs_selected[:,1]*dx[tmp_mask] + coeffs_selected[:,2]*dx[tmp_mask]**2 + coeffs_selected[:,3]*dx[tmp_mask]**3
     HPPS_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*dx[tmp_mask] + 3*coeffs_selected[:,3]*dx[tmp_mask]**2
-
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 6 + SH_shift*10]
+    
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 6 + SH_shift*10]
     HPPP = coeffs_selected[:,0] + coeffs_selected[:,1]*dx[tmp_mask] + coeffs_selected[:,2]*dx[tmp_mask]**2 + coeffs_selected[:,3]*dx[tmp_mask]**3
     HPPP_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*dx[tmp_mask] + 3*coeffs_selected[:,3]*dx[tmp_mask]**2
 
@@ -187,29 +176,17 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     PZPY = N_XX * M_XX * PPSMPP
     PZPZ = HPPP + N_XX * N_XX * PPSMPP
 
-    # H0[ (idx_row+1)*HDIM + idx_col +1] = PXPX
-    # H0[ (idx_row+1)*HDIM + idx_col +2] = PXPY
-    # H0[ (idx_row+1)*HDIM + idx_col +3] = PXPZ
-
     H0.index_add_(0, (idx_row+1)*HDIM + idx_col +1, PXPX)
     H0.index_add_(0, (idx_row+1)*HDIM + idx_col +2, PXPY)
     H0.index_add_(0, (idx_row+1)*HDIM + idx_col +3, PXPZ)
     
     ####
 
-    # H0[ (idx_row+2)*HDIM + idx_col +1] = PYPX
-    # H0[ (idx_row+2)*HDIM + idx_col +2] = PYPY
-    # H0[ (idx_row+2)*HDIM + idx_col +3] = PYPZ
-
     H0.index_add_(0, (idx_row+2)*HDIM + idx_col +1, PYPX)
     H0.index_add_(0, (idx_row+2)*HDIM + idx_col +2, PYPY)
     H0.index_add_(0, (idx_row+2)*HDIM + idx_col +3, PYPZ)
     
     ####
-
-    # H0[ (idx_row+3)*HDIM + idx_col +1] = PZPX
-    # H0[ (idx_row+3)*HDIM + idx_col +2] = PZPY
-    # H0[ (idx_row+3)*HDIM + idx_col +3] = PZPZ
 
     H0.index_add_(0, (idx_row+3)*HDIM + idx_col +1, PZPX)
     H0.index_add_(0, (idx_row+3)*HDIM + idx_col +2, PZPY)
@@ -236,39 +213,32 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     PZPZ_dxyz = HPPP_dxyz + (N_XX**2) * PPSMPP_dxyz + 2*N_XX*N_dxyz_XX * PPSMPP
 
     ####
-    # dH0[:, (idx_row+1)*HDIM + idx_col +1] = PXPX_dxyz
-    # dH0[:, (idx_row+1)*HDIM + idx_col +2] = PXPY_dxyz
-    # dH0[:, (idx_row+1)*HDIM + idx_col +3] = PXPZ_dxyz
     dH0.index_add_(1, (idx_row+1)*HDIM + idx_col +1, PXPX_dxyz)
     dH0.index_add_(1, (idx_row+1)*HDIM + idx_col +2, PXPY_dxyz)
     dH0.index_add_(1, (idx_row+1)*HDIM + idx_col +3, PXPZ_dxyz)
         
     ####    
-    # dH0[:, (idx_row+2)*HDIM + idx_col +1] = PYPX_dxyz
-    # dH0[:, (idx_row+2)*HDIM + idx_col +2] = PYPY_dxyz
-    # dH0[:, (idx_row+2)*HDIM + idx_col +3] = PYPZ_dxyz
     dH0.index_add_(1, (idx_row+2)*HDIM + idx_col +1, PYPX_dxyz)
     dH0.index_add_(1, (idx_row+2)*HDIM + idx_col +2, PYPY_dxyz)
     dH0.index_add_(1, (idx_row+2)*HDIM + idx_col +3, PYPZ_dxyz)
 
     ####    
-    # dH0[:, (idx_row+3)*HDIM + idx_col +1] = PZPX_dxyz
-    # dH0[:, (idx_row+3)*HDIM + idx_col +2] = PZPY_dxyz
-    # dH0[:, (idx_row+3)*HDIM + idx_col +3] = PZPZ_dxyz
     dH0.index_add_(1, (idx_row+3)*HDIM + idx_col +1, PZPX_dxyz)
     dH0.index_add_(1, (idx_row+3)*HDIM + idx_col +2, PZPY_dxyz)
     dH0.index_add_(1, (idx_row+3)*HDIM + idx_col +3, PZPZ_dxyz)
     #########
 
     ### s-d
-    tmp_mask = pair_mask_HY + pair_mask_XY + pair_mask_YY
+    tmp_mask = pair_mask_HY | pair_mask_XY | pair_mask_YY
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     tmp_dx = dx[tmp_mask]
     tmp_L = L[tmp_mask]
     tmp_M = M[tmp_mask]
     tmp_N = N[tmp_mask]
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 7 + SH_shift*10]
+    sel_IJ = IJ_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 7 + SH_shift*10]
     V_sd_sigma = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     H_S_XY = (3**0.5)*tmp_L*tmp_M*V_sd_sigma
     H_S_YZ = (3**0.5)*tmp_M*tmp_N*V_sd_sigma
@@ -299,17 +269,19 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     dH0.index_add_(1, (idx_row)*HDIM + idx_col + 8, H_S_Z2_dxyz  )
 
     ### p-d
-    tmp_mask = pair_mask_XY + pair_mask_YY
+    tmp_mask = pair_mask_XY | pair_mask_YY
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     tmp_dx = dx[tmp_mask]
     tmp_L = L[tmp_mask]
     tmp_M = M[tmp_mask]
     tmp_N = N[tmp_mask]
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 3 + SH_shift*10]
+    sel_IJ = IJ_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 3 + SH_shift*10]
     V_pd_sigma = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_pd_sigma_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 4 + SH_shift*10]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 4 + SH_shift*10]
     V_pd_pi = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_pd_pi_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
     H_X_XY   = (3**0.5)*tmp_L**2*tmp_M*V_pd_sigma + tmp_M*(1 - 2*tmp_L**2)*V_pd_pi
@@ -397,14 +369,16 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     dH0.index_add_(1, (idx_row+3)*HDIM + idx_col + 8, H_Z_Z2_dxyz  )
 
     ### d-s
-    tmp_mask = pair_mask_YH + pair_mask_YX + pair_mask_YY
+    tmp_mask = pair_mask_YH | pair_mask_YX | pair_mask_YY
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     tmp_dx = dx[tmp_mask]
     tmp_L = L[tmp_mask]
     tmp_M = M[tmp_mask]
     tmp_N = N[tmp_mask]
-    coeffs_selected = coeffs_tensor[JI_pair_type[tmp_mask], idx[tmp_mask], 7 + SH_shift*10]
+    sel_IJ = JI_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 7 + SH_shift*10]
     V_ds_sigma = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_ds_sigma_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
     H_XY_S   =  (3**0.5)*tmp_L*tmp_M*V_ds_sigma                                                                                                                        
@@ -435,17 +409,19 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     dH0.index_add_(1, (idx_row+8)*HDIM + idx_col, H_Z2_S_dxyz  )
     
     ### d-p                                                                                                
-    tmp_mask = pair_mask_YX + pair_mask_YY
+    tmp_mask = pair_mask_YX | pair_mask_YY
     idx_row = H_INDEX_START[neighbor_I[tmp_mask]]
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     tmp_dx = dx[tmp_mask]
     tmp_L = L[tmp_mask]
     tmp_M = M[tmp_mask]
     tmp_N = N[tmp_mask]
-    coeffs_selected = coeffs_tensor[JI_pair_type[tmp_mask], idx[tmp_mask], 3 + SH_shift*10]
+    sel_IJ = JI_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 3 + SH_shift*10]
     V_dp_sigma = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_dp_sigma_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
-    coeffs_selected = coeffs_tensor[JI_pair_type[tmp_mask], idx[tmp_mask], 4 + SH_shift*10]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 4 + SH_shift*10]
     V_dp_pi = coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_dp_pi_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
     H_XY_X = -((3**0.5)*tmp_L**2*tmp_M*V_dp_sigma + tmp_M*(1 - 2*tmp_L**2)*V_dp_pi)                                                                                       
@@ -539,13 +515,15 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     tmp_L = L[tmp_mask]
     tmp_M = M[tmp_mask]
     tmp_N = N[tmp_mask]
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 0 + SH_shift*10]
+    sel_IJ = IJ_pair_type[tmp_mask]
+    sel_idx = idx[tmp_mask]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 0 + SH_shift*10]
     V_dd_sigma =    coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_dd_sigma_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 1 + SH_shift*10]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 1 + SH_shift*10]
     V_dd_pi =       coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_dd_pi_dR =    coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
-    coeffs_selected = coeffs_tensor[IJ_pair_type[tmp_mask], idx[tmp_mask], 2 + SH_shift*10]
+    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 2 + SH_shift*10]
     V_dd_delta =    coeffs_selected[:,0] + coeffs_selected[:,1]*tmp_dx + coeffs_selected[:,2]*tmp_dx**2 + coeffs_selected[:,3]*tmp_dx**3
     V_dd_delta_dR = coeffs_selected[:,1] + 2*coeffs_selected[:,2]*tmp_dx + 3*coeffs_selected[:,3]*tmp_dx**2
     H_XY_XY   = 3*tmp_L**2*tmp_M**2*V_dd_sigma + (tmp_L**2 + tmp_M**2 - 4*tmp_L**2*tmp_M**2)*V_dd_pi + (tmp_N**2 + tmp_L**2*tmp_M**2)*V_dd_delta                             
@@ -617,7 +595,6 @@ def Slater_Koster_Pair_SKF_vectorized(H0, HDIM, dR, dR_dxyz, L, M, N, L_dxyz, M_
     L2 = tmp_L**2
     M2 = tmp_M**2
     N2 = tmp_N**2
-
 
 
     H_XY_XY_dxyz   = 3*(2*L_t_Ldx*M2 + L2*2*M_t_Mdx)*V_dd_sigma + 3*L2*M2*V_dd_sigma_dxyz +\
