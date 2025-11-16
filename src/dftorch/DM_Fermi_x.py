@@ -1,7 +1,20 @@
+from typing import Optional
 import torch
 import time
-@torch.compile
-def DM_Fermi_x(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
+import torch, torch._dynamo as dynamo
+dynamo.config.capture_scalar_outputs = True
+
+@torch.compile(dynamic=False, mode="reduce-overhead")  # or mode="default"
+def DM_Fermi_x(
+    H0: torch.Tensor,
+    T: float,
+    nocc: int,
+    mu_0: Optional[float],
+    m: int,
+    eps: float,
+    MaxIt: int,
+    debug: bool = False,
+    ):
     """
     Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
 
@@ -28,10 +41,7 @@ def DM_Fermi_x(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         - The eigenbasis is used to construct the density matrix after recursion.
     """    
     if debug: torch.cuda.synchronize()
-    start_time1 = time.perf_counter()
-    dtype = H0.dtype
-    device = H0.device
-    N = H0.shape[0]
+    #start_time1 = time.perf_counter()
     
     if mu_0 == None:
         #h = torch.linalg.eigvalsh(H0)
@@ -42,36 +52,45 @@ def DM_Fermi_x(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         
     if debug: 
         torch.cuda.synchronize()
-        print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
+        #print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
 
-    start_time1 = time.perf_counter()
+    #start_time1 = time.perf_counter()
 
-    kB = 8.61739e-5  # eV/K
+    kB = torch.tensor(8.61739e-5, dtype=h.dtype, device=h.device)  # eV/K
     beta = 1.0 / (kB * T)
-    cnst = 2 ** (-2 - m) * beta
-    OccErr = 1.0
-    Cnt = 0
-    while OccErr > eps and Cnt < MaxIt:
-        f = 1./(torch.exp(beta*(h-mu0))+1)
-        dOcc = beta*torch.sum(f*(1.0-f))
-        Occ = torch.sum(f)
-        OccErr = nocc-Occ
-        if abs(OccErr) > 1e-10:
-            mu0 = mu0 + OccErr/dOcc
-        Cnt += 1
+    occ_err_val = float("inf")
+    cnt = 0
+    while (occ_err_val > eps) and (cnt < MaxIt):
+        # Clamp small eigvals if needed by your physics; leave as-is here.
+        f = 1.0 / (torch.exp(beta * (h - mu0)) + 1.0)   # occupations (N,)
+
+        # dOcc and Occ are scalar tensors; convert to Python floats for loop control.
+        dOcc = (beta * torch.sum(f * (1.0 - f))).item()
+        Occ  = torch.sum(f).item()
+
+        occ_err_val = abs(nocc - Occ)
+
+        if occ_err_val > 1e-10:
+            # Newton step on mu
+            mu0 = mu0 + (nocc - Occ) / max(dOcc, 1e-30)   # guard tiny derivative
+        cnt += 1
         
-    if Cnt == MaxIt:
+    if cnt == MaxIt:
         print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, OccErr))
     if debug:
         torch.cuda.synchronize()
-        print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
-    start_time1 = time.perf_counter()
+        #print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
+    #start_time1 = time.perf_counter()
     
     # Final adjustment of occupation    
-    P0 = v@(torch.diag_embed(f)@v.T)
+    #P0 = v@(torch.diag_embed(f)@v.T)
+    # Build density matrix P0 = V diag(f) V^T without forming diag explicitly
+    # Column-scale trick: V @ diag(f) == V * f[None, :]
+    P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
+
     if debug:
         torch.cuda.synchronize()
-        print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
+        #print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
 
 
     
