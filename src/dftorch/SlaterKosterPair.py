@@ -1,7 +1,7 @@
 import torch
 from .BondIntegral import *
 
-@torch.compile(fullgraph=True, dynamic=True)  # optional extra flags
+#@torch.compile(fullgraph=True, dynamic=True)  # optional extra flags
 def Slater_Koster_Pair_SKF_vectorized(HDIM, dR_dxyz, L, M, N, L_dxyz, M_dxyz, N_dxyz,
                                   pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
                                   pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY,

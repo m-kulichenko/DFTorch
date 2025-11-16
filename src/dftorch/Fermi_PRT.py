@@ -32,28 +32,6 @@ def Fermi_PRT(H1, Te, Q, ev, mu0):
     D1 = Q @ X @ Q.T
     return D0, D1
 
-    # dDtmp = torch.zeros(N,N, device = H1.device)
-    # X = torch.zeros(N,N, device = H1.device)
-    # for i in range(N):
-    #     for j in range(N):
-    #         if abs(ev[i]-ev[j]) < 1e-4:
-    #             xx = (ev[i]+ev[j])/2
-    #             tmp = beta*(xx-mu0)
-    #             if abs(tmp) > 25:
-    #                 dDtmp[i,j] = 0.0
-    #             else:
-    #                 dDtmp[i,j] = -beta*torch.exp(beta*(xx-mu0))/(torch.exp(beta*(xx-mu0))+1)**2
-    #         else:
-    #             dDtmp[i,j] = (fe[i]-fe[j])/(ev[i]-ev[j])
-    #         X[i,j] = dDtmp[i,j]*QH1Q[i,j]
-    # TrdD = torch.trace(dDtmp)
-    # if abs(TrdD) > 10e-9:
-    #     mu1 = torch.trace(X)/torch.trace(dDtmp)
-    #     X = X-torch.diag_embed(torch.diag(dDtmp))*mu1
-    # D0 = Q @ torch.diag_embed(fe) @ Q.T
-    # D1 = Q @ X @ Q.T
-    # return D0, D1
-
 def Canon_DM_PRT(F1,T,Q,ev,mu_0,m):
     '''
     canonical density matrix perturbation theory
