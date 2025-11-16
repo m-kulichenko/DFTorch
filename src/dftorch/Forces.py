@@ -13,7 +13,7 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
         H (Tensor): Two-electron Hamiltonian matrix (n_orb, n_orb).
         H0 (Tensor): One-electron Hamiltonian matrix (n_orb, n_orb).
         S (Tensor): Overlap matrix (n_orb, n_orb).
-        C (Tensor): Coulomb interaction matrix (n_orb, n_orb).
+        C (Tensor): Coulomb interaction matrix (n_orb, n_orb) or coulomb potential vector (n_orb,).
         D (Tensor): Optimized density matrix (n_orb, n_orb).
         D0 (Tensor): Atomic reference density matrix (n_orb,).
         dH (Tensor): Derivatives of the Hamiltonian (3, n_orb, n_orb).
@@ -57,10 +57,40 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
     
-    if verbose: print('Doing Fcoul')
-    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-    # Fcoul = -q_i * sum_j q_j * dCj/dRi
-    Fcoul = q * (q @ dC)
+    if dC is not None:
+        if verbose: print('Doing Fcoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # Fcoul = -q_i * sum_j q_j * dCj/dRi
+        Fcoul = q * (q @ dC)
+
+        if verbose: print('Doing FScoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # FScoul
+        CoulPot = C @ q
+        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+        factor = (U * q + CoulPot)*2
+        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
+    else:
+        if verbose: print('Skipping Fcoul, done in PME.')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # Fcoul = -q_i * sum_j q_j * dCj/dRi
+        Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+
+        if verbose: print('Doing FScoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # FScoul
+        CoulPot = C
+        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+        factor = (U * q + CoulPot)*2
+        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     if verbose: print('Doing Fband0')
     # Eband0 = 2 * torch.trace(H0 @ (D))
@@ -80,18 +110,6 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
     if verbose: print('Doing Fdipole') # $$$ ??? a bug in Efield calculations.
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-    
-    if verbose: print('Doing FScoul')
-    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-    # FScoul
-    CoulPot = C @ q
-    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot)*2
-    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
     
     if verbose: print('Doing FSdipole')
     # FSdipole. $$$ ??? a bug in Efield calculations.
@@ -173,11 +191,41 @@ def ForcesShadow(H, H0, S, C, D, D0, dH, dS,
     
     n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
-    
-    if verbose: print('Doing Fcoul')
-    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-    # Fcoul = -q_i * sum_j q_j * dCj/dRi
-    Fcoul = (2*q - n) * (n @ dC)
+
+    if dC is not None:
+        if verbose: print('Doing Fcoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # Fcoul = -q_i * sum_j q_j * dCj/dRi
+        Fcoul = (2*q - n) * (n @ dC)
+
+        if verbose: print('Doing FScoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # FScoul
+        CoulPot = C @ n
+        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+        factor = (U * n + CoulPot)*2
+        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
+    else:
+        if verbose: print('Skipping Fcoul, done in PME.')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # Fcoul = -q_i * sum_j q_j * dCj/dRi
+        Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+
+        if verbose: print('Doing FScoul')
+        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+        # FScoul
+        CoulPot = C
+        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+        factor = (U * n + CoulPot)*2
+        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     if verbose: print('Doing Fband0')
     # Eband0 = 2 * torch.trace(H0 @ (D))
@@ -197,19 +245,7 @@ def ForcesShadow(H, H0, S, C, D, D0, dH, dS,
     if verbose: print('Doing Fdipole') # $$$ ??? a bug in Efield calculations.
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-    
-    if verbose: print('Doing FScoul')
-    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-    # FScoul
-    CoulPot = C @ n
-    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * n + CoulPot)*2
-    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
-    
+        
     if verbose: print('Doing FSdipole')
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)

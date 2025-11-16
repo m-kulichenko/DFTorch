@@ -38,7 +38,10 @@ def Energy(H0, U, Efield, D0, C, D, q, Rx, Ry, Rz, f, Te):
     Eband0 = 2 * torch.trace(H0 @ (D))
 
     # Coulomb energy
-    Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    if C.dim() == 1:
+        Ecoul = 0.5 * q @ C + 0.5 * torch.sum(q**2 * U)
+    else:
+        Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
 
     # Dipole energy
     Efield_term = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -92,7 +95,10 @@ def EnergyShadow(H0, U, Efield, D0, C, D, q, n, Rx, Ry, Rz, f, Te):
     Eband0 = 2 * torch.trace(H0 @ (D))
 
     # Coulomb energy
-    Ecoul = 0.5 * (2*q-n) @ (C @ n) + 0.5 * torch.sum((2.0*q - n) * U * n)
+    if C.dim() == 1:
+        Ecoul = 0.5 * (2*q-n) @ C + 0.5 * torch.sum((2.0*q - n) * U * n)
+    else:
+        Ecoul = 0.5 * (2*q-n) @ (C @ n) + 0.5 * torch.sum((2.0*q - n) * U * n)
 
     # Dipole energy
     Efield_term = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]

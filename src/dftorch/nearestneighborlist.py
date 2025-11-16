@@ -119,7 +119,7 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     num_neighbors = torch.bincount(i_idx, minlength=N)
     max_neighbors = num_neighbors.max().item()
 
-    nndist = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device)
+    nndist = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 17320.5
     # so zero padded neighs (-1) are far
     nnRx = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0
     nnRy = torch.zeros((N, max_neighbors), dtype=Rx.dtype, device=R.device) + 10000.0
@@ -280,7 +280,7 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
     max_neighbors = int(counts_flat.max().item())
 
     # Allocate outputs
-    nndist   = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device)
+    nndist   = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnRx     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnRy     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnRz     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0

@@ -13,6 +13,8 @@ class Structure(torch.nn.Module):
         self.RY = RY
         self.RZ = RZ
         self.LBox = LBox
+        self.lattice_vecs = torch.eye(3, device=RX.device) * self.LBox
+
         self.Nats = len(TYPE)
         self.const = const
         self.device = device
