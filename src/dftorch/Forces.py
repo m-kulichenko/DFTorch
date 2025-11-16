@@ -1,5 +1,4 @@
 import torch
-from .Tools import fractional_matrix_power_symm
 import time
 
 @torch.compile
@@ -102,7 +101,6 @@ def Forces(H, H0, S, Z, C, D, D0, dH, dS,
         
     if verbose: print('Doing Pulay')
     # Pulay forces
-    #Z = fractional_matrix_power_symm(S, -0.5)
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
@@ -238,7 +236,6 @@ def ForcesShadow(H, H0, S, Z, C, D, D0, dH, dS,
         
     if verbose: print('Doing Pulay')
     # Pulay forces
-    #Z = fractional_matrix_power_symm(S, -0.5)
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
