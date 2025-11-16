@@ -1,6 +1,6 @@
 import torch
 import time
-
+@torch.compile
 def DM_Fermi_x(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     """
     Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
