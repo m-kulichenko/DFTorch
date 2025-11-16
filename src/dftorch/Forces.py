@@ -2,6 +2,7 @@ import torch
 from .Tools import fractional_matrix_power_symm
 import time
 
+@torch.compile
 def Forces(H, H0, S, C, D, D0, dH, dS,
                    dC, dVr, Efield, U, q, Rx, Ry, Rz,
                    Nats, H_INDEX_START, H_INDEX_END, const, TYPE,
@@ -138,6 +139,7 @@ def Forces(H, H0, S, C, D, D0, dH, dS,
 
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
+@torch.compile
 def ForcesShadow(H, H0, S, C, D, D0, dH, dS,
                    dC, dVr, Efield, U, q, n, Rx, Ry, Rz,
                    Nats, H_INDEX_START, H_INDEX_END, const, TYPE,
@@ -251,12 +253,12 @@ def ForcesShadow(H, H0, S, C, D, D0, dH, dS,
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    tmp1 = (D-D0)@dS
+    D_diff = D - D0
+    tmp1 = D_diff @ dS
     tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
-
-    D_diff = D - D0
+    
     n_orb = dS.shape[1]
     a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
     outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
