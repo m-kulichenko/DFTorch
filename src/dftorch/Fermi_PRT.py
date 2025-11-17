@@ -23,9 +23,14 @@ def Fermi_PRT(H1, Te, Q, ev, mu0):
 
     # Enforce particle conservation via μ1
     dN_dmu = diag.sum()                              # d tr(D)/dμ = -β ∑ f(1-f)
-    if torch.abs(dN_dmu) > 1e-15:
-        mu1 = X.diagonal().sum() / dN_dmu
-        X = X - torch.diag_embed(diag) * mu1
+    # if torch.abs(dN_dmu) > 1e-15:
+    #     mu1 = X.diagonal().sum() / dN_dmu
+    #     X = X - torch.diag_embed(diag) * mu1
+
+    mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
+    mu1 = (X.diagonal().sum() / (dN_dmu + (1.0 - mask))) * mask
+    X = X - torch.diag_embed(diag) * mu1
+
 
     D0 = Q @ torch.diag_embed(fe) @ Q.T
     D1 = Q @ X @ Q.T
