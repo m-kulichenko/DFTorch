@@ -1,5 +1,6 @@
 import torch
 
+@torch.compile(fullgraph=False, dynamic=False)
 def Fermi_PRT(H1, Te, Q, ev, mu0):
     kB = 8.61739e-5; # eV/K;
     beta = 1/(kB*Te)
