@@ -2,6 +2,7 @@ import torch
 from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
 from sedacs.neighbor_list import NeighborState, calculate_displacement
 from .Fermi_PRT import Canon_DM_PRT, Fermi_PRT
+from .DM_Fermi_x import DM_Fermi_x
 
 
 def initialize_velocities(structure, temperature_K, masses_amu=None, remove_com=True, rescale_to_T=True, remove_angmom=False, generator=None):
@@ -100,6 +101,22 @@ def initialize_velocities(structure, temperature_K, masses_amu=None, remove_com=
                 V = V * scale
 
     return V[:, 0].contiguous(), V[:, 1].contiguous(), V[:, 2].contiguous()
+
+
+
+@torch.compile(fullgraph=False, dynamic=False)
+def calc_q(H0, U, n, CoulPot, S, Z, Te, Nocc, Znuc, atom_ids):
+	Hcoul_diag = U * n + CoulPot        
+	Hcoul = 0.5 * (Hcoul_diag.unsqueeze(1) * S + S * Hcoul_diag.unsqueeze(0))
+	H = H0 + Hcoul
+	#Dorth,Q,e,f,mu0 = DM_Fermi_x((Z.T @ H @ Z).to(torch.float64), structure.Te, structure.Nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
+	Dorth,Q,e,f,mu0 = DM_Fermi_x((Z.T @ H @ Z), Te, Nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=False)
+	#Dorth = Dorth.to(torch.get_default_dtype())
+	D = Z @ Dorth @ Z.T
+	DS = 2 * (D * S.T).sum(dim=1)  # same as DS = 2 * torch.diag(D @ S)
+	q = -1.0 * Znuc
+	q.scatter_add_(0, atom_ids, DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+	return q, H, Q, D, e, f, mu0
 
 
 @torch.compile(fullgraph=False, dynamic=False)
