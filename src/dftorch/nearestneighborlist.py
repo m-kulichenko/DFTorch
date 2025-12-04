@@ -1,52 +1,74 @@
 import torch
 import time
-from dftorch.Tools import ordered_pairs_from_TYPE
-from .BondIntegral import read_skf_table, channels_to_matrix, cubic_spline_coeffs
+from typing import Any, Union, Tuple, Optional, List
 
+from .Tools import ordered_pairs_from_TYPE
 
-def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper_tri_only=True, remove_self_neigh=False, min_image_only=False, verbose=False):
+@torch.compile(dynamic=False)
+def vectorized_nearestneighborlist(
+    TYPE: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    LBox: Union[torch.Tensor, Tuple[float, float, float]],
+    Rcut: float,
+    N: int,
+    const,
+    upper_tri_only: bool = True,
+    remove_self_neigh: bool = False,
+    min_image_only: bool = False,
+    verbose: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Computes the neighbor list for a set of atoms using periodic boundary conditions (PBC) 
-    and a cutoff radius, in a fully vectorized manner.
+    Compute a periodic (3x3x3 images) neighbor list in a fully vectorized manner.
 
     Parameters
     ----------
-    Rx, Ry, Rz : torch.Tensor of shape (N,)
-        Cartesian coordinates of atoms in the x, y, and z directions.
-    LBox : tuple or list of float
-        Box dimensions (Lx, Ly, Lz) for periodic boundary conditions.
+    TYPE : torch.Tensor, shape (N,)
+        Integer type index per atom; must align with const.label for pair typing.
+    Rx, Ry, Rz : torch.Tensor, each (N,)
+        Cartesian coordinates of atoms along x, y, z (same device/dtype).
+    LBox : torch.Tensor or tuple(float, float, float)
+        Periodic box lengths (Lx, Ly, Lz). If tensor, should be on the same device.
     Rcut : float
-        Cutoff radius for determining neighbors.
+        Cutoff radius. Pairs with min-image distance < Rcut are kept.
     N : int
-        Number of atoms.
+        Number of atoms (must match the length of Rx, Ry, Rz, TYPE).
+    const : Any
+        Container providing chemical labels (const.label) used for pair typing.
     upper_tri_only : bool, optional (default=True)
-        If True, only returns neighbors J > I to reduce redundancy.
+        Keep only unique pairs with j > i to avoid double counting.
     remove_self_neigh : bool, optional (default=False)
-        If True, excludes self-neighbors (i.e., atom I does not neighbor itself).
+        Exclude self-pairs (i == j).
+    min_image_only : bool, optional (default=False)
+        Keep only the closest periodic image for each (i, j).
+    verbose : bool, optional (default=False)
+        Print timing information.
 
     Returns
     -------
-    nrnnlist : torch.Tensor of shape (N, 1)
-        Number of neighbors within Rcut for each atom (including periodic images).
-    nndist : torch.Tensor of shape (N, max_neighbors)
-        Pairwise distances between atom I and its J-th neighbor.
-    nnRx, nnRy, nnRz : torch.Tensor of shape (N, max_neighbors)
-        Coordinates of each neighbor J of atom I (including image translations).
-        Default values are padded with large values (e.g., 10000) to indicate unused slots.
-    nnType : torch.Tensor of shape (N, max_neighbors)
-        Index of the original atom corresponding to each neighbor, before applying periodic image shifts.
-    nnStruct : torch.Tensor of shape (N, max_neighbors)
-        Neighbor indices corresponding to atoms within the original simulation box (i.e., no periodic shift).
-    nrnnStruct : torch.Tensor of shape (N, 1)
-        Number of neighbors for each atom within the original simulation box only (no images).
+    nrnnlist : torch.Tensor, shape (N, 1)
+        Count of neighbors per atom after filtering.
+    nndist : torch.Tensor, shape (N, Kmax)
+        Distances to neighbors; padded with a large sentinel for unused slots.
+    nnRx, nnRy, nnRz : torch.Tensor, each (N, Kmax)
+        Coordinates of neighbor positions (including periodic shifts).
+    nnType : torch.Tensor, shape (N, Kmax)
+        Index j of the original atom for each neighbor entry.
+    nnStruct : torch.Tensor, shape (N, Kmax)
+        Index of the neighbor within the original simulation box (no shift).
+    nrnnStruct : torch.Tensor, shape (N, 1)
+        Number of neighbors per atom within the original box.
+    neighbor_I, neighbor_J : torch.Tensor, shape (K_total,)
+        Flattened lists of i and j indices for all kept neighbor pairs.
+    IJ_pair_type, JI_pair_type : torch.Tensor, shape (K_total,)
+        Pair-type indices for ordered pairs (i, j) and (j, i), aligned with const.label.
 
     Notes
     -----
-    - Periodic boundary conditions are applied by replicating the simulation box in a 3x3x3 supercell.
-    - This function is vectorized and GPU-accelerated using PyTorch for high performance.
-    - Neighbor lists are zero-padded to match the maximum neighbor count across all atoms.
-    - When `upper_tri_only=True`, only unique pairs (i < j) are returned to avoid double-counting.
-    - When `remove_self_neigh=True`, atoms do not include themselves as neighbors.
+    - Fully vectorized; no Python loops over atoms.
+    - Uses large sentinels (e.g., 10000, 17320.5) for padded entries.
+    - All outputs are on the same device/dtype as the inputs.
     """
     # % Rx, Ry, Rz are the coordinates of atoms
     # % LBox dimensions of peridic BC
@@ -80,18 +102,6 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     diff = R.view(N, 1, 1, 3) - R_translated.view(1, N, len(shift)**3, 3)  # (N, N, 27, 3)
     dist = torch.norm(diff, dim=-1)  # (N, N, 27)
     del diff
-    
-    # A = R.view(N, 3)                          # shape (N, 3)
-    # B = R_translated.view(N * len(shift)**3, 3)         # shape (N*27, 3)
-
-    # A_norm_sq = A.pow(2).sum(1, keepdim=True)         # (N, 1)
-    # B_norm_sq = B.pow(2).sum(1, keepdim=True).T       # (1, N*27)
-    # cross_term = 2*A @ B.T                              # (N, N*27)
-    # # Compute squared distances
-    # dists_sq = A_norm_sq + B_norm_sq - cross_term  # (N, N*27)
-    # dists = dists_sq.clamp(min=1e-8).sqrt()           # avoid sqrt(neg)
-    # # Reshape back to (N, N, len(shift)**3)
-    # dist = dists.view(N, N, len(shift)**3)
 
     # mask minimum distance images
     if min_image_only:
@@ -101,14 +111,12 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     else:
         mask_min_image = torch.tensor([True], dtype=torch.bool, device=R.device)
 
-
     neighbor_mask = (dist < Rcut) * (dist > 1e-4) * mask_min_image
     
     # remove self-neighbors
     if remove_self_neigh:
         idx = torch.arange(N, device=neighbor_mask.device)
         neighbor_mask[idx, idx, :] = False
-
 
     i_idx, j_idx, s_idx = neighbor_mask.nonzero(as_tuple=True)
     if upper_tri_only:
@@ -154,12 +162,7 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     #nnType[i_idx_sorted, local_idx] = j_idx_sorted
     nnType[i_idx_sorted, local_idx] = j_idx
 
-    is_in_box = (shifts[s_idx_sorted] == 0).all(dim=1)
-
-    #nnStruct[i_idx_sorted[is_in_box], local_idx[is_in_box]] = j_idx_sorted[is_in_box]
-    #nnStruct[i_idx_sorted,local_idx] = j_idx_sorted
     nnStruct[i_idx_sorted,local_idx] = j_idx
-    #nrnnStruct = torch.bincount(i_idx_sorted[is_in_box], minlength=N)
     nrnnStruct = torch.bincount(i_idx_sorted, minlength=N)
 
     # === Vectorized neighbor type pair generation ===
@@ -172,22 +175,12 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     del neighbor_mask, dist_vals
 
     ### Get tensors for SKF files ###
-    pairs_tensor, pairs_list, label_list = ordered_pairs_from_TYPE(TYPE, const)
-    # Allocate padded tensors
-    n_pairs = len(label_list)
-    coeffs_tensor = torch.zeros((n_pairs, 500, 20, 4), device=Rx.device)
-    #R_tensor = torch.zeros((n_pairs, 499), device=Rx.device) # not necessarily if all R are the same. Makes sense to use zero padding if not.
+    _, _, label_list = ordered_pairs_from_TYPE(TYPE)
 
     pair_type_dict = {}
 
     for i in range(len(label_list)):
         pair_type_dict[label_list[i]] = i
-
-    # IJ_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=Rx.device)
-    # JI_pair_type = torch.zeros((len(neighbor_I)), dtype=torch.int64, device=Rx.device)
-    # for i in range(len(neighbor_I)):
-    #     IJ_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_I[i]]] + '-' + const.label[TYPE[neighbor_J[i]]]]
-    #     JI_pair_type[i] = pair_type_dict[const.label[TYPE[neighbor_J[i]]] + '-' + const.label[TYPE[neighbor_I[i]]]]
 
     # Build a 2D lookup table once (no function), then index it
     labels = [s.strip() for s in const.label.tolist()]            # fix spaces like ' P', 'V ', etc.
@@ -205,12 +198,12 @@ def vectorized_nearestneighborlist(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const, upper
     tj = TYPE[neighbor_J].long()
     IJ_pair_type = pair_lookup[ti, tj]        # shape: (len(neighbor_I),)
     JI_pair_type = pair_lookup[tj, ti]
-    print("  t <neighbor list> {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+    if verbose: print("  t <neighbor list> {:.1f} s\n".format( time.perf_counter()-start_time1 ))
 
     return nrnnlist, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct.view(-1, 1),\
            neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type
 
-
+@torch.compile(dynamic=False)
 def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
                                          upper_tri_only=True, remove_self_neigh=False,
                                          min_image_only=False, verbose=False):
@@ -269,39 +262,49 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
         diag = torch.arange(N, device=device)
         neighbor_mask[:, diag, diag, :] = False
 
-    # Indices of valid neighbors
-    b_idx, i_idx, j_idx, s_idx = neighbor_mask.nonzero(as_tuple=True)               # (K,)
+    # Deterministic flat enumeration (row-major): (B,N,N,S) -> flat
+    flat_mask = neighbor_mask.view(-1)
+    flat_idx = torch.nonzero(flat_mask, as_tuple=False).squeeze(-1)  # (K,)
+    S = shifts.shape[0]
+    # Decode indices
+    s_idx = flat_idx % S
+    tmp = flat_idx // S
+    j_idx = tmp % N
+    tmp //= N
+    i_idx = tmp % N
+    b_idx = tmp // N
+
     if upper_tri_only:
         keep = j_idx > i_idx
         b_idx, i_idx, j_idx, s_idx = b_idx[keep], i_idx[keep], j_idx[keep], s_idx[keep]
 
-    # Counts per (B,N)
-    flat_i = b_idx * N + i_idx
-    counts_flat = torch.bincount(flat_i, minlength=B * N).view(B, N)
+    # Distances for kept pairs
+    dist_vals = dist[b_idx, i_idx, j_idx, s_idx]
+
+    # Counts per (B,i)
+    flat_bi = b_idx * N + i_idx
+    counts_flat = torch.bincount(flat_bi, minlength=B * N).view(B, N)
     max_neighbors = int(counts_flat.max().item())
 
-    # Allocate outputs
-    nndist   = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
+    # Allocate outputs (sentinel values as in non-batch)
+    nndist   = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 17320.5
     nnRx     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnRy     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnRz     = torch.zeros((B, N, max_neighbors), dtype=dtype, device=device) + 10000.0
     nnType   = torch.full((B, N, max_neighbors), -1, dtype=torch.long, device=device)
     nnStruct = torch.full((B, N, max_neighbors), -1, dtype=torch.long, device=device)
+    nrnnlist = counts_flat.unsqueeze(-1)
 
-    nrnnlist = counts_flat.unsqueeze(-1)                                             # (B,N,1)
-    dist_vals = dist[b_idx, i_idx, j_idx, s_idx]
+    neighbor_pos = R_translated[b_idx, j_idx, s_idx]
     del dist
-    neighbor_pos = R_translated[b_idx, j_idx, s_idx]                                 # (K,3)
 
-    # Sort by (batch, i)
+    # Sort only by (b,i) to mimic single-structure logic (i grouping)
     order_key = b_idx * N + i_idx
-    sort_idx = torch.argsort(order_key)
-    b_s = b_idx[sort_idx]
-    i_s = i_idx[sort_idx]
-    j_s = j_idx[sort_idx]
-    dist_s = dist_vals[sort_idx]
-    pos_s = neighbor_pos[sort_idx]
+    sort_idx = torch.argsort(order_key, stable=True)
+    b_s = b_idx[sort_idx]; i_s = i_idx[sort_idx]; j_s = j_idx[sort_idx]; s_s = s_idx[sort_idx]
+    dist_s = dist_vals[sort_idx]; pos_s = neighbor_pos[sort_idx]
 
+    # Local index within each (b,i) group preserving intra-group (j,s) order (s fastest)
     flat_group = b_s * N + i_s
     group_counts = torch.bincount(flat_group, minlength=B * N)
     group_offsets = torch.cat([torch.zeros(1, device=device, dtype=torch.long),
@@ -309,22 +312,18 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
     seq = torch.arange(flat_group.shape[0], device=device)
     local_idx = seq - group_offsets[flat_group]
 
-    # Fill tensors
+    # Scatter filled data
     nndist[b_s, i_s, local_idx] = dist_s
     nnRx[b_s, i_s, local_idx] = pos_s[:, 0]
     nnRy[b_s, i_s, local_idx] = pos_s[:, 1]
     nnRz[b_s, i_s, local_idx] = pos_s[:, 2]
     nnType[b_s, i_s, local_idx] = j_s
     nnStruct[b_s, i_s, local_idx] = j_s
+    nrnnStruct = counts_flat.unsqueeze(-1)
 
-    nrnnStruct = counts_flat.unsqueeze(-1)  # same as nrnnlist for current logic
-
-    # Build 2D (B, Kmax) neighbor_I and neighbor_J lists by flattening per batch
-    # K is total neighbors across all atoms and images (post-filter) for each batch
-    batch_counts = torch.bincount(b_s, minlength=B)                 # (B,)
+    # Build 2D neighbor pair lists (same ordering)
+    batch_counts = torch.bincount(b_s, minlength=B)
     max_K = int(batch_counts.max().item())
-
-    # Early-out if no neighbors at all
     if max_K == 0:
         neighbor_I_2d = torch.empty((B, 0), dtype=torch.long, device=device)
         neighbor_J_2d = torch.empty((B, 0), dtype=torch.long, device=device)
@@ -337,20 +336,16 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
 
     neighbor_I_2d = torch.full((B, max_K), -1, dtype=torch.long, device=device)
     neighbor_J_2d = torch.full((B, max_K), -1, dtype=torch.long, device=device)
-
-    # Compute per-batch positions k_in_batch for scattering
     batch_offsets = torch.cat([torch.zeros(1, device=device, dtype=torch.long),
                                batch_counts.cumsum(0)[:-1]])
     seqK = torch.arange(b_s.shape[0], device=device)
     k_in_batch = seqK - batch_offsets[b_s]
-
     neighbor_I_2d[b_s, k_in_batch] = i_s
     neighbor_J_2d[b_s, k_in_batch] = j_s
 
-    # === Pair typing (vectorized) ===
-    # Build lookup table once
+    # Pair typing (unchanged)
     TYPE_flat = TYPE.view(-1)
-    _, _, label_list = ordered_pairs_from_TYPE(TYPE_flat, const)
+    _, _, label_list = ordered_pairs_from_TYPE(TYPE_flat)
     pair_type_dict = {label_list[i]: i for i in range(len(label_list))}
     labels = [s.strip() for s in const.label.tolist()]
     label_to_idx = {lab: i for i, lab in enumerate(labels)}
@@ -359,15 +354,13 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
     if pair_type_dict:
         keys = list(pair_type_dict.keys())
         splits = [k.split('-') for k in keys]
-        ai = torch.tensor([label_to_idx[a] for a, _ in splits], device=device, dtype=torch.long)
-        bi = torch.tensor([label_to_idx[b] for _, b in splits], device=device, dtype=torch.long)
-        vals = torch.tensor([pair_type_dict[k] for k in keys], device=device, dtype=torch.long)
+        ai = torch.tensor([label_to_idx[a] for a, _ in splits], device=device)
+        bi = torch.tensor([label_to_idx[b] for _, b in splits], device=device)
+        vals = torch.tensor([pair_type_dict[k] for k in keys], device=device)
         pair_lookup[ai, bi] = vals
 
-    # Directly index types for each neighbor pair entry
-    ti_vals = TYPE[b_s, i_s]  # (K_total,)
-    tj_vals = TYPE[b_s, j_s]  # (K_total,)
-
+    ti_vals = TYPE[b_s, i_s]
+    tj_vals = TYPE[b_s, j_s]
     IJ_pair_type_2d = torch.full((B, max_K), -1, dtype=torch.long, device=device)
     JI_pair_type_2d = torch.full((B, max_K), -1, dtype=torch.long, device=device)
     IJ_pair_type_2d[b_s, k_in_batch] = pair_lookup[ti_vals.long(), tj_vals.long()]
@@ -378,9 +371,3 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
 
     return (nrnnlist, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct,
             neighbor_I_2d, neighbor_J_2d, IJ_pair_type_2d, JI_pair_type_2d)
-    if verbose:
-        print(f"  t <batched neighbor list> {time.perf_counter()-start_time1:.3f} s  (B={B}, N={N})")
-
-    return (nrnnlist, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct,
-            neighbor_I_2d, neighbor_J_2d, IJ_pair_type_2d, JI_pair_type_2d)
-

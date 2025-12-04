@@ -1,116 +1,152 @@
 import torch
-import time
 
 @torch.compile
-def Forces(H, H0, S, Z, C, D, D0, dH, dS,
-                   dC, dVr, Efield, U, q, Rx, Ry, Rz,
-                   Nats, H_INDEX_START, H_INDEX_END, const, TYPE,
-                   verbose=False):
+def Forces(
+    H: torch.Tensor,
+    Z: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+    D0: torch.Tensor,
+    dH: torch.Tensor,
+    dS: torch.Tensor,
+    dC: torch.Tensor,
+    dVr: torch.Tensor,
+    Efield: torch.Tensor,
+    U: torch.Tensor,
+    q: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    Nats: int,
+    const,
+    TYPE: torch.Tensor,
+    verbose: bool = False,
+):
     """
-    Computes atomic forces from a DFTB-like total energy expression.
+    Compute atomic forces for a DFTB-like total energy expression in gas phase
+    (non-PME, standard SCC).
 
-    Args:
-        H (Tensor): Two-electron Hamiltonian matrix (n_orb, n_orb).
-        H0 (Tensor): One-electron Hamiltonian matrix (n_orb, n_orb).
-        S (Tensor): Overlap matrix (n_orb, n_orb).
-        C (Tensor): Coulomb interaction matrix (n_orb, n_orb) or coulomb potential vector (n_orb,).
-        D (Tensor): Optimized density matrix (n_orb, n_orb).
-        D0 (Tensor): Atomic reference density matrix (n_orb,).
-        dH (Tensor): Derivatives of the Hamiltonian (3, n_orb, n_orb).
-        dS (Tensor): Derivatives of the overlap matrix (3, n_orb, n_orb).
-        dC (Tensor): Derivatives of the Coulomb matrix (3, n_orb, n_orb).
-        Efield (Tensor): External electric field vector (3,).
-        U (Tensor): Hubbard U parameters per atom (Nats,).
-        q (Tensor): Self-consistent charge (SCC) vector (Nats,).
-        Rx (Tensor): X-coordinates of atoms (Nats,).
-        Ry (Tensor): Y-coordinates of atoms (Nats,).
-        Rz (Tensor): Z-coordinates of atoms (Nats,).
-        Nats (int): Number of atoms.
-        H_INDEX_START (Tensor): Index of first orbital for each atom (Nats,).
-        H_INDEX_END (Tensor): Index of last orbital for each atom (Nats,).
-        const (object): Container with model constants (e.g. orbital numbers).
-        TYPE (Tensor): Element type vector (Nats,).
+    Parameters
+    ----------
+    H : torch.Tensor
+        Two-electron (effective) Hamiltonian matrix of shape (n_orb, n_orb).
+    Z : torch.Tensor
+        Transformation / renormalization matrix (e.g. orthogonalization) used
+        in the Pulay term, shape (n_orb, n_orb).
+    C : torch.Tensor
+        Coulomb interaction matrix of shape (Nats, Nats). It is multiplied by
+        the atomic charges `q` to obtain the Coulomb potential.
+    D : torch.Tensor
+        Self-consistent density matrix of shape (n_orb, n_orb).
+    D0 : torch.Tensor
+        Reference (atomic) density vector of shape (n_orb,). Internally turned
+        into a diagonal matrix.
+    dH : torch.Tensor
+        Derivatives of the Hamiltonian with respect to Cartesian coordinates,
+        shape (3, n_orb, n_orb). The first dimension corresponds to x, y, z.
+    dS : torch.Tensor
+        Derivatives of the overlap matrix with respect to Cartesian
+        coordinates, shape (3, n_orb, n_orb).
+    dC : torch.Tensor
+        Derivatives of the Coulomb matrix with respect to atomic coordinates,
+        shape (Nats, Nats, 3) or broadcastable equivalent; it is contracted
+        with the charges in `q`.
+    dVr : torch.Tensor
+        Derivatives of the short-range repulsive potential with respect to
+        atomic coordinates, shape (3, Nats, Nats).
+    Efield : torch.Tensor
+        External electric field vector of shape (3,).
+    U : torch.Tensor
+        On-site Hubbard U parameters per atom, shape (Nats,).
+    q : torch.Tensor
+        Self-consistent charges per atom, shape (Nats,).
+    Rx, Ry, Rz : torch.Tensor
+        Cartesian coordinates of atoms along x, y, z respectively, each of
+        shape (Nats,).
+    Nats : int
+        Number of atoms in the system.
+    const : object
+        Container with model constants. Must provide `n_orb`, the number of
+        orbitals per element type.
+    TYPE : torch.Tensor
+        Element type indices for each atom, shape (Nats,). Used to map into
+        `const.n_orb`.
+    verbose : bool, optional
+        If True, allows callers to hook in additional logging (currently not
+        used inside this routine).
 
-    Returns:
-        Ftot (Tensor): Total forces on atoms (3, Nats).
-        Fcoul (Tensor): Coulomb interaction forces (3, Nats).
-        Fband0 (Tensor): Band structure energy forces (3, Nats).
-        Fdipole (Tensor): Electric dipole interaction forces (3, Nats).
-        FPulay (Tensor): Pulay correction forces (3, Nats).
-        FScoul (Tensor): Coulomb-related overlap derivatives contribution (3, Nats).
-        FSdipole (Tensor): Dipole-related overlap derivatives contribution (3, Nats).
+    Returns
+    -------
+    Ftot : torch.Tensor
+        Total forces on atoms, shape (3, Nats). Convention: forces are
+        negative gradients of the total energy.
+    Fcoul : torch.Tensor
+        Coulomb interaction contribution to the forces, shape (3, Nats).
+    Fband0 : torch.Tensor
+        Band-structure (Hamiltonian) contribution to the forces, shape
+        (3, Nats).
+    Fdipole : torch.Tensor
+        Direct electric-field (dipole) contribution to the forces, shape
+        (3, Nats).
+    FPulay : torch.Tensor
+        Pulay correction forces due to non-orthogonal orbitals, shape
+        (3, Nats).
+    FScoul : torch.Tensor
+        Overlap-derivative contribution associated with the SCC Coulomb
+        energy, shape (3, Nats).
+    FSdipole : torch.Tensor
+        Overlap-derivative contribution associated with the dipole / external
+        field term, shape (3, Nats).
+    Frep : torch.Tensor
+        Short-range repulsive potential contribution to the forces, shape
+        (3, Nats).
 
-    Notes:
-        - All forces are computed as negative gradients of the total energy.
-        - Electric field forces include both direct dipole terms and overlap-derivative corrections.
-        - SCC (self-consistent charge) and Pulay forces are included.
-    """
-    
+    Notes
+    -----
+    The total force is assembled as::
+
+        Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+
+    where all components are computed as negative derivatives of the
+    corresponding energy contributions with respect to atomic positions.
+    """    
     #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
-
-    #start_time1 = time.perf_counter()
-
     dtype = H.dtype
     device = H.device
-    HDIM = H0.size(0)
     
     n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
     
-    if dC is not None:
-        if verbose: print('Doing Fcoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # Fcoul = -q_i * sum_j q_j * dCj/dRi
-        Fcoul = q * (q @ dC)
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # Fcoul = -q_i * sum_j q_j * dCj/dRi
+    Fcoul = q * (q @ dC)
 
-        if verbose: print('Doing FScoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # FScoul
-        CoulPot = C @ q
-        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-        factor = (U * q + CoulPot)*2
-        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
-    else:
-        if verbose: print('Skipping Fcoul, done in PME.')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # Fcoul = -q_i * sum_j q_j * dCj/dRi
-        Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # FScoul
+    CoulPot = C @ q
+    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+    factor = (U * q + CoulPot)*2
+    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
-        if verbose: print('Doing FScoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # FScoul
-        CoulPot = C
-        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-        factor = (U * q + CoulPot)*2
-        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
-
-    if verbose: print('Doing Fband0')
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
     Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
         
-    if verbose: print('Doing Pulay')
     # Pulay forces
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
     FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     
-    if verbose: print('Doing Fdipole') # $$$ ??? a bug in Efield calculations.
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
     
-    if verbose: print('Doing FSdipole')
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -128,124 +164,349 @@ def Forces(H, H0, S, Z, C, D, D0, dH, dS,
     new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
     FSdipole -= 2*new_fs
 
-    if verbose: print('Doing Repulsion')
     Frep = dVr.sum(dim=2)
     
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
-    #print("Forces t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
-
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 @torch.compile
-def ForcesShadow(H, H0, S, Z, C, D, D0, dH, dS,
-                   dC, dVr, Efield, U, q, n, Rx, Ry, Rz,
-                   Nats, H_INDEX_START, H_INDEX_END, const, TYPE,
-                   verbose=False):
+def Forces_PME(
+    H: torch.Tensor,
+    Z: torch.Tensor,
+    dq_p1: torch.Tensor,
+    D: torch.Tensor,
+    D0: torch.Tensor,
+    dH: torch.Tensor,
+    dS: torch.Tensor,
+    dVr: torch.Tensor,
+    Efield: torch.Tensor,
+    U: torch.Tensor,
+    q: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    Nats: int,
+    const,
+    TYPE: torch.Tensor,
+    verbose: bool = False,
+):
     """
-    Computes atomic forces from a DFTB-like total energy expression.
+    Compute atomic forces for a DFTB-like total energy expression using
+    PME-based electrostatics (periodic boundary conditions).
 
-    Args:
-        H (Tensor): Two-electron Hamiltonian matrix (n_orb, n_orb).
-        H0 (Tensor): One-electron Hamiltonian matrix (n_orb, n_orb).
-        S (Tensor): Overlap matrix (n_orb, n_orb).
-        C (Tensor): Coulomb interaction matrix (n_orb, n_orb).
-        D (Tensor): Optimized density matrix (n_orb, n_orb).
-        D0 (Tensor): Atomic reference density matrix (n_orb,).
-        dH (Tensor): Derivatives of the Hamiltonian (3, n_orb, n_orb).
-        dS (Tensor): Derivatives of the overlap matrix (3, n_orb, n_orb).
-        dC (Tensor): Derivatives of the Coulomb matrix (3, n_orb, n_orb).
-        Efield (Tensor): External electric field vector (3,).
-        U (Tensor): Hubbard U parameters per atom (Nats,).
-        q (Tensor): Self-consistent charge (SCC) vector (Nats,).
-        Rx (Tensor): X-coordinates of atoms (Nats,).
-        Ry (Tensor): Y-coordinates of atoms (Nats,).
-        Rz (Tensor): Z-coordinates of atoms (Nats,).
-        Nats (int): Number of atoms.
-        H_INDEX_START (Tensor): Index of first orbital for each atom (Nats,).
-        H_INDEX_END (Tensor): Index of last orbital for each atom (Nats,).
-        const (object): Container with model constants (e.g. orbital numbers).
-        TYPE (Tensor): Element type vector (Nats,).
+    In contrast to :func:`Forces`, the PME variant expects the Coulomb
+    potential per atom (already including long-range Ewald / PME effects)
+    in ``dq_p1`` and does not directly use the Coulomb force derivative tensor
+    ``dC`` (the PME forces are assumed to be provided separately).
 
-    Returns:
-        Ftot (Tensor): Total forces on atoms (3, Nats).
-        Fcoul (Tensor): Coulomb interaction forces (3, Nats).
-        Fband0 (Tensor): Band structure energy forces (3, Nats).
-        Fdipole (Tensor): Electric dipole interaction forces (3, Nats).
-        FPulay (Tensor): Pulay correction forces (3, Nats).
-        FScoul (Tensor): Coulomb-related overlap derivatives contribution (3, Nats).
-        FSdipole (Tensor): Dipole-related overlap derivatives contribution (3, Nats).
+    Parameters
+    ----------
+    H : torch.Tensor
+        Two-electron (effective) Hamiltonian matrix of shape (n_orb, n_orb).
+    Z : torch.Tensor
+        Transformation / renormalization matrix (e.g. orthogonalization) used
+        in the Pulay term, shape (n_orb, n_orb).
+    dq_p1 : torch.Tensor
+        Coulomb potential per atom, typically including PME / Ewald
+        contributions, shape (Nats,) or (Nats, 1). Used only to build the
+        SCC-related overlap term.
+    D : torch.Tensor
+        Self-consistent density matrix of shape (n_orb, n_orb).
+    D0 : torch.Tensor
+        Reference (atomic) density vector of shape (n_orb,). Internally turned
+        into a diagonal matrix when needed.
+    dH : torch.Tensor
+        Derivatives of the Hamiltonian with respect to Cartesian coordinates,
+        shape (3, n_orb, n_orb). The first dimension corresponds to x, y, z.
+    dS : torch.Tensor
+        Derivatives of the overlap matrix with respect to Cartesian
+        coordinates, shape (3, n_orb, n_orb).
+    dVr : torch.Tensor
+        Derivatives of the short-range repulsive potential with respect to
+        atomic coordinates, shape (3, Nats, Nats).
+    Efield : torch.Tensor
+        External electric field vector of shape (3,).
+    U : torch.Tensor
+        On-site Hubbard U parameters per atom, shape (Nats,).
+    q : torch.Tensor
+        Self-consistent charges per atom, shape (Nats,).
+    Rx, Ry, Rz : torch.Tensor
+        Cartesian coordinates of atoms along x, y, z respectively, each of
+        shape (Nats,).
+    Nats : int
+        Number of atoms in the system.
+    const : object
+        Container with model constants. Must provide `n_orb`, the number of
+        orbitals per element type.
+    TYPE : torch.Tensor
+        Element type indices for each atom, shape (Nats,). Used to map into
+        `const.n_orb`.
+    verbose : bool, optional
+        If True, allows callers to hook in additional logging (currently not
+        used inside this routine).
 
-    Notes:
-        - All forces are computed as negative gradients of the total energy.
-        - Electric field forces include both direct dipole terms and overlap-derivative corrections.
-        - SCC (self-consistent charge) and Pulay forces are included.
+    Returns
+    -------
+    Ftot : torch.Tensor
+        Total forces on atoms, shape (3, Nats). Convention: forces are
+        negative gradients of the total energy.
+    Fcoul : torch.Tensor
+        PME Coulomb interaction contribution to the forces, shape (3, Nats).
+        In this implementation, it is set to zero and should be added
+        externally if available.
+    Fband0 : torch.Tensor
+        Band-structure (Hamiltonian) contribution to the forces, shape
+        (3, Nats).
+    Fdipole : torch.Tensor
+        Direct electric-field (dipole) contribution to the forces, shape
+        (3, Nats).
+    FPulay : torch.Tensor
+        Pulay correction forces due to non-orthogonal orbitals, shape
+        (3, Nats).
+    FScoul : torch.Tensor
+        Overlap-derivative contribution associated with the SCC Coulomb
+        energy, using the PME Coulomb potential, shape (3, Nats).
+    FSdipole : torch.Tensor
+        Overlap-derivative contribution associated with the dipole / external
+        field term, shape (3, Nats).
+    Frep : torch.Tensor
+        Short-range repulsive potential contribution to the forces, shape
+        (3, Nats).
+
+    Notes
+    -----
+    The total force is assembled as::
+
+        Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+
+    where all components are computed as negative derivatives of the
+    corresponding energy contributions with respect to atomic positions.
+    PME / periodicity affects only the Coulomb-related pieces through the
+    supplied Coulomb potential ``dq_p1``.
     """
     
     #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
-    #start_time1 = time.perf_counter()
+
     dtype = H.dtype
     device = H.device
-    HDIM = H0.size(0)
     
     n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
+    
+    # Fcoul = -q_i * sum_j q_j * dCj/dRi
+    Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
 
-    if dC is not None:
-        if verbose: print('Doing Fcoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # Fcoul = -q_i * sum_j q_j * dCj/dRi
-        Fcoul = (2*q - n) * (n @ dC)
+    # FScoul
+    CoulPot = dq_p1
+    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+    factor = (U * q + CoulPot)*2
+    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
-        if verbose: print('Doing FScoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # FScoul
-        CoulPot = C @ n
-        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-        factor = (U * n + CoulPot)*2
-        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
-    else:
-        if verbose: print('Skipping Fcoul, done in PME.')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # Fcoul = -q_i * sum_j q_j * dCj/dRi
-        Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-
-        if verbose: print('Doing FScoul')
-        # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
-        # FScoul
-        CoulPot = C
-        FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-        factor = (U * n + CoulPot)*2
-        dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-        FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
-
-    if verbose: print('Doing Fband0')
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
     Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
         
-    if verbose: print('Doing Pulay')
     # Pulay forces
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
     FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     
-    if verbose: print('Doing Fdipole') # $$$ ??? a bug in Efield calculations.
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
+    
+    # FSdipole. $$$ ??? a bug in Efield calculations.
+    D0 = torch.diag(D0)
+    dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
+    FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
+    tmp1 = (D-D0)@dS
+    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
+    FSdipole *= dotRE
+
+    D_diff = D - D0
+    n_orb = dS.shape[1]
+    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
+    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
+    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
+    FSdipole -= 2*new_fs
+
+    Frep = dVr.sum(dim=2)
+    
+    # Total force
+    Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+    return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
+@torch.compile
+def forces_shadow(
+    H: torch.Tensor,
+    Z: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+    D0: torch.Tensor,
+    dH: torch.Tensor,
+    dS: torch.Tensor,
+    dC: torch.Tensor,
+    dVr: torch.Tensor,
+    Efield: torch.Tensor,
+    U: torch.Tensor,
+    q: torch.Tensor,
+    n: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    Nats: int,
+    const,
+    TYPE: torch.Tensor,
+    verbose: bool = False,
+):
+    """
+    Computes atomic forces from a DFTB-like total energy expression.
+
+    This variant uses an auxiliary charge-like vector ``n`` instead of the
+    standard SCC charges ``q`` in the Coulomb- and overlap-related terms.
+    The usual SCC force is recovered when ``n == q``. The other contributions
+    (band-structure, Pulay, dipole, repulsive) are treated analogously to
+    :func:`Forces`.
+
+    Parameters
+    ----------
+    H : torch.Tensor
+        Two-electron (effective) Hamiltonian matrix of shape (n_orb, n_orb).
+    Z : torch.Tensor
+        Transformation / renormalization matrix (e.g. orthogonalization) used
+        in the Pulay term, shape (n_orb, n_orb).
+    C : torch.Tensor
+        Coulomb interaction matrix of shape (Nats, Nats). It is multiplied by
+        the “shadow” charges ``n`` to obtain the Coulomb potential.
+    D : torch.Tensor
+        Self-consistent density matrix of shape (n_orb, n_orb).
+    D0 : torch.Tensor
+        Reference (atomic) density vector of shape (n_orb,). Internally turned
+        into a diagonal matrix.
+    dH : torch.Tensor
+        Derivatives of the Hamiltonian with respect to Cartesian coordinates,
+        shape (3, n_orb, n_orb). The first dimension corresponds to x, y, z.
+    dS : torch.Tensor
+        Derivatives of the overlap matrix with respect to Cartesian
+        coordinates, shape (3, n_orb, n_orb).
+    dC : torch.Tensor
+        Derivatives of the Coulomb matrix with respect to atomic coordinates,
+        shape (Nats, Nats, 3) or broadcastable equivalent; it is contracted
+        with the “shadow” charges ``n`` and the combination ``(2*q - n)`` in
+        the Coulomb force.
+    dVr : torch.Tensor
+        Derivatives of the short-range repulsive potential with respect to
+        atomic coordinates, shape (3, Nats, Nats).
+    Efield : torch.Tensor
+        External electric field vector of shape (3,).
+    U : torch.Tensor
+        On-site Hubbard U parameters per atom, shape (Nats,).
+    q : torch.Tensor
+        Self-consistent SCC charges per atom, shape (Nats,). Used together
+        with ``n`` in the shadow Coulomb force term.
+    n : torch.Tensor
+        Shadow charge (or occupancy) vector per atom, shape (Nats,). Used in
+        place of ``q`` in the Coulomb energy and overlap-related terms.
+    Rx, Ry, Rz : torch.Tensor
+        Cartesian coordinates of atoms along x, y, z respectively, each of
+        shape (Nats,).
+    Nats : int
+        Number of atoms in the system.
+    const : object
+        Container with model constants. Must provide `n_orb`, the number of
+        orbitals per element type.
+    TYPE : torch.Tensor
+        Element type indices for each atom, shape (Nats,). Used to map into
+        `const.n_orb`.
+    verbose : bool, optional
+        If True, allows callers to hook in additional logging (currently not
+        used inside this routine).
+
+    Returns
+    -------
+    Ftot : torch.Tensor
+        Total forces on atoms, shape (3, Nats). Convention: forces are
+        negative gradients of the total energy.
+    Fcoul : torch.Tensor
+        Shadow Coulomb interaction contribution to the forces, shape (3, Nats).
+        Uses the combination ``(2*q - n) * (n @ dC)``.
+    Fband0 : torch.Tensor
+        Band-structure (Hamiltonian) contribution to the forces, shape
+        (3, Nats).
+    Fdipole : torch.Tensor
+        Direct electric-field (dipole) contribution to the forces, shape
+        (3, Nats), still built from the SCC charges ``q``.
+    FPulay : torch.Tensor
+        Pulay correction forces due to non-orthogonal orbitals, shape
+        (3, Nats).
+    FScoul : torch.Tensor
+        Overlap-derivative contribution associated with the shadow Coulomb
+        energy, using ``n`` in place of ``q``, shape (3, Nats).
+    FSdipole : torch.Tensor
+        Overlap-derivative contribution associated with the dipole / external
+        field term, shape (3, Nats).
+    Frep : torch.Tensor
+        Short-range repulsive potential contribution to the forces, shape
+        (3, Nats).
+
+    Notes
+    -----
+    The total force is assembled as::
+
+        Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+
+    Setting ``n = q`` recovers the standard SCC force decomposition used in
+    :func:`Forces`.
+    """
+    
+    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+
+    dtype = H.dtype
+    device = H.device
+    
+    n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
+    atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
+
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # Fcoul = -q_i * sum_j q_j * dCj/dRi
+    Fcoul = (2*q - n) * (n @ dC)
+
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # FScoul
+    CoulPot = C @ n
+    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+    factor = (U * n + CoulPot)*2
+    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
+
+    # Eband0 = 2 * torch.trace(H0 @ (D))
+    # Fband0 = -4 * Tr[D * dH0/dR]
+    Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
+    TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
         
-    if verbose: print('Doing FSdipole')
+    # Pulay forces
+    SIHD = 4 * Z @ Z.T @ H @ D
+    FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
+    TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    
+    # Fdipole = q_i * E
+    Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
+    
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -263,11 +524,190 @@ def ForcesShadow(H, H0, S, Z, C, D, D0, dH, dS,
     new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
     FSdipole -= 2*new_fs
 
-    if verbose: print('Doing Repulsion')
     Frep = dVr.sum(dim=2)
     
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
-    #print("Forces t {:.1f} s".format( time.perf_counter()-start_time1 ))
+
+    return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
+@torch.compile
+def forces_shadow_pme(
+    H: torch.Tensor,
+    Z: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor,
+    D0: torch.Tensor,
+    dH: torch.Tensor,
+    dS: torch.Tensor,
+    dVr: torch.Tensor,
+    Efield: torch.Tensor,
+    U: torch.Tensor,
+    q: torch.Tensor,
+    n: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    Nats: int,
+    const,
+    TYPE: torch.Tensor,
+):
+    """
+    Compute atomic forces for a “shadow” DFTB-like total energy expression
+    using PME-based electrostatics (periodic boundary conditions).
+
+    This PME variant mirrors :func:`forces_shadow` but assumes that the
+    long-range Coulomb forces are handled externally and provides only the
+    band-structure, Pulay, dipole, SCC-overlap, and repulsive contributions.
+    As in :func:`forces_shadow`, an auxiliary charge-like vector ``n`` is used
+    instead of the standard SCC charges ``q`` in the Coulomb-overlap term.
+
+    Parameters
+    ----------
+    H : torch.Tensor
+        Two-electron (effective) Hamiltonian matrix of shape (n_orb, n_orb).
+    Z : torch.Tensor
+        Transformation / renormalization matrix (e.g. orthogonalization) used
+        in the Pulay term, shape (n_orb, n_orb).
+    C : torch.Tensor
+        Coulomb potential per atom, typically including PME / Ewald
+        contributions, shape (Nats,) or (Nats, 1). Used only to build the
+        shadow SCC-related overlap term.
+    D : torch.Tensor
+        Self-consistent density matrix of shape (n_orb, n_orb).
+    D0 : torch.Tensor
+        Reference (atomic) density vector of shape (n_orb,). Internally turned
+        into a diagonal matrix when needed.
+    dH : torch.Tensor
+        Derivatives of the Hamiltonian with respect to Cartesian coordinates,
+        shape (3, n_orb, n_orb). The first dimension corresponds to x, y, z.
+    dS : torch.Tensor
+        Derivatives of the overlap matrix with respect to Cartesian
+        coordinates, shape (3, n_orb, n_orb).
+    dVr : torch.Tensor
+        Derivatives of the short-range repulsive potential with respect to
+        atomic coordinates, shape (3, Nats, Nats).
+    Efield : torch.Tensor
+        External electric field vector of shape (3,).
+    U : torch.Tensor
+        On-site Hubbard U parameters per atom, shape (Nats,).
+    q : torch.Tensor
+        Self-consistent SCC charges per atom, shape (Nats,). Used to build the
+        direct dipole term and appears implicitly in the shadow formalism.
+    n : torch.Tensor
+        Shadow charge (or occupancy) vector per atom, shape (Nats,). Used in
+        place of ``q`` in the shadow Coulomb-overlap term.
+    Rx, Ry, Rz : torch.Tensor
+        Cartesian coordinates of atoms along x, y, z respectively, each of
+        shape (Nats,).
+    Nats : int
+        Number of atoms in the system.
+    const : object
+        Container with model constants. Must provide `n_orb`, the number of
+        orbitals per element type.
+    TYPE : torch.Tensor
+        Element type indices for each atom, shape (Nats,). Used to map into
+        `const.n_orb`.
+
+    Returns
+    -------
+    Ftot : torch.Tensor
+        Total forces on atoms, shape (3, Nats). Convention: forces are
+        negative gradients of the total energy.
+    Fcoul : torch.Tensor
+        PME shadow Coulomb interaction contribution to the forces,
+        shape (3, Nats). In this implementation it is set to zero and should
+        be added externally if available.
+    Fband0 : torch.Tensor
+        Band-structure (Hamiltonian) contribution to the forces, shape
+        (3, Nats).
+    Fdipole : torch.Tensor
+        Direct electric-field (dipole) contribution to the forces, shape
+        (3, Nats).
+    FPulay : torch.Tensor
+        Pulay correction forces due to non-orthogonal orbitals, shape
+        (3, Nats).
+    FScoul : torch.Tensor
+        Overlap-derivative contribution associated with the shadow Coulomb
+        energy, using ``n`` and the PME Coulomb potential ``C``, shape
+        (3, Nats).
+    FSdipole : torch.Tensor
+        Overlap-derivative contribution associated with the dipole / external
+        field term, shape (3, Nats).
+    Frep : torch.Tensor
+        Short-range repulsive potential contribution to the forces, shape
+        (3, Nats).
+
+    Notes
+    -----
+    The total force is assembled as::
+
+        Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
+
+    As in :func:`forces_shadow`, setting ``n = q`` recovers the standard SCC
+    decomposition, now in a PME / periodic setting.
+    """
+    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+
+    dtype = H.dtype
+    device = H.device
+    
+    n_orbitals_per_atom = const.n_orb[TYPE]
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=Rx.device),
+        n_orbitals_per_atom,
+    )
+
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # Fcoul = -q_i * sum_j q_j * dCj/dRi
+    Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+
+    # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
+    # FScoul
+    CoulPot = C
+    FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
+    factor = (U * n + CoulPot)*2
+    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+    FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
+
+    # Eband0 = 2 * torch.trace(H0 @ (D))
+    # Fband0 = -4 * Tr[D * dH0/dR]
+    Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
+    TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        
+    # Pulay forces
+    SIHD = 4 * Z @ Z.T @ H @ D
+    FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
+    TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    
+    # Fdipole = q_i * E
+    Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
+        
+    # FSdipole. $$$ ??? a bug in Efield calculations.
+    D0 = torch.diag(D0)
+    dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
+    FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
+    D_diff = D - D0
+    tmp1 = D_diff @ dS
+    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
+    FSdipole *= dotRE
+    
+    n_orb = dS.shape[1]
+    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
+    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
+    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
+    FSdipole -= 2*new_fs
+
+    Frep = dVr.sum(dim=2)
+    
+    # Total force
+    Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
 
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
