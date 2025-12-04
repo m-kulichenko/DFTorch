@@ -29,9 +29,6 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     """    
     if debug: torch.cuda.synchronize()
     start_time1 = time.perf_counter()
-    dtype = H0.dtype
-    device = H0.device
-    N = H0.shape[0]
     
     if mu_0 == None:
         #h = torch.linalg.eigvalsh(H0)
@@ -80,27 +77,4 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         torch.cuda.synchronize()
         print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
 
-    
-#     I = torch.eye(N, dtype=dtype, device=device)
-
-#     OccErr = 1.0
-#     Cnt = 0
-
-#     while OccErr > eps and Cnt < MaxIt:
-#         P0 = 0.5 * I - cnst * (H0 - mu0 * I)
-#         for _ in range(m):
-#             P02 = P0 @ P0
-#             ID0 = torch.linalg.inv(2 * (P02 - P0) + I)
-#             P0 = ID0 @ P02
-#         TrdPdmu = beta * torch.trace(P0 @ (I - P0))
-#         occ = torch.trace(P0)
-
-#         if abs(TrdPdmu) > 1e-8:
-#             mu0 = mu0 + (nocc - occ) / TrdPdmu
-#             OccErr = abs(occ - nocc)
-#         else:
-#             OccErr = 0.0
-#         Cnt += 1
-
-    
     return P0, mu0

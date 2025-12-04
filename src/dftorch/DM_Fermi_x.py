@@ -1,61 +1,93 @@
 from typing import Optional
 import torch
-import time
-import torch, torch._dynamo as dynamo
+import torch._dynamo as dynamo
 dynamo.config.capture_scalar_outputs = True
 
-@torch.compile(dynamic=False, mode="reduce-overhead")  # or mode="default"
+@torch.compile(dynamic=False)
 def DM_Fermi_x(
     H0: torch.Tensor,
     T: float,
     nocc: int,
     mu_0: Optional[float],
-    m: int,
     eps: float,
     MaxIt: int,
     debug: bool = False,
-    ):
+):
     """
-    Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
+    Compute the finite‑temperature density matrix using a Fermi–Dirac
+    diagonalization and Newton iteration on the chemical potential.
 
-    This function implements the recursive expansion of the Fermi-Dirac distribution to
-    evaluate the electronic density matrix `P0` at finite temperature without explicitly computing
-    matrix exponentials. It iteratively adjusts the chemical potential `mu0` to ensure the trace of the
-    density matrix matches the desired number of occupied electrons.
+    Diagonalizes the orthonormal‑basis Hamiltonian ``H0`, determines the
+    chemical potential ``mu0`` such that the total occupation matches
+    ``nocc`` at temperature ``T``, and constructs the density matrix
 
-    Args:
-        H0 (torch.Tensor): Hamiltonian matrix in the orthonormal basis (N x N).
-        T (float): Electronic temperature in Kelvin.
-        nocc (int): Number of occupied electrons (expected trace of the density matrix).
-        mu_0 (float or None): Initial guess for chemical potential. If None, estimated from eigenvalues.
-        m (int): Depth of the recursive expansion. Higher values increase accuracy.
-        eps (float): Convergence threshold for occupation error.
-        MaxIt (int): Maximum number of SCF iterations to adjust the chemical potential.
+        P0 = V diag(f) Vᵀ
 
-    Returns:
-        P0 (torch.Tensor): Finite-temperature density matrix (N x N).
-        mu0 (float): Converged chemical potential.
+    where ``V`` and ``h`` are eigenvectors/eigenvalues of ``H0`` and
+    ``f_i = 1 / (exp(β (h_i − μ)) + 1)`` are Fermi–Dirac occupations.
 
-    Notes:
-        - The recursion approximates the Fermi function at finite temperature, avoiding costly exponentials.
-        - The eigenbasis is used to construct the density matrix after recursion.
+    Parameters
+    ----------
+    H0 : torch.Tensor
+        Hamiltonian matrix in an orthonormal basis, shape (n_orb, n_orb).
+    T : float
+        Electronic temperature in Kelvin.
+    nocc : int
+        Target number of (spin‑summed) occupied electrons; the trace of the
+        density matrix is driven to this value.
+    mu_0 : float or None
+        Initial guess for the chemical potential μ. If ``None``, it is
+        estimated as the midpoint between the nocc‑th and (nocc+1)‑th
+        eigenvalues of ``H0``.
+    eps : float
+        Convergence threshold for the occupation error
+        ``|nocc − ∑_i f_i|``.
+    MaxIt : int
+        Maximum number of Newton iterations on μ.
+    debug : bool, optional
+        If True, performs CUDA synchronizations around the main steps for
+        more reliable timing.
+
+    Returns
+    -------
+    P0 : torch.Tensor
+        Finite‑temperature density matrix, shape (n_orb, n_orb).
+    v : torch.Tensor
+        Eigenvector matrix of ``H0`` (columns are eigenvectors), shape
+        (n_orb, n_orb).
+    h : torch.Tensor
+        Eigenvalues of ``H0`` corresponding to columns of ``v``, shape
+        (n_orb,).
+    f : torch.Tensor
+        Fermi–Dirac occupation numbers at the converged μ, shape (n_orb,).
+    mu0 : float
+        Converged chemical potential.
+
+    Notes
+    -----
+    The chemical potential is updated via a scalar Newton step
+
+        μ_{k+1} = μ_k + (nocc − N(μ_k)) / (dN/dμ),
+
+    where ``N(μ) = ∑_i f_i(μ)`` and
+
+        dN/dμ = β ∑_i f_i (1 − f_i).
+
+    A small lower bound is imposed on ``dN/dμ`` to avoid division by very
+    small derivatives in pathological cases.
     """    
-    if debug: torch.cuda.synchronize()
-    #start_time1 = time.perf_counter()
     
     if mu_0 == None:
         #h = torch.linalg.eigvalsh(H0)
         h,v = torch.linalg.eigh(H0)
+        # h,v = torch.linalg.eigh(H0.to(torch.float64))
+        # h = h.to(H0.dtype)
+        # v = v.to(H0.dtype)
+
         mu0 = 0.5 * (h[nocc - 1] + h[nocc])
     else:
         mu0 = mu_0
         
-    if debug: 
-        torch.cuda.synchronize()
-        #print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
-
-    #start_time1 = time.perf_counter()
-
     kB = torch.tensor(8.61739e-5, dtype=h.dtype, device=h.device)  # eV/K
     beta = 1.0 / (kB * T)
     occ_err_val = float("inf")
@@ -70,28 +102,84 @@ def DM_Fermi_x(
 
         occ_err_val = abs(nocc - Occ)
 
-        if occ_err_val > 1e-10:
+        if occ_err_val > 1e-9:
             # Newton step on mu
-            mu0 = mu0 + (nocc - Occ) / max(dOcc, 1e-30)   # guard tiny derivative
+            mu0 = mu0 + (nocc - Occ) / max(dOcc, 1e-16)   # guard tiny derivative
         cnt += 1
         
     if cnt == MaxIt:
-        print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, OccErr))
-    if debug:
-        torch.cuda.synchronize()
-        #print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
-    #start_time1 = time.perf_counter()
+        print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, occ_err_val))
     
     # Final adjustment of occupation    
     #P0 = v@(torch.diag_embed(f)@v.T)
     # Build density matrix P0 = V diag(f) V^T without forming diag explicitly
     # Column-scale trick: V @ diag(f) == V * f[None, :]
     P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
-
-    if debug:
-        torch.cuda.synchronize()
-        #print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
-
-
     
-    return P0, v,h,f, mu0
+    return P0, v, h, f, mu0
+
+@torch.compile(dynamic=False)
+def DM_Fermi_x_batch(
+    H0: torch.Tensor,
+    T: float,
+    nocc: int,
+    mu_0: Optional[float],
+    eps: float,
+    MaxIt: int,
+    debug: bool = False,
+):
+    """
+    Notes
+    -----
+    The chemical potential is updated via a scalar Newton step
+
+        μ_{k+1} = μ_k + (nocc − N(μ_k)) / (dN/dμ),
+
+    where ``N(μ) = ∑_i f_i(μ)`` and
+
+        dN/dμ = β ∑_i f_i (1 − f_i).
+
+    A small lower bound is imposed on ``dN/dμ`` to avoid division by very
+    small derivatives in pathological cases.
+    """    
+    
+    if mu_0 == None:
+        #h = torch.linalg.eigvalsh(H0)
+        h,v = torch.linalg.eigh(H0)
+        # h,v = torch.linalg.eigh(H0.to(torch.float64))
+        # h = h.to(H0.dtype)
+        # v = v.to(H0.dtype)
+        mu0 = 0.5 * (h.gather(1, (nocc.unsqueeze(0).T - 1)) + h.gather(1, nocc.unsqueeze(0).T)).squeeze(-1)
+    else:
+        mu0 = mu_0
+        
+    kB = torch.tensor(8.61739e-5, dtype=h.dtype, device=h.device)  # eV/K
+    beta = 1.0 / (kB * T)
+    occ_err_val = torch.zeros_like(nocc, dtype=torch.float64, device=nocc.device) + float("inf")
+    cnt = 0
+    while (occ_err_val > eps).any() and (cnt < MaxIt):
+        # Clamp small eigvals if needed by your physics; leave as-is here.
+        f = 1.0 / (torch.exp(beta * (h - mu0.unsqueeze(-1))) + 1.0)   # occupations (N,)
+
+        # dOcc and Occ are scalar tensors; convert to Python floats for loop control.
+        dOcc = beta * torch.sum(f * (1.0 - f), dim=1)
+        Occ  = torch.sum(f, dim=1)
+
+        occ_err_val = abs(nocc - Occ)
+        active = (occ_err_val > 1e-9)
+        
+        if active.any():
+            # Newton step on mu
+            denom = torch.maximum(dOcc, torch.full_like(dOcc, 1e-14))
+            mu0 = mu0 + ((nocc - Occ) / denom)*active   # guard tiny derivative
+
+        cnt += 1
+    if cnt == MaxIt:
+        print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, occ_err_val))
+
+    # Final adjustment of occupation    
+    #P0 = v@(torch.diag_embed(f)@v.T)
+    # Build density matrix P0 = V diag(f) V^T without forming diag explicitly
+    # Column-scale trick: V @ diag(f) == V * f[None, :]
+    P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)    
+    return P0, v, h, f, mu0

@@ -1,5 +1,5 @@
 import torch
-def AtomicDensityMatrix(Nr_atoms, H_INDEX_START, H_INDEX_END, HDIM, Znuc):
+def atomic_density_matrix( H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
     """
     Vectorized construction of the atomic density matrix D_atomic.
 
@@ -14,93 +14,67 @@ def AtomicDensityMatrix(Nr_atoms, H_INDEX_START, H_INDEX_END, HDIM, Znuc):
     - D_atomic (Tensor[float]): Atomic density matrix as 1D tensor of length HDIM
     """
     # Initialize the atomic density matrix with zeros
-    D_atomic = torch.zeros(HDIM, device=H_INDEX_START.device)
+    D_atomic = torch.zeros(HDIM, device=H_INDEX_START.device, dtype=torch.get_default_dtype())
 
-    # Start indexing
-    INDEX = 0
-
-    # Loop over all atoms
-    for I in range(Nr_atoms):
-        # Calculate the number of orbitals for the atom I
-        N_orb = H_INDEX_END[I] - H_INDEX_START[I] + 1
-        
-        if N_orb == 1:
-            INDEX += 1
-            D_atomic[INDEX-1] = Znuc[I]  # PyTorch uses 0-based indexing
-        else:
-            if Znuc[I] <= 2:
-                INDEX += 1
-                D_atomic[INDEX-1] = Znuc[I]
-
-                INDEX += 1
-                D_atomic[INDEX-1] = 0
-                INDEX += 1
-                D_atomic[INDEX-1] = 0
-                INDEX += 1
-                D_atomic[INDEX-1] = 0
-            else:
-                INDEX += 1
-                D_atomic[INDEX-1] = 2
-
-                INDEX += 1
-                OCC = (Znuc[I] - 2) / 3
-                D_atomic[INDEX-1] = OCC
-                INDEX += 1
-                D_atomic[INDEX-1] = OCC
-                INDEX += 1
-                D_atomic[INDEX-1] = OCC
+    D_atomic[H_INDEX_START] = 1.0*const.n_s[TYPE]
+    D_atomic[H_INDEX_START[has_p]+1] = 1.0*const.n_p[TYPE[has_p]]/3
+    D_atomic[H_INDEX_START[has_p]+2] = 1.0*const.n_p[TYPE[has_p]]/3
+    D_atomic[H_INDEX_START[has_p]+3] = 1.0*const.n_p[TYPE[has_p]]/3
+    D_atomic[H_INDEX_START[has_d]+4] = 1.0*const.n_d[TYPE[has_d]]/5
+    D_atomic[H_INDEX_START[has_d]+5] = 1.0*const.n_d[TYPE[has_d]]/5
+    D_atomic[H_INDEX_START[has_d]+6] = 1.0*const.n_d[TYPE[has_d]]/5
+    D_atomic[H_INDEX_START[has_d]+7] = 1.0*const.n_d[TYPE[has_d]]/5
+    D_atomic[H_INDEX_START[has_d]+8] = 1.0*const.n_d[TYPE[has_d]]/5
 
     return D_atomic
 
-
-def AtomicDensityMatrix_vectorized(Nr_atoms, H_INDEX_START, H_INDEX_END, HDIM, Znuc):
+def atomic_density_matrix_batch(batch_size, H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
     """
-    Vectorized construction of the atomic density matrix D_atomic.
+    Vectorized batched atomic density matrix.
 
     Parameters:
-    - Nr_atoms (int): Number of atoms
-    - H_INDEX_START (Tensor[int]): Start orbital indices per atom (length Nr_atoms)
-    - H_INDEX_END (Tensor[int]): End orbital indices per atom (length Nr_atoms)
-    - HDIM (int): Total dimension of the density matrix (number of orbitals)
-    - Znuc (Tensor[float]): Nuclear charges per atom (length Nr_atoms)
+    - batch_size (int)
+    - H_INDEX_START: LongTensor [B, N_atoms]
+    - HDIM (int)
+    - TYPE: LongTensor [B, N_atoms]
+    - const: object with n_s, n_p, n_d tensors indexed by TYPE
+    - has_p: BoolTensor [B, N_atoms] atoms possessing p orbitals
+    - has_d: BoolTensor [B, N_atoms] atoms possessing d orbitals
 
     Returns:
-    - D_atomic (Tensor[float]): Atomic density matrix as 1D tensor of length HDIM
+    - D_atomic: FloatTensor [B, HDIM]
     """
+    device = H_INDEX_START.device
+    B = H_INDEX_START.shape[0]
+    assert B == batch_size, "batch_size mismatch"
+    D_atomic = torch.zeros(B, HDIM, device=device, dtype=torch.get_default_dtype())  # force float dtype
 
-    # Initialize D_atomic as float to allow fractional occupations
-    D_atomic = torch.zeros(HDIM, device=Znuc.device)
+    batch_idx = torch.arange(B, device=device).unsqueeze(1)
+    D_atomic[batch_idx, H_INDEX_START] = (1.0 * const.n_s[TYPE])
 
-    # Determine the number of orbitals per atom
-    N_orb = H_INDEX_END - H_INDEX_START + 1
+    # p occupations
+    if has_p.any():
+        b_p, a_p = has_p.nonzero(as_tuple=True)
+        start_p = H_INDEX_START[b_p, a_p]
+        type_p = TYPE[b_p, a_p]
+        occ_p = (1.0 * const.n_p[type_p]) / 3.0
+        for k in (1, 2, 3):
+            idx_k = start_p + k
+            if (idx_k >= HDIM).any():
+                raise IndexError("p orbital index out of range")
+            D_atomic[b_p, idx_k] = occ_p
 
-    # Build flat orbital indices per atom
-    offsets = torch.zeros(Nr_atoms, dtype=torch.long, device=Znuc.device)
-    offsets[1:] = torch.cumsum(N_orb[:-1], dim=0)
-    flat_indices = torch.arange(HDIM, device=Znuc.device)
+    # d occupations
+    if has_d.any():
+        b_d, a_d = has_d.nonzero(as_tuple=True)
+        start_d = H_INDEX_START[b_d, a_d]
+        type_d = TYPE[b_d, a_d]
+        occ_d = (1.0 * const.n_d[type_d]) / 5.0
+        for k in (4, 5, 6, 7, 8):
+            idx_k = start_d + k
+            if (idx_k >= HDIM).any():
+                raise IndexError("d orbital index out of range")
+            D_atomic[b_d, idx_k] = occ_d
 
-    # Atom ID for each orbital
-    orbital_atom_idx = torch.repeat_interleave(torch.arange(Nr_atoms, device=Znuc.device), N_orb)
-
-    # Identify which orbitals belong to which atom
-    Znuc_expanded = Znuc[orbital_atom_idx]
-    N_orb_expanded = N_orb[orbital_atom_idx]
-
-    # Compute occupancy
-    is_1s = (N_orb_expanded == 1)
-    is_He = (Znuc_expanded <= 2) & (~is_1s)
-    is_heavy = (Znuc_expanded > 2) & (~is_1s)
-
-    # Assign occupations
-    D_atomic[is_1s.nonzero().squeeze()] = 1.0*Znuc_expanded[is_1s]
-    D_atomic[is_He.nonzero().squeeze()[0::4]] = 1.0*Znuc_expanded[is_He][0::4]  # first orbital
-    # next 3 orbitals are zero by default
-
-    occ_heavy = ((Znuc_expanded[is_heavy] - 2.0) / 3.0)
-    
-    D_atomic[is_heavy.nonzero().squeeze()[0::4]] = 2.0  # first orbital gets 2 electrons
-    D_atomic[is_heavy.nonzero().squeeze()[1::4]] = occ_heavy
-    D_atomic[is_heavy.nonzero().squeeze()[2::4]] = occ_heavy
-    D_atomic[is_heavy.nonzero().squeeze()[3::4]] = occ_heavy
-
+    return D_atomic
     return D_atomic
