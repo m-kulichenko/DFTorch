@@ -4,6 +4,7 @@ import numpy as np
 from .BondIntegral import get_skf_tensors
 from .Elements import symbol_to_number, label, atomic_num, mass
 from .io import read_xyz
+from .Tools import load_spinw_to_matrix, load_spinw_to_tensor
 
 class Constants(torch.nn.Module):
 
@@ -11,7 +12,7 @@ class Constants(torch.nn.Module):
     Constants used in DFTB
     """
 
-    def __init__(self, file, skfpath, param_grad=False):
+    def __init__(self, file, skfpath, magnetic_hubbard_ldep=False, param_grad=False):
         """
         Constructor
         """
@@ -31,10 +32,28 @@ class Constants(torch.nn.Module):
             species, _ = read_xyz([file], sort=False) #Input coordinate file
         else:
             species, _ = read_xyz(file, sort=False) #Input coordinate file
-        TYPE = torch.tensor(species[0], dtype=torch.int64)
+        TYPE = torch.tensor(species.flatten(), dtype=torch.int64)
 
         R_tensor, R_orb, coeffs_tensor, R_rep_tensor, rep_splines_tensor, \
-        N_ORB, MAX_ANG, TORE, N_S, N_P, N_D, ES, EP, ED, US, UP, UD = get_skf_tensors(TYPE, self.skfpath)
+        N_ORB, MAX_ANG, MAX_ANG_OCC, TORE, N_S, N_P, N_D, ES, EP, ED, US, UP, UD = get_skf_tensors(TYPE, self.skfpath)
+
+        #w = load_spinw_to_tensor(skfpath + '/spinw.txt', device=TYPE.device)
+
+        try:
+            w_shell = load_spinw_to_matrix(skfpath + '/spinw.txt', device=TYPE.device)
+            self.w_shell = torch.nn.Parameter(w_shell,   requires_grad=False)
+        except:
+            print("Warning: could not load spinw.txt file for spin-orbit coupling. Proceeding without SOC.")
+            self.w_shell = None
+
+        w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
+        w_atom[TYPE] = self.w_shell[TYPE, MAX_ANG_OCC[TYPE]-1, MAX_ANG_OCC[TYPE]-1]
+        self.w_atom = torch.nn.Parameter(w_atom, requires_grad=False)
+
+        if magnetic_hubbard_ldep:
+            self.w = torch.nn.Parameter(w_shell.clone(), requires_grad=False)
+        else:
+            self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
 
         self.R_tensor = torch.nn.Parameter(R_tensor,   requires_grad=False)
         self.R_orb = torch.nn.Parameter(R_orb,   requires_grad=False)
@@ -43,7 +62,8 @@ class Constants(torch.nn.Module):
         self.rep_splines_tensor = torch.nn.Parameter(rep_splines_tensor,   requires_grad=False)
 
         self.n_orb   = torch.nn.Parameter(N_ORB,   requires_grad=False)
-        self.max_ang = torch.nn.Parameter(MAX_ANG, requires_grad=False)
+        self.max_ang = torch.nn.Parameter(MAX_ANG, requires_grad=False) # AO with max angular momentum l
+        self.max_ang_occ = torch.nn.Parameter(MAX_ANG_OCC, requires_grad=False) # occupied AO with max angular momentum l
         self.tore   = torch.nn.Parameter(TORE,   requires_grad=False)
         self.n_s = torch.nn.Parameter(N_S, requires_grad=False)
         self.n_p = torch.nn.Parameter(N_P, requires_grad=False)
@@ -58,7 +78,6 @@ class Constants(torch.nn.Module):
 
     def forward(self):
         pass
-
 
 
 class ConstantsTest(torch.nn.Module):

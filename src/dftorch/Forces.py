@@ -113,6 +113,11 @@ def Forces(
     #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
     dtype = H.dtype
     device = H.device
+
+    if D.dim() == 3: # os
+        D_tot = D.sum(0)/2
+    else: # cs
+        D_tot = D
     
     n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
     atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
@@ -126,7 +131,7 @@ def Forces(
     CoulPot = C @ q
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
     factor = (U * q + CoulPot)*2
-    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
+    dS_times_D = D_tot*dS*factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
     FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
@@ -135,13 +140,18 @@ def Forces(
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
+    TMP = 4*(dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
     Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
         
     # Pulay forces
-    SIHD = 4 * Z @ Z.T @ H @ D
+    SIHD = 4 * Z @ Z.T @ H @ D # removes S factor from H
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    # Collapse alpha and beta channels if present: dS @ (SIHD[0] + SIHD[1]) == dS @ SIHD.sum(0)
+    if SIHD.dim() == 2: # cs
+        TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    else: # os
+        TMP = -0.5*torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(offset=0, dim1=1, dim2=2) # (2, 3, 4, 4)
+
     FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     
     # Fdipole = q_i * E
@@ -151,12 +161,12 @@ def Forces(
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    tmp1 = (D-D0)@dS
+    tmp1 = (D_tot-D0)@dS
     tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
 
-    D_diff = D - D0
+    D_diff = D_tot - D0
     n_orb = dS.shape[1]
     a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
     outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)

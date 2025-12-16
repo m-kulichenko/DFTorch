@@ -189,6 +189,7 @@ def _expand_tokens(tokens):
 def read_skf_table(path,
             N_ORB,
             MAX_ANG,
+            MAX_ANG_OCC,
             TORE,
             N_S,
             N_P,
@@ -238,6 +239,7 @@ def read_skf_table(path,
         #N_ORB[el_num] = 1*(Es != 0) + 3*(Ep != 0) + 5*(Ed != 0)
         MAX_ANG[el_num] = 1 if '9*' in tmp else (2 if '5*' in tmp else 3)
         #MAX_ANG[el_num] = 3 if Ed != 0 else (2 if Ep != 0 else 1)
+        MAX_ANG_OCC[el_num] = 3 if fd != 0 else (2 if fp != 0 else 1)
         TORE[el_num] = fs + fp + fd
         N_S[el_num] = fs
         N_P[el_num] = fp
@@ -432,6 +434,7 @@ def get_skf_tensors(TYPE, skfpath):
 
     N_ORB   = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     MAX_ANG = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
+    MAX_ANG_OCC = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     TORE    = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     N_S     = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     N_P     = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
@@ -449,6 +452,7 @@ def get_skf_tensors(TYPE, skfpath):
             skfpath + "/{}.skf".format(label_list[i]),
             N_ORB,
             MAX_ANG,
+            MAX_ANG_OCC,
             TORE,
             N_S,
             N_P,
@@ -472,8 +476,9 @@ def get_skf_tensors(TYPE, skfpath):
 
     R_orb = R_orb.to(device=TYPE.device)
 
-    coeffs_tensor = torch.cat((coeffs_tensor, torch.zeros(coeffs_tensor.shape[0],
-                                                          1, coeffs_tensor.shape[2], coeffs_tensor.shape[3], device=TYPE.device)), dim=1) # pad last channel with zeros
+    coeffs_tensor = torch.cat(
+        (coeffs_tensor, torch.zeros(coeffs_tensor.shape[0],
+        1, coeffs_tensor.shape[2], coeffs_tensor.shape[3], device=TYPE.device)), dim=1) # pad last channel with zeros
     return R_tensor, R_orb, coeffs_tensor, R_rep_tensor, rep_splines_tensor,\
-           N_ORB, MAX_ANG, TORE, N_S, N_P, N_D, ES, EP, ED, US, UP, UD
+           N_ORB, MAX_ANG, MAX_ANG_OCC, TORE, N_S, N_P, N_D, ES, EP, ED, US, UP, UD
 

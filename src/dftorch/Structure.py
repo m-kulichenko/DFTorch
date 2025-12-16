@@ -72,12 +72,18 @@ class Structure(torch.nn.Module):
         self.RZ = torch.tensor(coordinates[0,:,2], device=device, dtype=torch.get_default_dtype(),
                             requires_grad=self.req_grad_xyz)
 
-        self.LBox = LBox.to(torch.get_default_dtype())
-        self.RX = (self.RX) % self.LBox[0]; 
-        self.RY = (self.RY) % self.LBox[1];
-        self.RZ = (self.RZ) % self.LBox[2];
+        
+        if LBox is None:
+            self.LBox = None
+            self.lattice_vecs = None
+        else:
+            self.LBox = LBox.to(torch.get_default_dtype())
+            self.RX = (self.RX) % self.LBox[0]; 
+            self.RY = (self.RY) % self.LBox[1];
+            self.RZ = (self.RZ) % self.LBox[2];
+            self.lattice_vecs = torch.eye(3, device=device) * self.LBox
+
         self.coordinates = torch.stack((self.RX, self.RY, self.RZ), )
-        self.lattice_vecs = torch.eye(3, device=device) * self.LBox
 
         self.Nats = len(self.TYPE)
         self.const = const
@@ -208,13 +214,16 @@ class StructureBatch(torch.nn.Module):
         self.RZ = torch.tensor(coordinates[:,:,2], device=device, dtype=torch.get_default_dtype(),
                             requires_grad=self.req_grad_xyz)
 
-        self.LBox = LBox.to(torch.get_default_dtype())
-        self.RX = (self.RX) % self.LBox[:,0].unsqueeze(-1); 
-        self.RY = (self.RY) % self.LBox[:,1].unsqueeze(-1);
-        self.RZ = (self.RZ) % self.LBox[:,2].unsqueeze(-1);
+        if LBox is None:
+            self.LBox = None
+            self.lattice_vecs = None
+        else:
+            self.LBox = LBox.to(torch.get_default_dtype())
+            self.RX = (self.RX) % self.LBox[:,0].unsqueeze(-1); 
+            self.RY = (self.RY) % self.LBox[:,1].unsqueeze(-1);
+            self.RZ = (self.RZ) % self.LBox[:,2].unsqueeze(-1);
+            self.lattice_vecs = torch.diag_embed(self.LBox)        # shape (batch, 3, 3)
         self.coordinates = torch.stack((self.RX, self.RY, self.RZ), )
-        #self.lattice_vecs = torch.eye(3, device=device) * self.LBox
-        self.lattice_vecs = torch.diag_embed(self.LBox)        # shape (batch, 3, 3)
 
         self.Nats = self.TYPE.shape[-1]
         self.const = const
