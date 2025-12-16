@@ -83,9 +83,11 @@ def Energy(
         D0_diag = D0
 
     # Band energy
-    #Eband0 = 2 * torch.trace(H0 @ (D - torch.diag(D0_diag)))
-    #Eband0 = 2 * torch.trace(H0 @ D)
-    Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1) 
+    if Rx.dim() == 1: # non-batched. both cs and os.
+        factor = 2 if D.dim() == 2 else 1 # closed-shell or open-shell
+        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum() 
+    else: # batched
+        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1) 
 
     # Coulomb energy
     if Rx.dim() == 1: # non-batched
@@ -114,7 +116,11 @@ def Energy(
     f_safe = f.clamp(eps, 1 - eps)                # avoid log(0)
     term = f_safe * torch.log(f_safe) + (1 - f_safe) * torch.log(1 - f_safe)
     term = term * mask                            # zero out invalid entries
-    S_ent = -kB * term.sum(dim=-1)                # (B,)
+    
+    if Rx.dim() == 1: # non-batched. both cs and os.
+        S_ent = -kB * term.sum() 
+    else:
+        S_ent = -kB * term.sum(dim=-1)                # (B,)
 
     E_entropy = -2 * Te * S_ent
 

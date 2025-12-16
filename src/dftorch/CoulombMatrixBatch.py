@@ -17,8 +17,11 @@ def CoulombMatrix_vectorized_batch(Hubbard_U, TYPE, RX, RY, RZ, LBox, lattice_ve
                                 dR, dR_dxyz, 
                                 nnType, neighbor_I, neighbor_J, CALPHA)
     
-    dq_J = torch.zeros(Nr_atoms, dtype=dR.dtype, device = dR.device)
-    CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose)
+    if LBox is None:
+        CC_k, dCC_dR_k = 0.0, 0.0
+    else:
+        dq_J = torch.zeros(Nr_atoms, dtype=dR.dtype, device = dR.device)
+        CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose)
 
     CC = CC_real + CC_k
     dCC_dxyz = dCC_dxyz_real + dCC_dR_k

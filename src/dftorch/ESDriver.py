@@ -270,7 +270,8 @@ class ESDriverBatch(torch.nn.Module):
 
     def calc_forces(self, structure, const):
 
-        with torch.no_grad():
+        #with torch.no_grad():
+        if 1:
             if self.dftorch_params['coul_method'] == 'PME':
                 raise ValueError("Batched PME Coulomb not implemented.")
                 return

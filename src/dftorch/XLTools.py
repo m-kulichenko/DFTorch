@@ -6,8 +6,10 @@ from .ewald_pme import calculate_PME_ewald, init_PME_data, calculate_alpha_and_n
 from .ewald_pme.neighbor_list import NeighborState, calculate_displacement
 
 from .Fermi_PRT import Canon_DM_PRT, Fermi_PRT, Fermi_PRT_batch
-from .DM_Fermi_x import DM_Fermi_x, DM_Fermi_x_batch
+from .DM_Fermi_x import DM_Fermi_x, dm_fermi_x_os, DM_Fermi_x_batch
+from .Spin import get_h_spin
 from typing import Any, Tuple, Optional
+
 
 
 @torch.compile(fullgraph=False, dynamic=False)
@@ -93,6 +95,42 @@ def calc_q(
     q = -1.0 * Znuc
     q.scatter_add_(0, atom_ids, DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     return q, H, Hcoul, D, Dorth, Q, e, f, mu0
+
+@torch.compile(fullgraph=False, dynamic=False)
+def calc_q_os(
+    H0: torch.Tensor,
+    H_spin: torch.Tensor,
+    U: torch.Tensor,
+    n: torch.Tensor,
+    CoulPot: torch.Tensor,
+    S: torch.Tensor,
+    Z: torch.Tensor,
+    Te: float,
+    Nocc: int,
+    Znuc: torch.Tensor,
+    atom_ids: torch.Tensor,
+    atom_ids_sr: torch.Tensor,
+    el_per_shell: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Open-shell version of calc_q.
+    ----------
+    """
+    Hcoul_diag = U * n + CoulPot
+    Hcoul = 0.5 * (Hcoul_diag.unsqueeze(1) * S + S * Hcoul_diag.unsqueeze(0))
+    H = H0 + Hcoul + \
+        0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor([[[1]],[[-1]]], device=H_spin.device)
+        
+    Dorth, Q, e, f, mu0 = dm_fermi_x_os((Z.T @ H @ Z), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
+    DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+    q = -0.5 * Znuc.unsqueeze(0).expand(2, -1)
+    q.scatter_add_(1, atom_ids.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    
+    q_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
+    q_sr.scatter_add_(1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
+    return q, q_sr, H, Hcoul, D, Dorth, Q, e, f, mu0
 
 @torch.compile(fullgraph=False, dynamic=False)
 def calc_q_batch(
@@ -381,6 +419,176 @@ def kernel_update_lr(
     # if sn > 1.25 * base and sn > 0:
     #     step = step * ((1.25 * base) / sn)
 
+    K0Res = step  # (Nats,)
+    return K0Res
+
+
+def kernel_update_lr_os(
+    RX,
+    RY,
+    RZ,
+    lattice_vecs: torch.Tensor,
+    TYPE: torch.Tensor,
+    n_atoms: int,
+    Hubbard_U: torch.Tensor,
+    dftorch_params: Any,
+    FelTol: float,
+    KK0: torch.Tensor,
+    Res: torch.Tensor,
+    q: torch.Tensor,
+    S: torch.Tensor,
+    Z: torch.Tensor,
+    PME_data: Any,
+    atom_ids: torch.Tensor,
+    atom_ids_sr: torch.Tensor,
+    Q: torch.Tensor,
+    e: torch.Tensor,
+    mu0: torch.Tensor,
+    Te: float,
+    w,
+    n_shells_per_atom,
+    shell_types,
+    C: torch.Tensor = None,
+    nbr_inds: torch.Tensor = None,
+    disps: torch.Tensor = None,
+    dists: torch.Tensor = None,
+    CALPHA: torch.Tensor = None,
+
+) -> torch.Tensor:
+    """
+    Preconditioned low-rank Krylov update for SCF charge mixing.
+
+    Builds an orthonormal basis in charge space using the preconditioned residual,
+    evaluates a small projected system to determine the optimal correction, and
+    returns a step K0Res to update charges.
+
+    Parameters
+    ----------
+    structure : object
+        Must provide RX, RY, RZ, lattice_vecs, Hubbard_U, TYPE, Nats.
+    KK0 : (Nats, Nats) torch.Tensor
+        Preconditioner (e.g., initial mixing kernel).
+    Res : (Nats,) torch.Tensor
+        Current charge residual (q - q_old).
+    q : (Nats,) torch.Tensor
+        Current atomic charges.
+    FelTol : float
+        Residual norm tolerance in the Krylov subspace.
+    S, Z : (n_orb, n_orb) torch.Tensor
+        AO overlap and symmetric orthogonalizer S^(-1/2) (Z.T @ S @ Z ≈ I).
+    nbr_inds, disps, dists, CALPHA, dftorch_params, PME_data : Any/torch.Tensor
+        PME neighbor information and parameters for sedacs calls.
+    atom_ids : (n_orb,) torch.Tensor
+        Map from AO index to atom index.
+    Q, e, mu0 : torch.Tensor
+        Electronic structure data in orthogonal basis for first-order response.
+
+    Returns
+    -------
+    K0Res : (Nats,) torch.Tensor
+        Preconditioned low-rank correction step in charge space.
+    """
+    vi = torch.zeros(2, n_shells_per_atom.sum(), dftorch_params['KRYLOV_MAXRANK'], device=S.device)
+    fi = torch.zeros(2, n_shells_per_atom.sum(), dftorch_params['KRYLOV_MAXRANK'], device=S.device)
+
+    # Preconditioned residual
+    K0Res = torch.bmm(KK0, Res.unsqueeze(-1)).squeeze(-1)
+    dr = K0Res.clone()
+    I = 0
+    Fel = torch.tensor(float('inf'), dtype=q.dtype, device=q.device)
+
+    while (I < dftorch_params['KRYLOV_MAXRANK']) and (Fel > FelTol):
+        # Normalize current direction
+        norm_dr = torch.norm(dr, dim=1)
+        if (norm_dr < 1e-9).any():
+            print('zero norm_dr')
+            break
+
+        vi[:,:, I] = dr / norm_dr.unsqueeze(-1)
+
+        # Modified Gram-Schmidt against previous vi
+        if I > 0:
+            Vprev = vi[:,:, :I]  # (Nats, I)
+            coeffs = torch.bmm(Vprev.transpose(-1, -2), vi[:, :, I].unsqueeze(-1))  # (B_active, I, 1)
+            vi[:,:, I] = vi[:,:, I] - torch.bmm(Vprev, coeffs).squeeze(-1)
+
+        norm_vi = torch.norm(vi[:,:, I], dim=1)
+        if (norm_vi < 1e-9).any():
+            print('zero norm_vi')
+            break
+        vi[:,:, I] = vi[:,:, I] / norm_vi.unsqueeze(-1)
+        v = vi[:,:, I].clone()  # current search direction
+
+        v_atomic = torch.zeros_like(RX)
+        shell_to_atom = torch.repeat_interleave(torch.arange(len(TYPE), device=S.device), n_shells_per_atom)
+        v_atomic.scatter_add_(0, shell_to_atom, v.sum(dim=0)) # atom-resolved
+        v_net_spin = v[0] - v[1] # shell-resolved
+
+        # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
+        if dftorch_params['coul_method'] == 'PME':
+            # PME Coulomb case
+            _, _, d_CoulPot = calculate_PME_ewald(
+                torch.stack((RX, RY, RZ)),
+                v_atomic,
+                lattice_vecs,
+                nbr_inds,
+                disps,
+                dists,
+                CALPHA,
+                dftorch_params['cutoff'],
+                PME_data,
+                hubbard_u=Hubbard_U,
+                atomtypes=TYPE,
+                screening=1,
+                calculate_forces=0,
+                calculate_dq=1,
+            )
+        else:  # Direct Coulomb case
+            d_CoulPot = C @ v_atomic
+
+        H_spin = get_h_spin(TYPE, v_net_spin, w, n_shells_per_atom, shell_types)
+        d_Hcoul_diag = Hubbard_U[atom_ids] * v_atomic[atom_ids] + d_CoulPot[atom_ids]
+        d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0)) + \
+                  0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor([[[1]],[[-1]]], device=H_spin.device)
+        
+        H1_orth = Z.T @ d_Hcoul @ Z
+        # First-order density response (canonical Fermi PRT)
+        #_, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
+        _, D1 = Fermi_PRT_batch(H1_orth, Te, Q, e, mu0)
+        D1 = Z @ D1 @ Z.T
+        D1S = 1 * torch.diagonal(torch.matmul(D1, S), dim1=-2, dim2=-1)
+        # dq (atomic) from AO response
+        dq = torch.zeros(2,n_shells_per_atom.sum(), dtype=S.dtype, device=S.device)
+        dq.scatter_add_(1, atom_ids_sr.unsqueeze(0).expand(2, -1), D1S) # sums elements from D1S into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
+        # New residual (df/dlambda), preconditioned
+        dr = dq - v
+        dr = torch.bmm(KK0, dr.unsqueeze(-1)).squeeze(-1)
+
+        # Store fi column
+        fi[:,:, I] = dr
+
+        # Small overlap O and RHS (vectorized)
+        rank_m = I + 1
+        F_small = fi[:,:, :rank_m]                 # (Nats, r)
+        O = torch.bmm(F_small.transpose(-1, -2), F_small)
+        rhs = torch.bmm(F_small.transpose(-1, -2), K0Res.unsqueeze(-1)).squeeze(-1)  # (B, r)
+
+        # Solve O Y = rhs (stable) instead of explicit inverse
+        Y = torch.linalg.solve(O, rhs)           # (r,)
+
+        # Residual norm in the subspace
+        proj = torch.bmm(F_small, Y.unsqueeze(-1)).squeeze(-1) 
+        Fel = torch.norm(proj - K0Res)
+        print("  rank: {:}, Fel = {:.6f}".format(I, Fel.item()))
+        I += 1
+
+    # If no Krylov steps were taken, return preconditioned residual
+    if I == 0:
+        return K0Res
+
+    # Combine correction: K0Res := V Y
+    step = torch.bmm(vi[:, :, :rank_m], Y.unsqueeze(-1)).squeeze(-1)
     K0Res = step  # (Nats,)
     return K0Res
 

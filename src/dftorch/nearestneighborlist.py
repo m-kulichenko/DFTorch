@@ -83,21 +83,26 @@ def vectorized_nearestneighborlist(
     # % nrnnStruct(I): Number of neigbors to I within Rcut that are all within the box (not in the skin).
 
     start_time1 = time.perf_counter()
-    Lx, Ly, Lz = LBox
     R = torch.stack((Rx, Ry, Rz), dim=1)  # (N, 3)
 
     #shift = [-2, -1, 0, 1, 2]
-    shift = [-1, 0, 1]
-    #shift = [0]
+    if LBox is None:
+        shift = [0]
+    else:
+        shift = [-1, 0, 1]
+
     shifts = torch.tensor([
         [i, j, k] for i in shift
                   for j in shift
                   for k in shift
     ], dtype=Rx.dtype, device=R.device)  # (27, 3)
     
-    box = torch.tensor([Lx, Ly, Lz], dtype=Rx.dtype, device=R.device)
-
-    R_translated = R.unsqueeze(1) + shifts.unsqueeze(0) * box.view(1, 1, 3)  # (N, 27, 3)
+    if LBox is None:
+        R_translated = R.unsqueeze(1)
+    else:
+        Lx, Ly, Lz = LBox
+        box = torch.tensor([Lx, Ly, Lz], dtype=Rx.dtype, device=R.device)
+        R_translated = R.unsqueeze(1) + shifts.unsqueeze(0) * box.view(1, 1, 3)  # (N, 27, 3)
     
     diff = R.view(N, 1, 1, 3) - R_translated.view(1, N, len(shift)**3, 3)  # (N, N, 27, 3)
     dist = torch.norm(diff, dim=-1)  # (N, N, 27)
@@ -221,27 +226,33 @@ def vectorized_nearestneighborlist_batch(TYPE, Rx, Ry, Rz, LBox, Rcut, N, const,
 
     R = torch.stack((Rx, Ry, Rz), dim=-1)               # (B, N, 3)
 
-    shift = [-1, 0, 1]
+    if LBox is None:
+        shift = [0]
+    else:
+        shift = [-1, 0, 1]
     shifts = torch.tensor([[i, j, k] for i in shift for j in shift for k in shift],
                           dtype=dtype, device=device)   # (27,3)
     S = shifts.shape[0]
 
-    # Normalize LBox to shape (B,3); LBox always tensor
-    lb = LBox.to(device=device, dtype=dtype)
-    if lb.dim() == 1:
-        assert lb.numel() == 3, "LBox 1D must have length 3"
-        box = lb.view(1, 3).expand(B, 3)
-    elif lb.dim() == 2:
-        if lb.shape == (1, 3):
-            box = lb.expand(B, 3)
-        else:
-            assert lb.shape == (B, 3), f"Expected LBox shape (B,3), got {tuple(lb.shape)}"
-            box = lb
+    if LBox is None:
+        # No periodic box; use direct differences
+        R_translated = R.unsqueeze(2)                   # (B, N, 1, 3)
     else:
-        raise ValueError("LBox tensor must be 1D (3,) or 2D (B,3)")
-
-    # Use per-batch box
-    R_translated = R.unsqueeze(2) + shifts.view(1, 1, S, 3) * box.view(B, 1, 1, 3)   # (B,N,S,3)
+        # Normalize LBox to shape (B,3); LBox always tensor
+        lb = LBox.to(device=device, dtype=dtype)
+        if lb.dim() == 1:
+            assert lb.numel() == 3, "LBox 1D must have length 3"
+            box = lb.view(1, 3).expand(B, 3)
+        elif lb.dim() == 2:
+            if lb.shape == (1, 3):
+                box = lb.expand(B, 3)
+            else:
+                assert lb.shape == (B, 3), f"Expected LBox shape (B,3), got {tuple(lb.shape)}"
+                box = lb
+        else:
+            raise ValueError("LBox tensor must be 1D (3,) or 2D (B,3)")
+        # Use per-batch box
+        R_translated = R.unsqueeze(2) + shifts.view(1, 1, S, 3) * box.view(B, 1, 1, 3)   # (B,N,S,3)
 
     # Pairwise differences: (B,N,N,S,3)
     diff = R.unsqueeze(2).unsqueeze(3) - R_translated.unsqueeze(1)                   # (B,N,N,S,3)
