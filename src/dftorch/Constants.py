@@ -42,18 +42,18 @@ class Constants(torch.nn.Module):
         try:
             w_shell = load_spinw_to_matrix(skfpath + '/spinw.txt', device=TYPE.device)
             self.w_shell = torch.nn.Parameter(w_shell,   requires_grad=False)
+            w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
+            w_atom[TYPE] = self.w_shell[TYPE, MAX_ANG_OCC[TYPE]-1, MAX_ANG_OCC[TYPE]-1]
+            self.w_atom = torch.nn.Parameter(w_atom, requires_grad=False)
+
+            if magnetic_hubbard_ldep:
+                self.w = torch.nn.Parameter(w_shell.clone(), requires_grad=False)
+            else:
+                self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
         except:
             print("Warning: could not load spinw.txt file for spin-orbit coupling. Proceeding without SOC.")
             self.w_shell = None
 
-        w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
-        w_atom[TYPE] = self.w_shell[TYPE, MAX_ANG_OCC[TYPE]-1, MAX_ANG_OCC[TYPE]-1]
-        self.w_atom = torch.nn.Parameter(w_atom, requires_grad=False)
-
-        if magnetic_hubbard_ldep:
-            self.w = torch.nn.Parameter(w_shell.clone(), requires_grad=False)
-        else:
-            self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
 
         self.R_tensor = torch.nn.Parameter(R_tensor,   requires_grad=False)
         self.R_orb = torch.nn.Parameter(R_orb,   requires_grad=False)
