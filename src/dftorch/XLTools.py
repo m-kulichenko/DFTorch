@@ -6,7 +6,7 @@ from .ewald_pme import calculate_PME_ewald, init_PME_data, calculate_alpha_and_n
 from .ewald_pme.neighbor_list import NeighborState, calculate_displacement
 
 from .Fermi_PRT import Canon_DM_PRT, Fermi_PRT, Fermi_PRT_batch
-from .DM_Fermi_x import DM_Fermi_x, dm_fermi_x_os, DM_Fermi_x_batch
+from .DM_Fermi_x import DM_Fermi_x, dm_fermi_x_os, DM_Fermi_x_batch, dm_fermi_x_os_shared
 from .Spin import get_h_spin
 from typing import Any, Tuple, Optional
 
@@ -121,16 +121,19 @@ def calc_q_os(
     H = H0 + Hcoul + \
         0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor([[[1]],[[-1]]], device=H_spin.device)
         
-    Dorth, Q, e, f, mu0 = dm_fermi_x_os((Z.T @ H @ Z), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os_shared(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False,
+                                               )
+    #print(mu0, mu0_)
+
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
-    q = -0.5 * Znuc.unsqueeze(0).expand(2, -1)
-    q.scatter_add_(1, atom_ids.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     
     q_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
     q_sr.scatter_add_(1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
 
-    return q, q_sr, H, Hcoul, D, Dorth, Q, e, f, mu0
+    return q_sr, H, Hcoul, D, Dorth, Q, e, f, mu0
 
 @torch.compile(fullgraph=False, dynamic=False)
 def calc_q_batch(

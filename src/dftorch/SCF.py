@@ -1,7 +1,7 @@
 import torch
 from .Tools import fractional_matrix_power_symm
 from .DM_Fermi import DM_Fermi
-from .DM_Fermi_x import DM_Fermi_x, dm_fermi_x_os, DM_Fermi_x_batch
+from .DM_Fermi_x import DM_Fermi_x, dm_fermi_x_os, dm_fermi_x_os_shared, DM_Fermi_x_batch
 from .Kernel_Fermi import Kernel_Fermi
 from .Tools import calculate_dist_dips
 from .XLTools import kernel_update_lr, kernel_update_lr_os, kernel_update_lr_batch, calc_q, calc_q_os, calc_q_batch
@@ -347,21 +347,33 @@ def scf_x_os(
         H0 = H0.unsqueeze(0).expand(2, -1, -1)
         #Nocc = torch.tensor([Nocc+1, Nocc-1], device=H0.device)
         Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
-        Dorth,Q,e,f,mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50)
+        Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
+        #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os_shared(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=False)
+        Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
+        print(mu0, mu0_)
         D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
         DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
 
-        #DS = DS + torch.randn(DS.shape, device=S.device)*1e-3
-
-        q_spin_atom = -0.5 * Znuc.unsqueeze(0).expand(2, -1)
-        q_spin_atom.scatter_add_(1, atom_ids.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        q_tot_atom = q_spin_atom.sum(dim=0)
-
         q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
         q_spin_sr.scatter_add_(1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
+        # elec = 0.1
+        # q_spin_sr[0,1] += elec
+        # q_spin_sr[0,2] -= elec
+
+        # q_spin_sr[1,1] -= elec
+
+        # q_spin_sr[1,2] += elec
+
+        
         q_tot_sr = q_spin_sr.sum(dim=0)
         net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
         print(q_tot_sr, q_tot_sr.sum())
+
+        q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+        q_spin_atom.scatter_add_(1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr) # atom-resolved
+        q_tot_atom = torch.zeros_like(RX)
+        q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0)) # atom-resolved
 
         KK = -dftorch_params['SCF_ALPHA']*torch.eye(n_shells_per_atom.sum(), device=H0.device).unsqueeze(0).expand(2, -1, -1)  # shell-resolved. Initial mixing coefficient for linear mixing
         #KK0 = KK*torch.eye(Nats, device=H0.device)
@@ -400,9 +412,13 @@ def scf_x_os(
             q_spin_sr_old = q_spin_sr.clone()
 
             H_spin = get_h_spin(TYPE, net_spin_sr, w, n_shells_per_atom, shell_types)
-            q_spin_atom, q_spin_sr, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q_os(
+            q_spin_sr, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q_os(
                 H0, H_spin, Hubbard_U_gathered, q_tot_atom[atom_ids], CoulPot[atom_ids],
 				S, Z, Te, Nocc, Znuc, atom_ids, atom_ids_sr, el_per_shell)
+            
+            q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+            q_spin_atom.scatter_add_(1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr) # atom-resolved
+
             
             Res = q_spin_sr - q_spin_sr_old
             ResNorm = torch.norm(Res)
@@ -448,13 +464,16 @@ def scf_x_os(
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
-    q_spin_atom = -0.5 * Znuc.unsqueeze(0).expand(2, -1)
-    q_spin_atom.scatter_add_(1, atom_ids.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    q_tot_atom = q_spin_atom.sum(dim=0)
 
     q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
     q_spin_sr.scatter_add_(1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
+
+    q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+    q_spin_atom.scatter_add_(1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr) # atom-resolved
+    q_tot_atom = torch.zeros_like(RX)
+    q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0)) # atom-resolved
+
 
     if dftorch_params['coul_method'] == 'PME':
         ewald_e1, forces1, dq_p1 =  calculate_PME_ewald(
