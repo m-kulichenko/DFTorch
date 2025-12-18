@@ -107,7 +107,7 @@ class ESDriver(torch.nn.Module):
 
         if do_scf:
             structure.H, structure.Hcoul, structure.Hdipole, structure.KK, structure.D, \
-            structure.q, structure.f, \
+            structure.Q, structure.q, structure.f, \
             structure.mu0, structure.e_coul_tmp, structure.f_coul, structure.dq_p1 = SCFx(
                 self.dftorch_params, 
                 structure.RX, structure.RY, structure.RZ, structure.lattice_vecs,

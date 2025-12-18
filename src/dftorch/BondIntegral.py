@@ -449,7 +449,7 @@ def get_skf_tensors(TYPE, skfpath):
 
     for i in range(len(label_list)):
         R_orb, channels, R_rep, rep_splines = read_skf_table(
-            skfpath + "/{}.skf".format(label_list[i]),
+            skfpath + "{}.skf".format(label_list[i]),
             N_ORB,
             MAX_ANG,
             MAX_ANG_OCC,

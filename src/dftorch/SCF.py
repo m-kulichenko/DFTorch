@@ -270,7 +270,7 @@ def SCFx(
         Ecoul, forces1, dq_p1 = None, None, None
 
 
-    return H, Hcoul, Hdipole, KK, D, q, f, mu0, Ecoul, forces1, dq_p1
+    return H, Hcoul, Hdipole, KK, D, Q, q, f, mu0, Ecoul, forces1, dq_p1
 
 def scf_x_os(
     el_per_shell: torch.Tensor,
@@ -496,7 +496,7 @@ def scf_x_os(
     else:
         Ecoul, forces1, dq_p1 = None, None, None
 
-    return H, Hcoul, Hdipole, KK, D, q_spin_atom, q_tot_atom, q_spin_sr, net_spin_sr, f, mu0, Ecoul, forces1, dq_p1
+    return H, Hcoul, Hdipole, KK, D, Q, q_spin_atom, q_tot_atom, q_spin_sr, net_spin_sr, f, mu0, Ecoul, forces1, dq_p1
 
 
 def SCFx_batch(
