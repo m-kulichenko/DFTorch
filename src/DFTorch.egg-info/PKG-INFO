@@ -1,5 +1,5 @@
 Metadata-Version: 2.4
-Name: DFTorch
+Name: dftorch
 Version: 0.1.0
 Summary: A Density Functional Tight Binding (DFTB) implementation in PyTorch.
 Author: A.M.N. Niklasson, M. Kulichenko
