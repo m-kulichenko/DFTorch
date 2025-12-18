@@ -40,7 +40,7 @@ class MDXL:
         self.Ep_array  = None
         self.Res_array = None
 
-        self.cuda_sync = True
+        self.cuda_sync = False
 
     def run(self, structure, dftorch_params, num_steps, dt, dump_interval=1, traj_filename='md_trj.xyz'):
 
@@ -104,9 +104,14 @@ class MDXL:
         self.VY = self.VY + 0.5*dt*(self.F2V*structure.f_tot[1]/structure.Mnuc) - self.fric*self.VY;      # F2V: Unit conversion
         self.VZ = self.VZ + 0.5*dt*(self.F2V*structure.f_tot[2]/structure.Mnuc) - self.fric*self.VZ;      # -c*V c>0 => Fricition
         # update positions and translate coordinates if go beyond box. Apply periodic boundary conditions
-        structure.RX = (structure.RX + dt*self.VX) % structure.LBox[0]
-        structure.RY = (structure.RY + dt*self.VY) % structure.LBox[1]
-        structure.RZ = (structure.RZ + dt*self.VZ) % structure.LBox[2]
+        if structure.LBox is not None:
+            structure.RX = (structure.RX + dt*self.VX) % structure.LBox[0]
+            structure.RY = (structure.RY + dt*self.VY) % structure.LBox[1]
+            structure.RZ = (structure.RZ + dt*self.VZ) % structure.LBox[2]
+        else:
+            structure.RX = (structure.RX + dt*self.VX)
+            structure.RY = (structure.RY + dt*self.VY)
+            structure.RZ = (structure.RZ + dt*self.VZ)
 
         if self.cuda_sync: torch.cuda.synchronize()
         tic2_1 = time.perf_counter()
