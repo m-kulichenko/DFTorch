@@ -32,17 +32,19 @@ class Constants(torch.nn.Module):
             species, _ = read_xyz([file], sort=False) #Input coordinate file
         else:
             species, _ = read_xyz(file, sort=False) #Input coordinate file
-        TYPE = torch.tensor(species.flatten(), dtype=torch.int64)
+        print(species.dtype)
+        TYPE = torch.tensor(species.flatten())
 
         R_tensor, R_orb, coeffs_tensor, R_rep_tensor, rep_splines_tensor, \
         N_ORB, MAX_ANG, MAX_ANG_OCC, TORE, N_S, N_P, N_D, ES, EP, ED, US, UP, UD = get_skf_tensors(TYPE, self.skfpath)
 
         #w = load_spinw_to_tensor(skfpath + '/spinw.txt', device=TYPE.device)
 
-        try:
+        if 1:
             w_shell = load_spinw_to_matrix(skfpath + '/spinw.txt', device=TYPE.device)
             self.w_shell = torch.nn.Parameter(w_shell,   requires_grad=False)
             w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
+            print(w_atom.dtype, TYPE.dtype)
             w_atom[TYPE] = self.w_shell[TYPE, MAX_ANG_OCC[TYPE]-1, MAX_ANG_OCC[TYPE]-1]
             self.w_atom = torch.nn.Parameter(w_atom, requires_grad=False)
 
@@ -50,9 +52,9 @@ class Constants(torch.nn.Module):
                 self.w = torch.nn.Parameter(w_shell.clone(), requires_grad=False)
             else:
                 self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
-        except:
-            print("Warning: could not load spinw.txt file for spin-orbit coupling. Proceeding without SOC.")
-            self.w_shell = None
+        # except:
+        #     print("Warning: could not load spinw.txt file for spin-orbit coupling. Proceeding without SOC.")
+        #     self.w_shell = None
 
 
         self.R_tensor = torch.nn.Parameter(R_tensor,   requires_grad=False)

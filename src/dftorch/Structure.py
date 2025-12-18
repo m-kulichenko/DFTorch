@@ -102,7 +102,7 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
-        self.Nocc = int(const.tore[self.TYPE].sum()/2) - int(charge/2)
+        self.Nocc = int((const.tore[self.TYPE].sum() - charge)/2)
         self.Hubbard_U = const.U[self.TYPE]
 
         # Shell on-site energies per atom (pulled from your dicts)
