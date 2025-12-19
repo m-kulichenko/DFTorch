@@ -3,12 +3,14 @@ from .H0andS import H0_and_S_vectorized, H0_and_S_vectorized_batch
 from .RepulsiveSpline import get_repulsion_energy, get_repulsion_energy_batch
 from .nearestneighborlist import vectorized_nearestneighborlist, vectorized_nearestneighborlist_batch
 from .Tools import fractional_matrix_power_symm
-from .SCF import SCF, SCF_adaptive_mixing, SCFx, SCFx_batch
+from .SCF import SCF, scf_x_os, SCF_adaptive_mixing, SCFx, SCFx_batch
 from .Energy import Energy
-from .Forces import Forces, Forces_PME
+from .Forces import Forces, forces_spin, Forces_PME
 from .ForcesBatch import forces_batch
 from .CoulombMatrix import CoulombMatrix_vectorized
 from dftorch.CoulombMatrixBatch import CoulombMatrix_vectorized_batch
+from dftorch.Spin import get_spin_energy, get_h_spin
+
 
 import math
 
@@ -106,16 +108,38 @@ class ESDriver(torch.nn.Module):
             del _, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type
 
         if do_scf:
-            structure.H, structure.Hcoul, structure.Hdipole, structure.KK, structure.D, \
-            structure.Q, structure.q, structure.f, \
-            structure.mu0, structure.e_coul_tmp, structure.f_coul, structure.dq_p1 = SCFx(
-                self.dftorch_params, 
-                structure.RX, structure.RY, structure.RZ, structure.lattice_vecs,
-                structure.Nats, structure.Nocc, structure.n_orbitals_per_atom, structure.Znuc, structure.TYPE, structure.Te,
-                structure.Hubbard_U,
-                structure.D0,
-                structure.H0, structure.S, structure.Z, structure.e_field, structure.C,
-                structure.req_grad_xyz)            
+            if self.dftorch_params.get('UNRESTRICTED', False): # open-shell
+                structure.H, structure.Hcoul, structure.Hdipole, structure.KK, structure.D, \
+                structure.Q, structure.q_spin_atom, structure.q_tot_atom, \
+                structure.q_spin_sr, structure.net_spin_sr, structure.f, \
+                structure.mu0, structure.e_coul_tmp, structure.f_coul, structure.dq_p1 = \
+                    scf_x_os(structure.el_per_shell, structure.shell_types, structure.n_shells_per_atom, const.shell_dim, const.w,
+                    self.dftorch_params, structure.RX, structure.RY, structure.RZ, structure.lattice_vecs,
+                    structure.Nats, structure.Nocc, structure.n_orbitals_per_atom, structure.Znuc, structure.TYPE,
+                    structure.Te,
+                    structure.Hubbard_U,
+                    structure.D0,
+                    structure.H0, structure.S, structure.Z, structure.e_field, structure.C,
+                    structure.req_grad_xyz)
+                
+                structure.q = structure.q_tot_atom
+                
+                H_spin = get_h_spin(structure.TYPE, structure.net_spin_sr, const.w, structure.n_shells_per_atom, structure.shell_types)
+                structure.H_spin = 0.5 * structure.S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor([[[1]],[[-1]]], device=H_spin.device)
+                structure.e_spin = get_spin_energy(structure.TYPE, structure.net_spin_sr, const.w, structure.n_shells_per_atom)
+                
+            else: # closed-shell
+                structure.H, structure.Hcoul, structure.Hdipole, structure.KK, structure.D, \
+                structure.Q, structure.q, structure.f, \
+                structure.mu0, structure.e_coul_tmp, structure.f_coul, structure.dq_p1 = SCFx(
+                    self.dftorch_params, 
+                    structure.RX, structure.RY, structure.RZ, structure.lattice_vecs,
+                    structure.Nats, structure.Nocc, structure.n_orbitals_per_atom, structure.Znuc, structure.TYPE, structure.Te,
+                    structure.Hubbard_U,
+                    structure.D0,
+                    structure.H0, structure.S, structure.Z, structure.e_field, structure.C,
+                    structure.req_grad_xyz)
+                structure.e_spin = 0.0
 
             structure.e_elec_tot, structure.e_band0, structure.e_coul, structure.e_dipole, \
             structure.e_entropy, structure.s_ent = Energy(
@@ -123,7 +147,7 @@ class ESDriver(torch.nn.Module):
                 structure.D0, structure.C, structure.dq_p1, structure.D, structure.q,
                 structure.RX, structure.RY, structure.RZ, structure.f, structure.Te)
 
-            structure.e_tot = structure.e_elec_tot + structure.e_repulsion
+            structure.e_tot = structure.e_elec_tot + structure.e_repulsion + structure.e_spin
 
     def calc_forces(self, structure, const):
 
@@ -148,7 +172,12 @@ class ESDriver(torch.nn.Module):
                         structure.e_field, structure.Hubbard_U, structure.q,
                         structure.RX, structure.RY, structure.RZ,
                         structure.Nats, const, structure.TYPE)
-                
+                if self.dftorch_params.get('UNRESTRICTED', False): # open-shell
+                    structure.f_spin = forces_spin(
+                            structure.D, structure.dS, structure.q_spin_atom, structure.Nats, const, structure.TYPE)
+                    
+                    structure.f_tot = structure.f_tot + structure.f_spin
+
 class ESDriverBatch(torch.nn.Module):
     def __init__(
         self,
