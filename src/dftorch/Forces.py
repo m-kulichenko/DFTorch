@@ -182,102 +182,14 @@ def Forces(
 
 @torch.compile
 def forces_spin(
-    H: torch.Tensor,
     D: torch.Tensor,
     dS: torch.Tensor,
     q_spin_atom: torch.Tensor,
     Nats: int,
     const,
     TYPE: torch.Tensor,
-    verbose: bool = False,
 ):
     """
-    Compute atomic forces for a DFTB-like total energy expression in gas phase
-    (non-PME, standard SCC).
-
-    Parameters
-    ----------
-    H : torch.Tensor
-        Two-electron (effective) Hamiltonian matrix of shape (n_orb, n_orb).
-    Z : torch.Tensor
-        Transformation / renormalization matrix (e.g. orthogonalization) used
-        in the Pulay term, shape (n_orb, n_orb).
-    C : torch.Tensor
-        Coulomb interaction matrix of shape (Nats, Nats). It is multiplied by
-        the atomic charges `q` to obtain the Coulomb potential.
-    D : torch.Tensor
-        Self-consistent density matrix of shape (n_orb, n_orb).
-    D0 : torch.Tensor
-        Reference (atomic) density vector of shape (n_orb,). Internally turned
-        into a diagonal matrix.
-    dH : torch.Tensor
-        Derivatives of the Hamiltonian with respect to Cartesian coordinates,
-        shape (3, n_orb, n_orb). The first dimension corresponds to x, y, z.
-    dS : torch.Tensor
-        Derivatives of the overlap matrix with respect to Cartesian
-        coordinates, shape (3, n_orb, n_orb).
-    dC : torch.Tensor
-        Derivatives of the Coulomb matrix with respect to atomic coordinates,
-        shape (Nats, Nats, 3) or broadcastable equivalent; it is contracted
-        with the charges in `q`.
-    dVr : torch.Tensor
-        Derivatives of the short-range repulsive potential with respect to
-        atomic coordinates, shape (3, Nats, Nats).
-    Efield : torch.Tensor
-        External electric field vector of shape (3,).
-    U : torch.Tensor
-        On-site Hubbard U parameters per atom, shape (Nats,).
-    q : torch.Tensor
-        Self-consistent charges per atom, shape (Nats,).
-    Rx, Ry, Rz : torch.Tensor
-        Cartesian coordinates of atoms along x, y, z respectively, each of
-        shape (Nats,).
-    Nats : int
-        Number of atoms in the system.
-    const : object
-        Container with model constants. Must provide `n_orb`, the number of
-        orbitals per element type.
-    TYPE : torch.Tensor
-        Element type indices for each atom, shape (Nats,). Used to map into
-        `const.n_orb`.
-    verbose : bool, optional
-        If True, allows callers to hook in additional logging (currently not
-        used inside this routine).
-
-    Returns
-    -------
-    Ftot : torch.Tensor
-        Total forces on atoms, shape (3, Nats). Convention: forces are
-        negative gradients of the total energy.
-    Fcoul : torch.Tensor
-        Coulomb interaction contribution to the forces, shape (3, Nats).
-    Fband0 : torch.Tensor
-        Band-structure (Hamiltonian) contribution to the forces, shape
-        (3, Nats).
-    Fdipole : torch.Tensor
-        Direct electric-field (dipole) contribution to the forces, shape
-        (3, Nats).
-    FPulay : torch.Tensor
-        Pulay correction forces due to non-orthogonal orbitals, shape
-        (3, Nats).
-    FScoul : torch.Tensor
-        Overlap-derivative contribution associated with the SCC Coulomb
-        energy, shape (3, Nats).
-    FSdipole : torch.Tensor
-        Overlap-derivative contribution associated with the dipole / external
-        field term, shape (3, Nats).
-    Frep : torch.Tensor
-        Short-range repulsive potential contribution to the forces, shape
-        (3, Nats).
-
-    Notes
-    -----
-    The total force is assembled as::
-
-        Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
-
-    where all components are computed as negative derivatives of the
-    corresponding energy contributions with respect to atomic positions.
     """    
     #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
     dtype = q_spin_atom.dtype
