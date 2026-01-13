@@ -199,7 +199,7 @@ def dm_fermi_x_os_shared(
 
         lumo = nocc.sum()
         if broken_symmetry:
-            v[0,:,nocc[0]-1] = 0.8*v[0,:,nocc[0]-1] + 0.2*v[0,:,nocc[0]]
+            v[0,:,nocc[0]-1] = 0.98*v[0,:,nocc[0]-1] + 0.02*v[0,:,nocc[0]]
         mu0 = 0.5*(h_all[lumo] + h_all[lumo-1])
     else:
         mu0 = mu_0

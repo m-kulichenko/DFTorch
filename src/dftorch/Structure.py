@@ -54,6 +54,8 @@ class Structure(torch.nn.Module):
         LBox,
         const,
         charge: int = 0,
+        spin_pol: int = 0,
+        os: bool = False,
         Te: float = 3000.0,
         e_field: torch.Tensor = None,
         device: str = 'cpu',
@@ -88,6 +90,7 @@ class Structure(torch.nn.Module):
         self.Nats = len(self.TYPE)
         self.const = const
         self.charge = charge
+        self.spin_pol = spin_pol
         self.Te = Te
         if e_field is None:
             self.e_field = torch.zeros(3, dtype=torch.get_default_dtype(), device=device)
@@ -102,7 +105,22 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
-        self.Nocc = int((const.tore[self.TYPE].sum() - charge)/2)
+        if os: # open-shell
+            tot_el = torch.tensor([int(const.tore[self.TYPE].sum() - charge)], device=device)
+            
+            nocc_a = tot_el/2 + self.spin_pol/2
+            nocc_b = tot_el/2 - self.spin_pol/2
+            if ((nocc_a%1 != 0).any() or (nocc_b%1 != 0).any()):
+                raise ValueError("Invalid charge/spin_pol combination!")
+
+            self.Nocc = torch.tensor([int(nocc_a), int(nocc_b)], device=device)
+
+        else:
+            tot_el = (const.tore[self.TYPE].sum() - charge)
+            if ((tot_el%2)==1).any():
+                raise ValueError("Closed shell systems require even number of electrons")
+
+            self.Nocc = int(tot_el/2)
         self.Hubbard_U = const.U[self.TYPE]
 
         # Shell on-site energies per atom (pulled from your dicts)

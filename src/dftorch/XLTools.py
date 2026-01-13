@@ -121,10 +121,8 @@ def calc_q_os(
     H = H0 + Hcoul + \
         0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor([[[1]],[[-1]]], device=H_spin.device)
         
-    #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
-    #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os_shared(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
-    Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False,
-                                               )
+    #Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
     #print(mu0, mu0_)
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -502,7 +500,7 @@ def kernel_update_lr_os(
 
     while (I < dftorch_params['KRYLOV_MAXRANK']) and (Fel > FelTol):
         # Normalize current direction
-        norm_dr = torch.norm(dr, dim=1)
+        norm_dr = torch.norm(dr)
         if (norm_dr < 1e-9).any():
             print('zero norm_dr')
             break
@@ -515,7 +513,7 @@ def kernel_update_lr_os(
             coeffs = torch.bmm(Vprev.transpose(-1, -2), vi[:, :, I].unsqueeze(-1))  # (B_active, I, 1)
             vi[:,:, I] = vi[:,:, I] - torch.bmm(Vprev, coeffs).squeeze(-1)
 
-        norm_vi = torch.norm(vi[:,:, I], dim=1)
+        norm_vi = torch.norm(vi[:,:, I])
         if (norm_vi < 1e-9).any():
             print('zero norm_vi')
             break

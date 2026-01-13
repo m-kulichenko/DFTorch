@@ -346,11 +346,11 @@ def scf_x_os(
         H0 = H0 + Hdipole
         H0 = H0.unsqueeze(0).expand(2, -1, -1)
         #Nocc = torch.tensor([Nocc+1, Nocc-1], device=H0.device)
-        Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
-        Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
-        #Dorth_, Q_, e_, f_, mu0_ = dm_fermi_x_os_shared(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=False)
-        Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
-        print(mu0, mu0_)
+        #Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
+        #Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
+        broken_symmetry = dftorch_params.get('BROKEN_SYM', False)
+        Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=broken_symmetry)
+        #print(mu0, mu0_)
         D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
         DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
 
@@ -368,7 +368,6 @@ def scf_x_os(
         
         q_tot_sr = q_spin_sr.sum(dim=0)
         net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
-        print(q_tot_sr, q_tot_sr.sum())
 
         q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
         q_spin_atom.scatter_add_(1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr) # atom-resolved

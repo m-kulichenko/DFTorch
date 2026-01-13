@@ -172,11 +172,12 @@ class ESDriver(torch.nn.Module):
                         structure.e_field, structure.Hubbard_U, structure.q,
                         structure.RX, structure.RY, structure.RZ,
                         structure.Nats, const, structure.TYPE)
-                if self.dftorch_params.get('UNRESTRICTED', False): # open-shell
-                    structure.f_spin = forces_spin(
-                            structure.D, structure.dS, structure.q_spin_atom, structure.Nats, const, structure.TYPE)
-                    
-                    structure.f_tot = structure.f_tot + structure.f_spin
+                
+            if self.dftorch_params.get('UNRESTRICTED', False): # open-shell
+                structure.f_spin = forces_spin(
+                        structure.D, structure.dS, structure.q_spin_atom, structure.Nats, const, structure.TYPE)
+                
+                structure.f_tot = structure.f_tot + structure.f_spin
 
 class ESDriverBatch(torch.nn.Module):
     def __init__(

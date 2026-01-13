@@ -87,8 +87,7 @@ def CoulombMatrix_vectorized(Hubbard_U, TYPE, RX, RY, RZ, LBox, lattice_vecs, Nr
     else:
         if verbose: print('  Doing Coulomb k')
         CC_k, dCC_dR_k = Ewald_k_Space_vectorized(RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose)
-
-    print("  Coulomb_k t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
+        print("  Coulomb_k t {:.1f} s\n".format( time.perf_counter()-start_time1 ))
     
     CC = CC_real + CC_k
     dCC_dxyz = dCC_dxyz_real + dCC_dR_k
