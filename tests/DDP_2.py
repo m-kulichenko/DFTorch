@@ -27,7 +27,7 @@ from dftorch.ewald_pme import calculate_PME_ewald, init_PME_data, calculate_alph
 from dftorch.ewald_pme.neighbor_list import NeighborState
 
 
-from dftorch.sedacs import pack_lol_int64, unpack_lol_int64, bcast_1d_int64, scf, MDXL_Graph
+from dftorch.sedacs import pack_lol_int, unpack_lol_int, bcast_1d_int, scf, MDXL_Graph
 
 
 ### Configure torch and torch.compile ###
@@ -106,11 +106,14 @@ def init_processes(backend):
     if dftorch_params['cutoff']  < dftorch_params['graph_cutoff']:
         raise ValueError("Coulomb cutoff must be greater than or equal to graph cutoff for this implementation.")
 
+    INT_DTYPE = torch.int32
+    
     if WORLD_RANK == 0:
         positions = torch.stack((structure.RX, structure.RY, structure.RZ), )
 
         nbr_state = NeighborState(positions, structure.lattice_vecs, None, dftorch_params['cutoff'], is_dense=True, buffer=1.0, use_triton=False)
         disps, dists, nl = calculate_dist_dips(positions, nbr_state, dftorch_params['cutoff'])
+        print("nl.dtype", nl.dtype)
 
         if dftorch_params['graph_cutoff'] < dftorch_params['cutoff']:
             nl_init = torch.where(
@@ -136,33 +139,33 @@ def init_processes(backend):
             partsCoreHalo.append(coreHalo)
             numCores.append(nc)
 
-        numCores = torch.tensor(numCores, dtype=torch.int64, device=device)
-        fullGraph = torch.tensor(fullGraph, dtype=torch.int64, device=device)
-        flat, offsets = pack_lol_int64(partsCoreHalo)
-        nl_shape = torch.tensor(list(nl.shape), dtype=torch.int64, device=device)
-        fullGraph_shape = torch.tensor(list(fullGraph.shape), dtype=torch.int64, device=device)
+        numCores = torch.tensor(numCores, dtype=INT_DTYPE, device=device)
+        fullGraph = torch.tensor(fullGraph, dtype=INT_DTYPE, device=device)
+        flat, offsets = pack_lol_int(partsCoreHalo, INT_DTYPE)
+        nl_shape = torch.tensor(list(nl.shape), dtype=INT_DTYPE, device=device)
+        fullGraph_shape = torch.tensor(list(fullGraph.shape), dtype=INT_DTYPE, device=device)
     else:
         partsCoreHalo = None
-        numCores = torch.empty((nparts,), dtype=torch.int64, device=device)
+        numCores = torch.empty((nparts,), dtype=INT_DTYPE, device=device)
         nbr_state = None
         disps, dists = None, None
         flat, offsets = None, None
-        nl_shape = torch.empty((2,), dtype=torch.int64, device=device)
-        fullGraph_shape = torch.empty((2,), dtype=torch.int64, device=device)
+        nl_shape = torch.empty((2,), dtype=INT_DTYPE, device=device)
+        fullGraph_shape = torch.empty((2,), dtype=INT_DTYPE, device=device)
     dist.broadcast(numCores, 0)
     dist.broadcast(nl_shape, 0)
     dist.broadcast(fullGraph_shape, 0)
 
     if WORLD_RANK != 0:
-        nl = torch.empty(tuple(int(x) for x in nl_shape.tolist()), dtype=torch.int64, device=device)
-        fullGraph = torch.empty(tuple(int(x) for x in fullGraph_shape.tolist()), dtype=torch.int64, device=device)
+        nl = torch.empty(tuple(int(x) for x in nl_shape.tolist()), dtype=INT_DTYPE, device=device)
+        fullGraph = torch.empty(tuple(int(x) for x in fullGraph_shape.tolist()), dtype=INT_DTYPE, device=device)
 
     dist.broadcast(nl, 0)
     dist.broadcast(fullGraph, 0)
 
-    flat = bcast_1d_int64(flat, device=device, src=0)
-    offsets = bcast_1d_int64(offsets, device=device, src=0)
-    partsCoreHalo = unpack_lol_int64(flat.cpu(), offsets.cpu())
+    flat = bcast_1d_int(flat, INT_DTYPE, device=device, src=0)
+    offsets = bcast_1d_int(offsets, INT_DTYPE, device=device, src=0)
+    partsCoreHalo = unpack_lol_int(flat.cpu(), offsets.cpu())
 
     works_per_rank = nparts // WORLD_SIZE
     if nparts % WORLD_SIZE != 0:
