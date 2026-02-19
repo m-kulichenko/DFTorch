@@ -6,3 +6,7 @@ __pycache__/
 personal_github
 
 
+
+__pycache__/
+*.pyc
+*.pyo
