@@ -187,7 +187,7 @@ class MDXL_Graph(MDXL):
         d_vals_all = gather_1d_to_rank0(d_vals_on_rank, device=device, src=0)
 
         if dist.get_rank() == 0:
-            mu0 = get_mu(mu0.cpu().numpy(), e_vals_all.cpu().numpy(), structure.Te, structure.Nocc, dvals = d_vals_all.cpu().numpy(), verb=False)
+            mu0 = get_mu(mu0.cpu().numpy().item(), e_vals_all.cpu().numpy(), structure.Te, structure.Nocc, dvals = d_vals_all.cpu().numpy(), verb=False)
             mu0 = torch.tensor(mu0, device=device)
             if self.cuda_sync: torch.cuda.synchronize()
             print("mu0: {:.3f} s".format(time.perf_counter()-tic2_1))
