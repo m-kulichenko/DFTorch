@@ -2,6 +2,8 @@ import torch
 import torch.distributed as dist
 import time
 
+import numpy as np
+
 from dftorch.ewald_pme import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
 from dftorch.RepulsiveSpline import get_repulsion_energy
 
@@ -32,7 +34,7 @@ def scf(structure, dftorch_params, fullGraph, ch, core_size, nbr_state, disps_gl
     d_vals_all = gather_1d_to_rank0(d_vals_on_rank, device=device, src=0)
 
     if dist.get_rank() == 0:
-        mu0 = get_mu(-0.9, e_vals_all.cpu().numpy(), structure.Te, structure.Nocc, dvals = d_vals_all.cpu().numpy(), verb=False)
+        mu0 = get_mu(np.asarray(-0.9), e_vals_all.cpu().numpy(), structure.Te, structure.Nocc, dvals = d_vals_all.cpu().numpy(), verb=False)
         mu0 = torch.tensor(mu0, device=device)
         print("Initial mu", mu0)
     else:
