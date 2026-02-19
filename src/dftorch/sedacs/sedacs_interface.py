@@ -47,14 +47,14 @@ def get_ch(nparts, structure, dftorch_params, nl, MAX_DEG, NJUMPS):
         numCores.append(nc)
     return partsCoreHalo, numCores
 
-def pack_lol_int64(lol):
-    lengths = torch.tensor([len(x) for x in lol], dtype=torch.int64)
-    offsets = torch.zeros((lengths.numel() + 1,), dtype=torch.int64)
+def pack_lol_int(lol, dtype):
+    lengths = torch.tensor([len(x) for x in lol], dtype=dtype)
+    offsets = torch.zeros((lengths.numel() + 1,), dtype=dtype)
     offsets[1:] = torch.cumsum(lengths, dim=0)
-    flat = torch.tensor([v for sub in lol for v in sub], dtype=torch.int64)
+    flat = torch.tensor([v for sub in lol for v in sub], dtype=dtype)
     return flat, offsets
 
-def unpack_lol_int64(flat, offsets):
+def unpack_lol_int(flat, offsets):
     out = []
     for i in range(offsets.numel() - 1):
         a = int(offsets[i].item())
@@ -62,17 +62,17 @@ def unpack_lol_int64(flat, offsets):
         out.append(flat[a:b].tolist())
     return out
 
-def bcast_1d_int64(t, device, src=0):
+def bcast_1d_int(t, dtype, device, src=0):
     rank = dist.get_rank()
     if rank == src:
-        t = t.to(device=device, dtype=torch.int64)
-        n = torch.tensor([t.numel()], dtype=torch.int64, device=device)
+        t = t.to(device=device, dtype=dtype)
+        n = torch.tensor([t.numel()], dtype=dtype, device=device)
     else:
-        n = torch.empty((1,), dtype=torch.int64, device=device)
+        n = torch.empty((1,), dtype=dtype, device=device)
     dist.broadcast(n, src)
     n = int(n.item())
     if rank != src:
-        t = torch.empty((n,), dtype=torch.int64, device=device)
+        t = torch.empty((n,), dtype=dtype, device=device)
     dist.broadcast(t, src)
     return t
 
@@ -518,3 +518,6 @@ def kernel_global(structure, positions_global, nbr_inds_global, disps_global, di
     dist.broadcast(K0Res_global, 0)
 
     return K0Res_global
+
+
+
