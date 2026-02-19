@@ -160,19 +160,19 @@ def SCFx(
         Hdipole = 0.5 * Hdipole @ S + 0.5 * S @ Hdipole
         H0 = H0 + Hdipole
         Dorth,Q,e,f,mu0 = DM_Fermi_x(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50)
+        print('mu0 initial:', mu0)
         D = Z @ Dorth @ Z.T
         DS = 2 * torch.diag(D @ S)
         q = -1.0 * Znuc
         q.scatter_add_(0, atom_ids, DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        print("Initial q_global:", q)
 
         KK = -dftorch_params['SCF_ALPHA']*torch.eye(Nats, device=H0.device)  # Initial mixing coefficient for linear mixing
         #KK0 = KK*torch.eye(Nats, device=H0.device)
 
         ResNorm = torch.tensor([2.0], device=device)
         it = 0
-        Eband0 = torch.tensor([0.0], device=device) 
         Ecoul = torch.tensor([0.0], device=device)
-        dEb = torch.tensor([10.0], device=device)
 
         print('\nStarting cycle')
         while ((ResNorm > dftorch_params['SCF_TOL']) or (dEc > dftorch_params['SCF_TOL']*100)) and it < dftorch_params['SCF_MAX_ITER']:
@@ -223,10 +223,7 @@ def SCFx(
                 
             # Mixing update (vector-form)
             q = q_old - K0Res
-            
-            #Eband0_old = Eband0.clone()
-            #Eband0 = 2 * torch.trace(H0 @ (D-D0))
-            
+                        
             Ecoul_old = Ecoul.clone()
             if dftorch_params['coul_method'] == 'PME':
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
@@ -241,7 +238,7 @@ def SCFx(
             if it == dftorch_params['SCF_MAX_ITER']:
                 print('Did not converge')
 
-        f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
+        #f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
 
     D = Z @ Dorth @ Z.T
     DS = 2 * (D * S.T).sum(dim=1)

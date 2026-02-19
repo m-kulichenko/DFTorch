@@ -32,7 +32,6 @@ class Constants(torch.nn.Module):
             species, _ = read_xyz([file], sort=False) #Input coordinate file
         else:
             species, _ = read_xyz(file, sort=False) #Input coordinate file
-        print(species.dtype)
         TYPE = torch.tensor(species.flatten())
 
         R_tensor, R_orb, coeffs_tensor, R_rep_tensor, rep_splines_tensor, \

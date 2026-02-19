@@ -1,4 +1,8 @@
 *.pub
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 personal_github
 
 

@@ -62,7 +62,7 @@ class ESDriver(torch.nn.Module):
         vectorized_nearestneighborlist(
             structure.TYPE, structure.RX, structure.RY, structure.RZ, structure.LBox,
             self.electronic_rcut, structure.Nats, const,
-            upper_tri_only=False, remove_self_neigh=False, min_image_only=False, verbose=verbose)
+            upper_tri_only=False, remove_self_neigh=False, verbose=verbose)
 
         # Get Hamiltonian, Overlap, etc, 
         structure.H0, structure.dH0, structure.S, structure.dS = H0_and_S_vectorized(

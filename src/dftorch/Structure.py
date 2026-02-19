@@ -60,19 +60,26 @@ class Structure(torch.nn.Module):
         e_field: torch.Tensor = None,
         device: str = 'cpu',
         req_grad_xyz: bool = False,
+        species=None,
+        coordinates=None,
+        ignore_spin: bool = False,
         *args, **kwargs
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        species, coordinates = read_xyz([file], sort=False) #Input coordinate file
-        self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
         self.req_grad_xyz = req_grad_xyz
+        if species is None or coordinates is None:
+            species, coordinates = read_xyz([file], sort=False) #Input coordinate file
+            
+        self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
+        
         self.RX = torch.tensor(coordinates[0,:,0], device=device, dtype=torch.get_default_dtype(),
                             requires_grad=self.req_grad_xyz)
         self.RY = torch.tensor(coordinates[0,:,1], device=device, dtype=torch.get_default_dtype(),
                             requires_grad=self.req_grad_xyz)
         self.RZ = torch.tensor(coordinates[0,:,2], device=device, dtype=torch.get_default_dtype(),
                             requires_grad=self.req_grad_xyz)
+            
 
         
         if LBox is None:
@@ -117,7 +124,7 @@ class Structure(torch.nn.Module):
 
         else:
             tot_el = (const.tore[self.TYPE].sum() - charge)
-            if ((tot_el%2)==1).any():
+            if ((tot_el%2)==1).any() and not ignore_spin:
                 raise ValueError("Closed shell systems require even number of electrons")
 
             self.Nocc = int(tot_el/2)

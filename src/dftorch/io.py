@@ -19,6 +19,42 @@ def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
 				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f} {fx:.6f} {fy:.6f} {fz:.6f}\n")
 			else:
 				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
+                    
+def write_XYZ(filename, structure, comment, step=0, Ftot=None):
+	with open(filename, 'a+') as f:
+		num_atoms = structure.Nats
+		f.write(f"{structure.Nats}\n")
+		f.write(f"Step {step}, {comment}\n")
+		for i in range(num_atoms):
+			x = structure.RX[i].item()
+			y = structure.RY[i].item()
+			z = structure.RZ[i].item()
+			symbol = structure.TYPE[i].item()
+			if Ftot is not None:
+				fx = Ftot[i, 0].item()
+				fy = Ftot[i, 1].item()
+				fz = Ftot[i, 2].item()
+				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f} {fx:.6f} {fy:.6f} {fz:.6f}\n")
+			else:
+				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
+
+def write_xyz_from_xyz(filename, TYPE, RX, RY, RZ, comment, step=0, Ftot=None):
+	with open(filename, 'a+') as f:
+		num_atoms = len(TYPE)
+		f.write(f"{num_atoms}\n")
+		f.write(f"Step {step}, {comment}\n")
+		for i in range(num_atoms):
+			x = RX[i].item()
+			y = RY[i].item()
+			z = RZ[i].item()
+			symbol = TYPE[i].item()
+			if Ftot is not None:
+				fx = Ftot[i, 0].item()
+				fy = Ftot[i, 1].item()
+				fz = Ftot[i, 2].item()
+				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f} {fx:.6f} {fy:.6f} {fz:.6f}\n")
+			else:
+				f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
 def read_xyz(files, sort = True):

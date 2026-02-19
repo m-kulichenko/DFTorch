@@ -253,7 +253,7 @@ def read_skf_table(path,
 
 
     rows = []
-    print(path)
+    #print(path)
     for ln in data_lines[start_idx:start_idx+npts_read-1]:
         tokens = _expand_tokens(ln.replace(',', ' ').split())
         if len(tokens) != 20:

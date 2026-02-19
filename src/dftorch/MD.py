@@ -68,7 +68,6 @@ class MDXL:
             self.PME_data = None
 
 
-
         if self.E_array is None:
             self.E_array   = torch.empty((0, ), device=structure.device)
             self.T_array   = torch.empty((0, ), device=structure.device)

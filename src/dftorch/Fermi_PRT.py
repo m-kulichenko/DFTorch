@@ -98,6 +98,7 @@ def Fermi_PRT(
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
     mu1 = (X.diagonal().sum() / (dN_dmu + (1.0 - mask))) * mask
     X = X - torch.diag_embed(diag) * mu1
+    dpdmu = -diag
 
     D0 = Q @ torch.diag_embed(fe) @ Q.T
     D1 = Q @ X @ Q.T

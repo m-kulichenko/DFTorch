@@ -327,7 +327,7 @@ def kernel_update_lr(
     K0Res = KK0 @ Res
     dr = K0Res.clone()
     I = 0
-    Fel = torch.tensor(float('inf'), dtype=q.dtype, device=q.device)
+    Fel = torch.tensor(float('inf'), device=S.device)
 
     while (I < dftorch_params['KRYLOV_MAXRANK']) and (Fel > FelTol):
         # Normalize current direction
