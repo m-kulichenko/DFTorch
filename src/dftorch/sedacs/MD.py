@@ -19,11 +19,12 @@ from sedacs.graph import add_graphs, graph_diff_and_update, collect_graph_from_r
 
 
 class MDXL_Graph(MDXL):
-    def __init__(self, const, temperature_K, n_jumps, g_thresh, max_deg):
+    def __init__(self, const, temperature_K, n_jumps, g_thresh, max_deg, int_dtype):
         super().__init__(None, const, temperature_K)
         self.n_jumps = n_jumps
         self.g_thresh = g_thresh
         self.max_deg = max_deg
+        self.int_dtype = int_dtype
 
     def run(self, structure, dftorch_params, num_steps, dt,
             mu0, fullGraph, nbr_state, ch, core_size, works_per_rank, device,
@@ -124,7 +125,7 @@ class MDXL_Graph(MDXL):
             positions = torch.stack((structure.RX, structure.RY, structure.RZ))
             nbr_state.update(positions)
             disps, dists, nl = calculate_dist_dips(positions, nbr_state, dftorch_params['cutoff'])
-            nl_shape = torch.tensor(list(nl.shape), dtype=torch.int64, device=device)
+            nl_shape = torch.tensor(list(nl.shape), dtype=self.int_dtype, device=device)
 
             ewald_e1, forces1, CoulPot =  calculate_PME_ewald(
                             positions.detach().clone(),
@@ -148,7 +149,7 @@ class MDXL_Graph(MDXL):
         else:
             positions = None
             disps = None; dists = None;
-            nl_shape = torch.empty((2,), dtype=torch.int64, device=device)
+            nl_shape = torch.empty((2,), dtype=self.int_dtype, device=device)
             self.n = torch.empty((structure.Nats,), device=device)
             CoulPot = torch.empty((structure.Nats,), device=device)
 
@@ -163,7 +164,7 @@ class MDXL_Graph(MDXL):
         dist.broadcast(structure.coordinates, 0)
 
         if dist.get_rank() != 0:
-            nl = torch.empty(tuple(int(x) for x in nl_shape.tolist()), dtype=torch.int64, device=device)
+            nl = torch.empty(tuple(int(x) for x in nl_shape.tolist()), dtype=self.int_dtype, device=device)
 
         dist.broadcast(nl, 0)
 

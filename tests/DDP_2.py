@@ -181,7 +181,7 @@ def init_processes(backend):
     
     torch.manual_seed(0)
     temperature_K = torch.tensor(500.0, device=structure.device)
-    mdDriver = MDXL_Graph(structure.const, temperature_K, NJUMPS, GTHRESH, MAX_DEG)
+    mdDriver = MDXL_Graph(structure.const, temperature_K, NJUMPS, GTHRESH, MAX_DEG, INT_DTYPE)
     # Set number of steps, time step (fs), dump interval and trajectory filename
     mdDriver.run(structure, dftorch_params, num_steps=100, dt=0.3,
                  mu0=mu0, fullGraph=fullGraph, nbr_state=nbr_state, ch=partsCoreHalo[start:end], core_size=numCores[start:end],
