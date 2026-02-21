@@ -504,7 +504,7 @@ def kernel_global(structure, positions_global, nbr_inds_global, disps_global, di
             Fel = torch.norm(F_small @ Y - K0Res_global)
             print("  Krylov rank: {:}, Fel = {:.6f}".format(I, Fel.item()))
         else:
-            Fel = torch.zeros(1, device=device)
+            Fel = torch.tensor(0.0, device=device)   # scalar, same shape as rank 0
         dist.broadcast(Fel, 0)
         I += 1
 
