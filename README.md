@@ -4,10 +4,24 @@ DFTorch is a Density Functional Tight Binding (DFTB) implementation in PyTorch.
 
 ## Installation
 
+### uv (recommended)
+
+```bash
+cd DFTorch
+uv venv --python 3.11
+uv pip install -e ".[dev]"
+```
+
+
+### pip
 To install DFTorch, run:
 
 ```bash
 pip install .
+```
+Run tests:
+```bash
+uv run pytest
 ```
 
 ## Requirements
@@ -20,11 +34,7 @@ pip install .
 
 Import modules from DFTorch after installation:
 
-```python
-from DFTorch.CoulombMatrix import CoulombMatrix_vectorized
-from DFTorch.SCF import SCF
-# ...
-```
+see /experiments/1_tutorial.ipynb for examples.
 
 ## Authors
-A.M.N. Niklasson, M. Kulichenko
+ M. Kulichenko, A.M.N. Niklasson

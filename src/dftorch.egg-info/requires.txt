@@ -1,4 +1,10 @@
-torch
 numpy
 scipy
+torch
+setuptools
 pandas
+
+[dev]
+pytest
+ruff
+mypy

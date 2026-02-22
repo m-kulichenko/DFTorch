@@ -39,3 +39,8 @@ src/dftorch/ewald_pme/__init__.py
 src/dftorch/ewald_pme/ewald_torch.py
 src/dftorch/ewald_pme/neighbor_list.py
 src/dftorch/ewald_pme/util.py
+src/dftorch/sedacs/MD.py
+src/dftorch/sedacs/SCF.py
+src/dftorch/sedacs/__init__.py
+src/dftorch/sedacs/sedacs_interface.py
+tests/test_import.py
