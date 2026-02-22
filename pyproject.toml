@@ -13,6 +13,7 @@ dependencies = [
   "scipy",
   "torch",
   "setuptools",
+  "pytest",
   "pandas"]
 
 [project.optional-dependencies]

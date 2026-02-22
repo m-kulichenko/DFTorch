@@ -9,9 +9,13 @@ DFTorch is a Density Functional Tight Binding (DFTB) implementation in PyTorch.
 ```bash
 cd DFTorch
 uv venv --python 3.11
-uv pip install -e ".[dev]"
+uv pip install .
 ```
 
+Run tests:
+```bash
+uv run pytest
+```
 
 ### pip
 To install DFTorch, run:
@@ -19,10 +23,7 @@ To install DFTorch, run:
 ```bash
 pip install .
 ```
-Run tests:
-```bash
-uv run pytest
-```
+
 
 ## Requirements
 - torch
