@@ -3,6 +3,7 @@ __pycache__/
 **/__pycache__/
 *.ipynb_checkpoints
 *.vscode/
+*.egg-info/
 *.pyc
 *.pyo
 *.pyd
