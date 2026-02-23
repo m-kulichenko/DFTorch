@@ -41,6 +41,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      id-token: write
       contents: read
     environment:
       name: testpypi
@@ -51,9 +52,7 @@ jobs:
           name: dist
           path: dist
 
-      - name: Publish to TestPyPI (bootstrap via token)
+      - name: Publish to TestPyPI (trusted publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
-          user: __token__
-          password: ${{ secrets.TEST_PYPI_API_TOKEN }}
