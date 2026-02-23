@@ -13,11 +13,10 @@ dependencies = [
   "scipy",
   "torch",
   "setuptools",
-  "pytest",
   "pandas"]
 
 [project.optional-dependencies]
-dev = ["ruff", "mypy", "pre-commit"]
+dev = ["pytest", "ruff", "mypy", "pre-commit"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
