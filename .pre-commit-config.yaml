@@ -10,6 +10,6 @@ repos:
     hooks:
       - id: pytest
         name: pytest (quick)
-        entry: uv run pytest -q
+        entry: uv run pytest
         language: system
         pass_filenames: false
