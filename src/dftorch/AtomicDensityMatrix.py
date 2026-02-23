@@ -1,5 +1,7 @@
 import torch
-def atomic_density_matrix( H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
+
+
+def atomic_density_matrix(H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
     """
     Vectorized construction of the atomic density matrix D_atomic.
 
@@ -14,21 +16,26 @@ def atomic_density_matrix( H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
     - D_atomic (Tensor[float]): Atomic density matrix as 1D tensor of length HDIM
     """
     # Initialize the atomic density matrix with zeros
-    D_atomic = torch.zeros(HDIM, device=H_INDEX_START.device, dtype=torch.get_default_dtype())
+    D_atomic = torch.zeros(
+        HDIM, device=H_INDEX_START.device, dtype=torch.get_default_dtype()
+    )
 
-    D_atomic[H_INDEX_START] = 1.0*const.n_s[TYPE]
-    D_atomic[H_INDEX_START[has_p]+1] = 1.0*const.n_p[TYPE[has_p]]/3
-    D_atomic[H_INDEX_START[has_p]+2] = 1.0*const.n_p[TYPE[has_p]]/3
-    D_atomic[H_INDEX_START[has_p]+3] = 1.0*const.n_p[TYPE[has_p]]/3
-    D_atomic[H_INDEX_START[has_d]+4] = 1.0*const.n_d[TYPE[has_d]]/5
-    D_atomic[H_INDEX_START[has_d]+5] = 1.0*const.n_d[TYPE[has_d]]/5
-    D_atomic[H_INDEX_START[has_d]+6] = 1.0*const.n_d[TYPE[has_d]]/5
-    D_atomic[H_INDEX_START[has_d]+7] = 1.0*const.n_d[TYPE[has_d]]/5
-    D_atomic[H_INDEX_START[has_d]+8] = 1.0*const.n_d[TYPE[has_d]]/5
+    D_atomic[H_INDEX_START] = 1.0 * const.n_s[TYPE]
+    D_atomic[H_INDEX_START[has_p] + 1] = 1.0 * const.n_p[TYPE[has_p]] / 3
+    D_atomic[H_INDEX_START[has_p] + 2] = 1.0 * const.n_p[TYPE[has_p]] / 3
+    D_atomic[H_INDEX_START[has_p] + 3] = 1.0 * const.n_p[TYPE[has_p]] / 3
+    D_atomic[H_INDEX_START[has_d] + 4] = 1.0 * const.n_d[TYPE[has_d]] / 5
+    D_atomic[H_INDEX_START[has_d] + 5] = 1.0 * const.n_d[TYPE[has_d]] / 5
+    D_atomic[H_INDEX_START[has_d] + 6] = 1.0 * const.n_d[TYPE[has_d]] / 5
+    D_atomic[H_INDEX_START[has_d] + 7] = 1.0 * const.n_d[TYPE[has_d]] / 5
+    D_atomic[H_INDEX_START[has_d] + 8] = 1.0 * const.n_d[TYPE[has_d]] / 5
 
     return D_atomic
 
-def atomic_density_matrix_batch(batch_size, H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
+
+def atomic_density_matrix_batch(
+    batch_size, H_INDEX_START, HDIM, TYPE, const, has_p, has_d
+):
     """
     Vectorized batched atomic density matrix.
 
@@ -47,10 +54,12 @@ def atomic_density_matrix_batch(batch_size, H_INDEX_START, HDIM, TYPE, const, ha
     device = H_INDEX_START.device
     B = H_INDEX_START.shape[0]
     assert B == batch_size, "batch_size mismatch"
-    D_atomic = torch.zeros(B, HDIM, device=device, dtype=torch.get_default_dtype())  # force float dtype
+    D_atomic = torch.zeros(
+        B, HDIM, device=device, dtype=torch.get_default_dtype()
+    )  # force float dtype
 
     batch_idx = torch.arange(B, device=device).unsqueeze(1)
-    D_atomic[batch_idx, H_INDEX_START] = (1.0 * const.n_s[TYPE])
+    D_atomic[batch_idx, H_INDEX_START] = 1.0 * const.n_s[TYPE]
 
     # p occupations
     if has_p.any():

@@ -1,5 +1,6 @@
 import torch
 
+
 @torch.compile
 def Forces(
     H: torch.Tensor,
@@ -109,19 +110,23 @@ def Forces(
 
     where all components are computed as negative derivatives of the
     corresponding energy contributions with respect to atomic positions.
-    """    
-    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+    """
+    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
     dtype = H.dtype
     device = H.device
 
-    if D.dim() == 3: # os
-        D_tot = D.sum(0)/2
-    else: # cs
+    if D.dim() == 3:  # os
+        D_tot = D.sum(0) / 2
+    else:  # cs
         D_tot = D
-    
-    n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
-    atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
-    
+
+    n_orbitals_per_atom = const.n_orb[
+        TYPE
+    ]  # Compute number of orbitals per atom. shape: (Nats,)
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom
+    )  # Generate atom index for each orbital
+
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
     Fcoul = q * (q @ dC)
@@ -130,54 +135,63 @@ def Forces(
     # FScoul
     CoulPot = C @ q
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot)*2
-    dS_times_D = D_tot*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    factor = (U * q + CoulPot) * 2
+    dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
+    FScoul.scatter_add_(
+        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
     FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4*(dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
-    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        
+    TMP = 4 * (dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Pulay forces (Here H includes H_spin)
-    SIHD = 4 * Z @ Z.T @ H @ D # removes S factor from H
+    SIHD = 4 * Z @ Z.T @ H @ D  # removes S factor from H
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     # Collapse alpha and beta channels if present: dS @ (SIHD[0] + SIHD[1]) == dS @ SIHD.sum(0)
-    if SIHD.dim() == 2: # cs
+    if SIHD.dim() == 2:  # cs
         TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
-    else: # os
-        TMP = -0.5*torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(offset=0, dim1=1, dim2=2) # (2, 3, 4, 4)
-    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    
+    else:  # os
+        TMP = -0.5 * torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(
+            offset=0, dim1=1, dim2=2
+        )  # (2, 3, 4, 4)
+    FPulay.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-    
+
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    tmp1 = (D_tot-D0)@dS
-    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    tmp1 = (D_tot - D0) @ dS
+    tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
 
     D_diff = D_tot - D0
     n_orb = dS.shape[1]
-    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
-    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
-    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
-    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
-    FSdipole -= 2*new_fs
+    a = dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3, n_orb, Nats), dtype=a.dtype, device=a.device)
+    outs_by_atom = outs_by_atom.index_add(2, atom_ids, a)
+    new_fs = outs_by_atom.permute(0, 2, 1) @ dotRE[atom_ids]
+    FSdipole -= 2 * new_fs
 
     Frep = dVr.sum(dim=2)
-    
+
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
 
 @torch.compile
 def forces_spin(
@@ -188,28 +202,34 @@ def forces_spin(
     const,
     TYPE: torch.Tensor,
 ):
-    """
-    """    
-    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+    """ """
+    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
     dtype = q_spin_atom.dtype
     device = q_spin_atom.device
 
+    n_orbitals_per_atom = const.n_orb[
+        TYPE
+    ]  # Compute number of orbitals per atom. shape: (Nats,)
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=device), n_orbitals_per_atom
+    )  # Generate atom index for each orbital
 
-    n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
-    atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=device), n_orbitals_per_atom) # Generate atom index for each orbital
-    
     net_spin = q_spin_atom[0] - q_spin_atom[1]
     FSspinA = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (net_spin * const.w[TYPE])*2
-    tmp = ((torch.tensor([[[1]],[[-1]]], device=device) * D).unsqueeze(1)*dS.unsqueeze(0)).sum(0)
-    dS_times_D = tmp*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FSspinA.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    factor = (net_spin * const.w[TYPE]) * 2
+    tmp = (
+        (torch.tensor([[[1]], [[-1]]], device=device) * D).unsqueeze(1)
+        * dS.unsqueeze(0)
+    ).sum(0)
+    dS_times_D = tmp * factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
+    FSspinA.scatter_add_(
+        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
     FSspinA.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
-    
-    return FSspinA/2
+    return FSspinA / 2
 
 
 @torch.compile
@@ -327,75 +347,86 @@ def Forces_PME(
     PME / periodicity affects only the Coulomb-related pieces through the
     supplied Coulomb potential ``dq_p1``.
     """
-    
-    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
+    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
     dtype = H.dtype
     device = H.device
 
-    if D.dim() == 3: # os
-        D_tot = D.sum(0)/2
-    else: # cs
+    if D.dim() == 3:  # os
+        D_tot = D.sum(0) / 2
+    else:  # cs
         D_tot = D
 
-    
-    n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
-    atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
-    
+    n_orbitals_per_atom = const.n_orb[
+        TYPE
+    ]  # Compute number of orbitals per atom. shape: (Nats,)
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom
+    )  # Generate atom index for each orbital
+
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
     Fcoul = torch.zeros((3, Nats), dtype=dtype, device=device)
 
     # FScoul
     CoulPot = dq_p1
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot)*2
-    dS_times_D = D_tot*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    factor = (U * q + CoulPot) * 2
+    dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
+    FScoul.scatter_add_(
+        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
     FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4*(dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
-    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    TMP = 4 * (dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
 
     # Pulay forces
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
-    if SIHD.dim() == 2: # cs
+    if SIHD.dim() == 2:  # cs
         TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
-    else: # os
-        TMP = -0.5*torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(offset=0, dim1=1, dim2=2) # (2, 3, 4, 4)
-    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    
+    else:  # os
+        TMP = -0.5 * torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(
+            offset=0, dim1=1, dim2=2
+        )  # (2, 3, 4, 4)
+    FPulay.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-    
+
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    tmp1 = (D_tot-D0)@dS
-    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    tmp1 = (D_tot - D0) @ dS
+    tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
 
     D_diff = D_tot - D0
     n_orb = dS.shape[1]
-    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
-    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
-    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
-    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
-    FSdipole -= 2*new_fs
+    a = dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3, n_orb, Nats), dtype=a.dtype, device=a.device)
+    outs_by_atom = outs_by_atom.index_add(2, atom_ids, a)
+    new_fs = outs_by_atom.permute(0, 2, 1) @ dotRE[atom_ids]
+    FSdipole -= 2 * new_fs
 
     Frep = dVr.sum(dim=2)
-    
+
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
 
 @torch.compile
 def forces_shadow(
@@ -519,77 +550,90 @@ def forces_shadow(
     Setting ``n = q`` recovers the standard SCC force decomposition used in
     :func:`Forces`.
     """
-    
-    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+
+    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
     dtype = H.dtype
     device = H.device
-    
-    if D.dim() == 3: # os
-        D_tot = D.sum(0)/2
-    else: # cs
+
+    if D.dim() == 3:  # os
+        D_tot = D.sum(0) / 2
+    else:  # cs
         D_tot = D
 
-    n_orbitals_per_atom = const.n_orb[TYPE] # Compute number of orbitals per atom. shape: (Nats,)
-    atom_ids = torch.repeat_interleave(torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom) # Generate atom index for each orbital
+    n_orbitals_per_atom = const.n_orb[
+        TYPE
+    ]  # Compute number of orbitals per atom. shape: (Nats,)
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=Rx.device), n_orbitals_per_atom
+    )  # Generate atom index for each orbital
 
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
-    Fcoul = (2*q - n) * (n @ dC)
+    Fcoul = (2 * q - n) * (n @ dC)
 
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ n
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * n + CoulPot)*2
-    dS_times_D = D_tot*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    factor = (U * n + CoulPot) * 2
+    dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
+    FScoul.scatter_add_(
+        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
     FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4*(dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
-    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        
+    TMP = 4 * (dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Pulay forces (Here H includes H_spin)
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     # Collapse alpha and beta channels if present: dS @ (SIHD[0] + SIHD[1]) == dS @ SIHD.sum(0)
-    if SIHD.dim() == 2: # cs
+    if SIHD.dim() == 2:  # cs
         TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
-    else: # os
-        TMP = -0.5*torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(offset=0, dim1=1, dim2=2) # (2, 3, 4, 4)
-    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    
+    else:  # os
+        TMP = -0.5 * torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(
+            offset=0, dim1=1, dim2=2
+        )  # (2, 3, 4, 4)
+    FPulay.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-    
+
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
     D_diff = D_tot - D0
     tmp1 = D_diff @ dS
-    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
-    
+
     n_orb = dS.shape[1]
-    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
-    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
-    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
-    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
-    FSdipole -= 2*new_fs
+    a = dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3, n_orb, Nats), dtype=a.dtype, device=a.device)
+    outs_by_atom = outs_by_atom.index_add(2, atom_ids, a)
+    new_fs = outs_by_atom.permute(0, 2, 1) @ dotRE[atom_ids]
+    FSdipole -= 2 * new_fs
 
     Frep = dVr.sum(dim=2)
-    
+
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
 
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
 
 @torch.compile
 def forces_shadow_pme(
@@ -707,11 +751,11 @@ def forces_shadow_pme(
     As in :func:`forces_shadow`, setting ``n = q`` recovers the standard SCC
     decomposition, now in a PME / periodic setting.
     """
-    #Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
 
     dtype = H.dtype
     device = H.device
-    
+
     n_orbitals_per_atom = const.n_orb[TYPE]
     atom_ids = torch.repeat_interleave(
         torch.arange(len(n_orbitals_per_atom), device=Rx.device),
@@ -726,47 +770,53 @@ def forces_shadow_pme(
     # FScoul
     CoulPot = C
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * n + CoulPot)*2
-    dS_times_D = D*dS*factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim = 2) # sum of elements in each row
-    FScoul.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    factor = (U * n + CoulPot) * 2
+    dS_times_D = D * dS * factor[atom_ids].unsqueeze(-1)
+    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
+    FScoul.scatter_add_(
+        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
     dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
     FScoul.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4*(dH @ D).diagonal(offset=0, dim1=1, dim2=2)
-    Fband0.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        
+    TMP = 4 * (dH @ D).diagonal(offset=0, dim1=1, dim2=2)
+    Fband0.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Pulay forces
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
     TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
-    FPulay.scatter_add_(1, atom_ids.expand(3, -1), TMP) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    
+    FPulay.scatter_add_(
+        1, atom_ids.expand(3, -1), TMP
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
     # Fdipole = q_i * E
     Fdipole = q.unsqueeze(0) * Efield.view(3, 1)
-        
+
     # FSdipole. $$$ ??? a bug in Efield calculations.
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
     D_diff = D - D0
     tmp1 = D_diff @ dS
-    tmp2 = -2*(tmp1).diagonal(offset=0, dim1=1, dim2=2)
+    tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
-    
+
     n_orb = dS.shape[1]
-    a = dS*D_diff.permute(1,0).unsqueeze(0) # 3, n_ham, n_ham
-    outs_by_atom = torch.zeros((3,n_orb,Nats),dtype=a.dtype,device=a.device)
-    outs_by_atom=outs_by_atom.index_add(2, atom_ids,a)
-    new_fs = outs_by_atom.permute(0,2,1) @ dotRE[atom_ids]
-    FSdipole -= 2*new_fs
+    a = dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
+    outs_by_atom = torch.zeros((3, n_orb, Nats), dtype=a.dtype, device=a.device)
+    outs_by_atom = outs_by_atom.index_add(2, atom_ids, a)
+    new_fs = outs_by_atom.permute(0, 2, 1) @ dotRE[atom_ids]
+    FSdipole -= 2 * new_fs
 
     Frep = dVr.sum(dim=2)
-    
+
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
 

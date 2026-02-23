@@ -1,5 +1,6 @@
 import torch
 
+
 def Energy(
     H0: torch.Tensor,
     U: torch.Tensor,
@@ -76,33 +77,27 @@ def Energy(
     elif torch.get_default_dtype() == torch.float64:
         eps = 1e-10
 
-    # Ensure D0 is diagonal for consistent subtraction
-    if D0.ndim == 2:
-        D0_diag = torch.diag(D0)
-    else:
-        D0_diag = D0
-
     # Band energy
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1 # closed-shell or open-shell
-        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum() 
-    else: # batched
-        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1) 
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
+        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+    else:  # batched
+        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
 
     # Coulomb energy
-    if Rx.dim() == 1: # non-batched
+    if Rx.dim() == 1:  # non-batched
         if C is None and dq_p1 is None:
-            Ecoul = 0 #structure.e_coul_tmp
-        elif C is None and dq_p1 is not None:   # PME
+            Ecoul = 0  # structure.e_coul_tmp
+        elif C is None and dq_p1 is not None:  # PME
             Ecoul = 0.5 * q @ dq_p1 + 0.5 * torch.sum(q**2 * U)
-        elif C is not None and dq_p1 is None:   # full Coulomb matrix
+        elif C is not None and dq_p1 is None:  # full Coulomb matrix
             Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
         elif C is not None and dq_p1 is not None:
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
-    else: # batched, only full Coulomb matrix for batches
+    else:  # batched, only full Coulomb matrix for batches
         if dq_p1 is not None:
             raise ValueError("Batched PME Coulomb not implemented.")
-        Cq = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)      # (B,N)
+        Cq = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B,N)
         Ecoul = 0.5 * torch.sum(q * Cq, dim=-1) + 0.5 * torch.sum(q**2 * U, dim=1)
 
     # Dipole energy
@@ -112,15 +107,15 @@ def Energy(
     # Entropy
     # mask = (f > eps) & (f < 1 - eps)
     # S_ent = -kB * torch.sum(f[mask] * torch.log(f[mask]) + (1 - f[mask]) * torch.log(1 - f[mask]))
-    mask = (f > eps) & (f < 1 - eps)              # (B, n_orb)
-    f_safe = f.clamp(eps, 1 - eps)                # avoid log(0)
+    mask = (f > eps) & (f < 1 - eps)  # (B, n_orb)
+    f_safe = f.clamp(eps, 1 - eps)  # avoid log(0)
     term = f_safe * torch.log(f_safe) + (1 - f_safe) * torch.log(1 - f_safe)
-    term = term * mask                            # zero out invalid entries
-    
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        S_ent = -kB * term.sum() 
+    term = term * mask  # zero out invalid entries
+
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        S_ent = -kB * term.sum()
     else:
-        S_ent = -kB * term.sum(dim=-1)                # (B,)
+        S_ent = -kB * term.sum(dim=-1)  # (B,)
 
     E_entropy = -2 * Te * S_ent
 
@@ -219,35 +214,30 @@ def EnergyShadow(
     elif torch.get_default_dtype() == torch.float64:
         eps = 1e-10
 
-    # Ensure D0 is diagonal for consistent subtraction
-    if D0.ndim == 2:
-        D0_diag = torch.diag(D0)
-    else:
-        D0_diag = D0
-
     # Band energy
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1 # closed-shell or open-shell
-        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum() 
-    else: # batched
-        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1) 
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
+        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+    else:  # batched
+        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
 
     # Coulomb energy
-    if Rx.dim() == 1: # non-batched
+    if Rx.dim() == 1:  # non-batched
         if C is None and dq_p1 is None:
-            Ecoul = 0 #structure.e_coul_tmp
-        elif C is None and dq_p1 is not None:   # PME
-            Ecoul = 0.5 * (2*q-n) @ dq_p1 + 0.5 * torch.sum((2.0*q - n) * U * n)
-        elif C is not None and dq_p1 is None:   # full Coulomb matrix
-            Ecoul = 0.5 * (2*q-n) @ (C @ n) + 0.5 * torch.sum((2.0*q - n) * U * n)
+            Ecoul = 0  # structure.e_coul_tmp
+        elif C is None and dq_p1 is not None:  # PME
+            Ecoul = 0.5 * (2 * q - n) @ dq_p1 + 0.5 * torch.sum((2.0 * q - n) * U * n)
+        elif C is not None and dq_p1 is None:  # full Coulomb matrix
+            Ecoul = 0.5 * (2 * q - n) @ (C @ n) + 0.5 * torch.sum((2.0 * q - n) * U * n)
         elif C is not None and dq_p1 is not None:
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
-    else: # batched, only full Coulomb matrix for batches
+    else:  # batched, only full Coulomb matrix for batches
         if dq_p1 is not None:
             raise ValueError("Batched PME Coulomb not implemented.")
-        Cn = torch.bmm(C, n.unsqueeze(-1)).squeeze(-1)      # (B,N)
-        Ecoul = 0.5 * torch.sum((2*q-n) * Cn, dim=-1) + 0.5 * torch.sum((2.0*q - n) * U * n, dim=1)
-
+        Cn = torch.bmm(C, n.unsqueeze(-1)).squeeze(-1)  # (B,N)
+        Ecoul = 0.5 * torch.sum((2 * q - n) * Cn, dim=-1) + 0.5 * torch.sum(
+            (2.0 * q - n) * U * n, dim=1
+        )
 
     # Dipole energy
     Efield_term = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -256,16 +246,16 @@ def EnergyShadow(
     # Entropy
     # mask = (f > eps) & (f < 1 - eps)
     # S_ent = -kB * torch.sum(f[mask] * torch.log(f[mask]) + (1 - f[mask]) * torch.log(1 - f[mask]))
-    mask = (f > eps) & (f < 1 - eps)              # (B, n_orb)
-    f_safe = f.clamp(eps, 1 - eps)                # avoid log(0)
+    mask = (f > eps) & (f < 1 - eps)  # (B, n_orb)
+    f_safe = f.clamp(eps, 1 - eps)  # avoid log(0)
     term = f_safe * torch.log(f_safe) + (1 - f_safe) * torch.log(1 - f_safe)
-    term = term * mask                            # zero out invalid entries
-   
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        S_ent = -kB * term.sum() 
+    term = term * mask  # zero out invalid entries
+
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        S_ent = -kB * term.sum()
     else:
-        S_ent = -kB * term.sum(dim=-1)                # (B,)
-    
+        S_ent = -kB * term.sum(dim=-1)  # (B,)
+
     E_entropy = -2 * Te * S_ent
 
     # Total energy

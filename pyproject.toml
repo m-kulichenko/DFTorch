@@ -28,3 +28,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "-q"]
+
+[tool.ruff]
+exclude = [
+  "src/dftorch/_legacy",
+]

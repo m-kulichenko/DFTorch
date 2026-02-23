@@ -3,20 +3,27 @@ import numpy as np
 import torch
 from typing import Callable, Optional, Tuple, List
 
-__all__ = ["calculate_num_kvecs_dynamic", "calculate_num_kvecs_ch_indep", 
-           "determine_alpha", "determine_alpha_ch_indep", "calculate_alpha_and_num_grids",
-           "CG"]
+__all__ = [
+    "calculate_num_kvecs_dynamic",
+    "calculate_num_kvecs_ch_indep",
+    "determine_alpha",
+    "determine_alpha_ch_indep",
+    "calculate_alpha_and_num_grids",
+    "CG",
+]
 
 # Charges q are expressed as multiples of the elementary charge e: q = x*e
 # e^2/(4*pi*epsilon0) = 14.399645 eV * Angström
 CONV_FACTOR = 14.399645
 
+
 @torch.compile
 def mixed_precision_sum(data, dim=None):
-    '''
+    """
     Util function for mixed precision summation (with double accumulation)
-    '''
+    """
     return torch.sum(data, dtype=torch.float64, dim=dim).to(data.dtype)
+
 
 @torch.compile
 def __CG_update(x, r, p, q, rho_cur):
@@ -25,14 +32,16 @@ def __CG_update(x, r, p, q, rho_cur):
     r -= alpha * q
     return x, r
 
-def CG(mv: Callable[[torch.Tensor], torch.Tensor],
-       b: torch.Tensor,
-       x0: Optional[torch.Tensor] = None,
-       max_iter: Optional[int] = None,
-       rtol: float = 1e-5,
-       atol: float = 0.0,
-       M: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-       ) -> Tuple[torch.Tensor, int]:
+
+def CG(
+    mv: Callable[[torch.Tensor], torch.Tensor],
+    b: torch.Tensor,
+    x0: Optional[torch.Tensor] = None,
+    max_iter: Optional[int] = None,
+    rtol: float = 1e-5,
+    atol: float = 0.0,
+    M: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+) -> Tuple[torch.Tensor, int]:
     """
     Conjugate Gradient (CG) solver using a pure PyTorch implementation.
 
@@ -55,8 +64,8 @@ def CG(mv: Callable[[torch.Tensor], torch.Tensor],
     dtype = b.dtype
     b = b.to(torch.float64)
     matvec_count = 0
-    if M == None:
-        M_func = lambda x: x
+    if M is None:
+        M_func = lambda x: x  # noqa: E731
     else:
         M_func = M
     atol2 = max(atol * atol, (rtol * rtol) * torch.dot(b, b).item())
@@ -84,14 +93,14 @@ def CG(mv: Callable[[torch.Tensor], torch.Tensor],
             p = p * beta + z
         else:
             p = z.clone()
-        
+
         q = mv(p.to(dtype)).to(torch.float64)
         matvec_count += 1
-        '''
+        """
         alpha = rho_cur / torch.dot(p, q).item()
         x += alpha * p
         r -= alpha * q
-        '''
+        """
         x, r = __CG_update(x, r, p, q, rho_cur)
         rho_prev = rho_cur
 
@@ -105,16 +114,18 @@ def has_only_prime_factors_2_3_5(num):
             num //= prime
     return num == 1
 
+
 def find_available_number(n):
-    '''
+    """
     Find the next available number that has only 2,3 and 5 as prime factors
     FFT is supposed to work better when the problem can be split into these factors.
     TODO: This should be tested, may not make any difference with torch.fft
-    '''
+    """
     i = n
     while not has_only_prime_factors_2_3_5(i):
         i += 1
     return i
+
 
 def calculate_alpha_and_num_grids(
     cell: np.ndarray, cutoff: float, t_err: float
@@ -130,13 +141,17 @@ def calculate_alpha_and_num_grids(
     Returns:
         Tuple[float, List[int]]: Computed alpha and the number of grid points.
     """
-    alpha = math.sqrt(-math.log(2*t_err))/cutoff
+    alpha = math.sqrt(-math.log(2 * t_err)) / cutoff
     denom = 3.0 * math.pow(t_err, 0.2)
     nmesh1 = math.ceil(2.0 * alpha * cell[0][0] / denom)
     nmesh2 = math.ceil(2.0 * alpha * cell[1][1] / denom)
     nmesh3 = math.ceil(2.0 * alpha * cell[2][2] / denom)
 
-    return alpha, [find_available_number(nmesh1), find_available_number(nmesh2), find_available_number(nmesh3)]
+    return alpha, [
+        find_available_number(nmesh1),
+        find_available_number(nmesh2),
+        find_available_number(nmesh3),
+    ]
 
 
 def calculate_num_kvecs_dynamic(
@@ -161,13 +176,13 @@ def calculate_num_kvecs_dynamic(
     nxmax = 1
     nymax = 1
     nzmax = 1
-    
+
     natoms = len(charges)
 
     q_sq_sum = CONV_FACTOR * np.sum(charges**2)
 
     error = rms_kspace(nxmax, cell[0, 0], natoms, alpha, q_sq_sum)
-    #TODO: turn this into binary search
+    # TODO: turn this into binary search
     while error > (accuracy_relative):
         nxmax += 1
         error = rms_kspace(nxmax, cell[0, 0], natoms, alpha, q_sq_sum)
@@ -190,15 +205,14 @@ def calculate_num_kvecs_dynamic(
 
     # Check if box is triclinic --> Scale lattice vectors for triclinic skew
     if np.count_nonzero(cell - np.diag(np.diagonal(cell))) != 9:
-        vector = np.array(
-            [nxmax / cell[0, 0], nymax / cell[1, 1], nzmax / cell[2, 2]]
-        )
+        vector = np.array([nxmax / cell[0, 0], nymax / cell[1, 1], nzmax / cell[2, 2]])
         scaled_nbk = np.dot(np.array(np.abs(cell)), vector)
         nxmax = max(1, int(scaled_nbk[0]))
         nymax = max(1, int(scaled_nbk[1]))
         nzmax = max(1, int(scaled_nbk[2]))
 
     return kmax, [nxmax, nymax, nzmax]
+
 
 def determine_alpha_ch_indep(t_err: float, cutoff: float) -> float:
     """
@@ -213,9 +227,16 @@ def determine_alpha_ch_indep(t_err: float, cutoff: float) -> float:
     """
     return math.sqrt(-math.log(2 * t_err)) / cutoff
 
+
 def calculate_error_ch_indep(alpha, kmax, d):
-    error = kmax * math.sqrt(d*alpha)/20 * math.exp(-((math.pi * kmax) / (d*alpha))**2)
+    error = (
+        kmax
+        * math.sqrt(d * alpha)
+        / 20
+        * math.exp(-(((math.pi * kmax) / (d * alpha)) ** 2))
+    )
     return error
+
 
 def calculate_num_kvecs_ch_indep(
     t_err: float, cutoff: float, cell: np.ndarray
@@ -238,6 +259,7 @@ def calculate_num_kvecs_ch_indep(
         kmax_vals.append(sub_max)
     return kmax_vals, alpha
 
+
 def search_single_kmax_ch_indep(t_err, alpha, d):
     kmax = 1
 
@@ -245,10 +267,11 @@ def search_single_kmax_ch_indep(t_err, alpha, d):
 
     while err > t_err:
         kmax += 1
-        err = calculate_error_ch_indep(alpha, kmax, d)   
+        err = calculate_error_ch_indep(alpha, kmax, d)
     return kmax
 
-def rms_kspace(km, l, n, a, q2):
+
+def rms_kspace(km, l, n, a, q2):  # noqa: E741
     """
     Compute the root mean square error of the force in reciprocal space
 
@@ -265,6 +288,7 @@ def rms_kspace(km, l, n, a, q2):
         * np.sqrt(1 / (np.pi * km * n))
         * np.exp(-((np.pi * km / (a * l)) ** 2))
     )
+
 
 def determine_alpha(
     charge: np.ndarray, acc: float, cutoff: float, cell: np.ndarray
@@ -290,9 +314,7 @@ def determine_alpha(
 
     a = (
         accuracy_relative
-        * np.sqrt(
-            len(charge) * cutoff * cell[0, 0] * cell[1, 1] * cell[2, 2]
-        )
+        * np.sqrt(len(charge) * cutoff * cell[0, 0] * cell[1, 1] * cell[2, 2])
         / (2 * qsqsum)
     )
 

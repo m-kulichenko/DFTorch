@@ -1,6 +1,7 @@
 import torch
 import time
 
+
 def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     """
     Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
@@ -26,20 +27,21 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     Notes:
         - The recursion approximates the Fermi function at finite temperature, avoiding costly exponentials.
         - The eigenbasis is used to construct the density matrix after recursion.
-    """    
-    if debug: torch.cuda.synchronize()
+    """
+    if debug:
+        torch.cuda.synchronize()
     start_time1 = time.perf_counter()
-    
-    if mu_0 == None:
-        #h = torch.linalg.eigvalsh(H0)
-        h,v = torch.linalg.eigh(H0)
+
+    if mu_0 is None:
+        # h = torch.linalg.eigvalsh(H0)
+        h, v = torch.linalg.eigh(H0)
         mu0 = 0.5 * (h[nocc - 1] + h[nocc])
     else:
         mu0 = mu_0
-        
-    if debug: 
+
+    if debug:
         torch.cuda.synchronize()
-        print("    eigh     {:.1f} s".format( time.perf_counter()-start_time1 ))
+        print("    eigh     {:.1f} s".format(time.perf_counter() - start_time1))
 
     start_time1 = time.perf_counter()
 
@@ -49,10 +51,10 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     OccErr = 1.0
     Cnt = 0
     while OccErr > eps and Cnt < MaxIt:
-        p0 = 0.5 - cnst * (h - mu0 ) # $$$ should be exp?
+        p0 = 0.5 - cnst * (h - mu0)  # $$$ should be exp?
         for _ in range(m):
             p02 = p0 * p0
-            iD0 = 1/(2 * (p02 - p0) + 1)
+            iD0 = 1 / (2 * (p02 - p0) + 1)
             p0 = iD0 * p02
         dPdmu = torch.sum(beta * p0 * (1 - p0))
         occ = torch.sum(p0)
@@ -65,16 +67,20 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
 
         Cnt += 1
     if Cnt == MaxIt:
-        print("Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(MaxIt, OccErr))
+        print(
+            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+                MaxIt, OccErr
+            )
+        )
     if debug:
         torch.cuda.synchronize()
-        print("    dm ptr   {:.1f} s".format( time.perf_counter()-start_time1 ))
+        print("    dm ptr   {:.1f} s".format(time.perf_counter() - start_time1))
     start_time1 = time.perf_counter()
-    
-    # Final adjustment of occupation    
-    P0 = (v * p0.unsqueeze(0)) @ v.T # same as v@(torch.diag_embed(p0)@v.T)
+
+    # Final adjustment of occupation
+    P0 = (v * p0.unsqueeze(0)) @ v.T  # same as v@(torch.diag_embed(p0)@v.T)
     if debug:
         torch.cuda.synchronize()
-        print("    v*p0*v.T {:.1f} s".format( time.perf_counter()-start_time1 ))
+        print("    v*p0*v.T {:.1f} s".format(time.perf_counter() - start_time1))
 
     return P0, mu0

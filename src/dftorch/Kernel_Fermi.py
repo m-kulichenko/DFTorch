@@ -1,9 +1,8 @@
-
 import torch
-from .Tools import fractional_matrix_power_symm
 from .Fermi_PRT import Canon_DM_PRT
 
-def Kernel_Fermi(structure,mu0,T,Nr_atoms,H,C,S,Z,Q,e):
+
+def Kernel_Fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
     """
     Build the charge-response kernel for Krylov/Anderson SCF acceleration.
 
@@ -48,33 +47,37 @@ def Kernel_Fermi(structure,mu0,T,Nr_atoms,H,C,S,Z,Q,e):
     """
     dq_dn = torch.zeros(Nr_atoms, Nr_atoms, device=H.device)
     dq_J = torch.zeros(Nr_atoms, device=H.device)
-    H0 = Z.T @ H @ Z
-    atom_ids = torch.repeat_interleave(torch.arange(len(structure.n_orbitals_per_atom), device=H.device), structure.n_orbitals_per_atom) # Generate atom index for each orbital
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(structure.n_orbitals_per_atom), device=H.device),
+        structure.n_orbitals_per_atom,
+    )  # Generate atom index for each orbital
 
-    for J in range(0,Nr_atoms):
-        print('Building kernel row ', J+1, ' of ', Nr_atoms)
+    for J in range(0, Nr_atoms):
+        print("Building kernel row ", J + 1, " of ", Nr_atoms)
 
         dq_J[J] = 1
 
         d_CoulPot = C @ dq_J
-        d_Hcoul_diag = structure.Hubbard_U[atom_ids] * dq_J[atom_ids] + d_CoulPot[atom_ids]        
-        d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))  
+        d_Hcoul_diag = (
+            structure.Hubbard_U[atom_ids] * dq_J[atom_ids] + d_CoulPot[atom_ids]
+        )
+        d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
 
-        
-        H1 = Z.T @ d_Hcoul @ Z;
+        H1 = Z.T @ d_Hcoul @ Z
+        # [D0,D_dq_J] = Fermi_PRT(H0,H1,T,Q,e,mu0);
+        D0, D_dq_J = Canon_DM_PRT(H1, T, Q, e, mu0, 10)
 
-        #[D0,D_dq_J] = Fermi_PRT(H0,H1,T,Q,e,mu0);
-        D0,D_dq_J = Canon_DM_PRT(H1,T,Q,e,mu0,10)
-
-        D_dq_J = 2*Z @ D_dq_J @ Z.T
+        D_dq_J = 2 * Z @ D_dq_J @ Z.T
         D_diag = torch.diag(D_dq_J @ S)
         dqI_dqJ = torch.zeros(Nr_atoms, device=H.device)
-                    
-        dqI_dqJ.scatter_add_(0, atom_ids, D_diag) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
 
-        dq_dn[J,:] = dqI_dqJ
+        dqI_dqJ.scatter_add_(
+            0, atom_ids, D_diag
+        )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
+        dq_dn[J, :] = dqI_dqJ
         dq_J[J] = 0
 
     II = torch.eye(Nr_atoms, device=H.device)
-    KK = torch.linalg.matrix_power(dq_dn.T-II, -1)
+    KK = torch.linalg.matrix_power(dq_dn.T - II, -1)
     return KK, D0

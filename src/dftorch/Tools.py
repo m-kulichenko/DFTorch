@@ -1,10 +1,10 @@
 import torch
 from .Elements import label, symbol_to_number
-from typing import Any, Tuple, Optional, List
+from typing import Tuple, Optional, List
 import re
 
 
-#from sedacs.neighbor_list import NeighborState, calculate_displacement
+# from sedacs.neighbor_list import NeighborState, calculate_displacement
 from .ewald_pme.neighbor_list import NeighborState, calculate_displacement
 
 
@@ -44,20 +44,21 @@ def fractional_matrix_power_symm(A: torch.Tensor, power: float = -0.5) -> torch.
     - For poorly conditioned matrices, consider preconditioning before calling.
     """
     # eigh handles symmetric real matrices; returns real eigenpairs
-    w, Q = torch.linalg.eigh(A)                   # w (..., n), Q (..., n, n)
+    w, Q = torch.linalg.eigh(A)  # w (..., n), Q (..., n, n)
 
     # clamp tiny/negative eigenvalues to keep things real/stable for negative powers
     eps = torch.finfo(A.dtype).eps
     w = torch.clamp(w, min=eps)
 
     # raise eigenvalues to the power; avoid torch.diag / torch.diag_embed to keep fusion
-    d = w.pow(power)                              # (..., n)
+    d = w.pow(power)  # (..., n)
 
     # Q @ diag(d) == column-scale Q by d
-    Q_scaled = Q * d.unsqueeze(-2)               # (..., n, n), scales columns by d_j
+    Q_scaled = Q * d.unsqueeze(-2)  # (..., n, n), scales columns by d_j
 
     # A^p = Q @ diag(d) @ Q^T
     return Q_scaled @ Q.transpose(-2, -1)
+
 
 def ordered_pairs_from_TYPE(
     TYPE: torch.Tensor,
@@ -107,14 +108,17 @@ def ordered_pairs_from_TYPE(
     pairs_list = [(int(a.item()), int(b.item())) for a, b in pairs_tensor]
 
     label_list = None
-        # Helper to get label string and strip whitespace/zeros
+
+    # Helper to get label string and strip whitespace/zeros
     def _lab(i):
         lab = str(label[int(i)]).strip()
-        return lab if lab != '0' else str(int(i))
+        return lab if lab != "0" else str(int(i))
+
     label_list = [f"{_lab(a)}-{_lab(b)}" for a, b in pairs_list]
 
     return pairs_tensor, pairs_list, label_list
-    
+
+
 def list_global_tensors(ns):
     """
     Print a summary of all torch.Tensor objects found in the given namespace.
@@ -153,13 +157,14 @@ def list_global_tensors(ns):
     total = 0
     for bytes_, name, t in rows:
         total += bytes_
-        print(f"{name:>24}  size={bytes_/1e6:9.2f} MB  shape={tuple(t.shape)}  dtype={t.dtype}  device={t.device}  grad={t.requires_grad}")
-    print(f"Total tensors: {len(rows)}  total size={total/1e6:.2f} MB")
+        print(
+            f"{name:>24}  size={bytes_ / 1e6:9.2f} MB  shape={tuple(t.shape)}  dtype={t.dtype}  device={t.device}  grad={t.requires_grad}"
+        )
+    print(f"Total tensors: {len(rows)}  total size={total / 1e6:.2f} MB")
+
 
 def calculate_dist_dips(
-    pos_T: torch.Tensor,
-    long_nbr_state: "NeighborState",
-    cutoff: float
+    pos_T: torch.Tensor, long_nbr_state: "NeighborState", cutoff: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute neighbor displacements, distances, and filtered neighbor indices.
@@ -190,14 +195,20 @@ def calculate_dist_dips(
     - Casting to float64 for displacement calculation improves numerical stability.
     """
     nbr_inds = long_nbr_state.nbr_inds
-    disps = calculate_displacement(pos_T.to(torch.float64), nbr_inds,
-                                long_nbr_state.lattice_lengths.to(torch.float64))
+    disps = calculate_displacement(
+        pos_T.to(torch.float64),
+        nbr_inds,
+        long_nbr_state.lattice_lengths.to(torch.float64),
+    )
     dists = torch.linalg.norm(disps, dim=0)
     nbr_inds = torch.where((dists > cutoff) | (dists == 0.0), -1, nbr_inds)
     dists = torch.where(dists == 0, 1, dists)
     return disps.to(pos_T.dtype), dists.to(pos_T.dtype), nbr_inds
 
-def load_spinw_to_tensor(path: str, device: torch.device, max_Z: int = 120) -> torch.Tensor:
+
+def load_spinw_to_tensor(
+    path: str, device: torch.device, max_Z: int = 120
+) -> torch.Tensor:
     # Initialize tensor: [0] dummy row
     w_dict = torch.zeros(max_Z, 6, device=device, dtype=torch.float64)
 
@@ -205,7 +216,7 @@ def load_spinw_to_tensor(path: str, device: torch.device, max_Z: int = 120) -> t
     matrix_rows = []
 
     # Regex: element header like "H:" or "C:" etc.
-    header_re = re.compile(r'^\s*([A-Za-z]{1,2})\s*:\s*$')
+    header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
 
     def flush_current():
         nonlocal element, matrix_rows
@@ -235,28 +246,28 @@ def load_spinw_to_tensor(path: str, device: torch.device, max_Z: int = 120) -> t
 
         if n == 1:
             # [s] -> ss
-            vals[0] = mat[0, 0]                     # ss
+            vals[0] = mat[0, 0]  # ss
         elif n == 2:
             # [[ss, sp],
             #  [sp, pp]]
-            vals[0] = mat[0, 0]                     # ss
-            vals[1] = mat[0, 1]                     # sp
-            vals[3] = mat[1, 1]                     # pp
+            vals[0] = mat[0, 0]  # ss
+            vals[1] = mat[0, 1]  # sp
+            vals[3] = mat[1, 1]  # pp
             # sd, pd, dd remain 0
         elif n == 3:
             # [[ss, sp, sd],
             #  [sp, pp, pd],
             #  [sd, pd, dd]]
-            vals[0] = mat[0, 0]                     # ss
-            vals[1] = mat[0, 1]                     # sp
-            vals[2] = mat[0, 2]                     # sd
-            vals[3] = mat[1, 1]                     # pp
-            vals[4] = mat[1, 2]                     # pd
-            vals[5] = mat[2, 2]                     # dd
+            vals[0] = mat[0, 0]  # ss
+            vals[1] = mat[0, 1]  # sp
+            vals[2] = mat[0, 2]  # sd
+            vals[3] = mat[1, 1]  # pp
+            vals[4] = mat[1, 2]  # pd
+            vals[5] = mat[2, 2]  # dd
         else:
             # Larger blocks are not expected; take upper-tri entries up to 6 in s,p,d order
             # ss, sp, sd, pp, pd, dd from positions (0,0),(0,1),(0,2),(1,1),(1,2),(2,2) if available
-            idxs = [(0,0),(0,1),(0,2),(1,1),(1,2),(2,2)]
+            idxs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
             for k, (i, j) in enumerate(idxs):
                 if i < n and j < n:
                     vals[k] = mat[i, j]
@@ -267,9 +278,9 @@ def load_spinw_to_tensor(path: str, device: torch.device, max_Z: int = 120) -> t
         element = None
         matrix_rows = []
 
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         for line in f:
-            line = line.rstrip('\n')
+            line = line.rstrip("\n")
             # Empty line -> possible separator
             if not line.strip():
                 if matrix_rows:
@@ -294,9 +305,12 @@ def load_spinw_to_tensor(path: str, device: torch.device, max_Z: int = 120) -> t
     # Flush last element
     flush_current()
 
-    return w_dict*27.21138625
+    return w_dict * 27.21138625
 
-def load_spinw_to_matrix(path: str, device: torch.device, max_Z: int = 120) -> torch.Tensor:
+
+def load_spinw_to_matrix(
+    path: str, device: torch.device, max_Z: int = 120
+) -> torch.Tensor:
     """
     Parse spinw.txt and return per-element 3x3 symmetric matrices.
     The matrix layout is:
@@ -321,7 +335,7 @@ def load_spinw_to_matrix(path: str, device: torch.device, max_Z: int = 120) -> t
     element = None
     matrix_rows = []
 
-    header_re = re.compile(r'^\s*([A-Za-z]{1,2})\s*:\s*$')
+    header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
 
     def flush_current():
         nonlocal element, matrix_rows
@@ -365,9 +379,9 @@ def load_spinw_to_matrix(path: str, device: torch.device, max_Z: int = 120) -> t
         element = None
         matrix_rows = []
 
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         for line in f:
-            line = line.rstrip('\n')
+            line = line.rstrip("\n")
             if not line.strip():
                 if matrix_rows:
                     flush_current()
@@ -387,4 +401,4 @@ def load_spinw_to_matrix(path: str, device: torch.device, max_Z: int = 120) -> t
 
     flush_current()
 
-    return W*27.21138625
+    return W * 27.21138625
