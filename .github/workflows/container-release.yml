@@ -4,13 +4,28 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: docker build -t dftorch:test .
+
+      - name: Run tests in container
+        run: docker run --rm dftorch:test
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -27,8 +42,15 @@ jobs:
 
       - name: Extract version from tag
         id: ver
+        shell: bash
         run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          # Tag run: refs/tags/v0.1.4  -> version=0.1.4
+          # Manual run: refs/heads/main -> version=<short sha>
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Compute lowercase image name
         id: img
