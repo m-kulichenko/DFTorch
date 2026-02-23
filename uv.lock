@@ -77,7 +77,6 @@ dependencies = [
 dev = [
     { name = "mypy" },
     { name = "pre-commit" },
-    { name = "pytest" },
     { name = "ruff" },
 ]
 
@@ -88,7 +87,6 @@ requires-dist = [
     { name = "pandas" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest" },
-    { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy" },
     { name = "setuptools" },

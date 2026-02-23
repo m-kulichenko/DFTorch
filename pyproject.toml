@@ -17,7 +17,7 @@ dependencies = [
   "pandas"]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "mypy", "pre-commit"]
+dev = ["ruff", "mypy", "pre-commit"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
