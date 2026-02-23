@@ -24,6 +24,16 @@ jobs:
       - name: Run tests in container
         run: docker run --rm dftorch:test
 
+      - name: Save image to artifact
+        run: docker save dftorch:test -o dftorch-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dftorch-image
+          path: dftorch-image.tar
+
+
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
@@ -39,6 +49,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dftorch-image
+
+      - name: Load image artifact
+        run: docker load -i dftorch-image.tar
 
       - name: Extract version from tag
         id: ver
@@ -57,11 +75,22 @@ jobs:
         run: |
           echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Tag and push (no rebuild)
         run: |
           IMAGE="${{ steps.img.outputs.image }}"
           VERSION="${{ steps.ver.outputs.version }}"
 
-          docker build -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" .
+          docker tag dftorch:test "${IMAGE}:${VERSION}"
+          docker tag dftorch:test "${IMAGE}:latest"
           docker push "${IMAGE}:${VERSION}"
           docker push "${IMAGE}:latest"
+      
+      
+      # - name: Build and push
+      #   run: |
+      #     IMAGE="${{ steps.img.outputs.image }}"
+      #     VERSION="${{ steps.ver.outputs.version }}"
+
+      #     docker build -t "${IMAGE}:${VERSION}" -t "${IMAGE}:latest" .
+      #     docker push "${IMAGE}:${VERSION}"
+      #     docker push "${IMAGE}:latest"
