@@ -32,6 +32,7 @@ jobs:
         with:
           name: dftorch-image
           path: dftorch-image.tar
+          retention-days: 1
 
 
   build-and-push:
@@ -40,9 +41,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
+      # checkout removed. not needed because we push the already-built image
       - name: Log in to GitHub Container Registry (GHCR)
         uses: docker/login-action@v3
         with:
