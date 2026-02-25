@@ -15,7 +15,11 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t dftorch:test .
+          docker build \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --build-arg VERSION="${GITHUB_SHA::7}" \
+            -t dftorch:test .
 
       - name: Run tests in container
         run: |
