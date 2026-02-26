@@ -1,16 +1,11 @@
 import torch
 
-# from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
-from .ewald_pme import (
-    calculate_PME_ewald,
-)
 
-
-from ._fermi_prt import Canon_DM_PRT, _fermi_prt, Fermi_PRT_batch  # noqa: F401
+from ._fermi_prt import Canon_DM_PRT, fermi_prt, fermi_prt_batch  # noqa: F401
 from ._dm_fermi_x import (
-    DM_Fermi_x,
+    dm_fermi_x,
     dm_fermi_x_os,  # noqa: F401
-    DM_Fermi_x_batch,
+    dm_fermi_x_batch,
     dm_fermi_x_os_shared,
 )
 from ._spin import get_h_spin
@@ -56,7 +51,7 @@ def calc_q(
         AO overlap matrix.
     Z : (n_orb, n_orb) torch.Tensor
         Symmetric orthogonalizer S^(-1/2), approximately satisfying Z.T @ S @ Z ≈ I.
-        Used to enter/leave the orthogonal representation for DM_Fermi_x.
+        Used to enter/leave the orthogonal representation for dm_fermi_x.
     Te : float
         Electronic temperature.
     Nocc : int
@@ -78,11 +73,11 @@ def calc_q(
     Dorth : (n_orb, n_orb) torch.Tensor
         Density matrix in orthogonal basis.
     Q : (n_orb, n_orb) torch.Tensor
-        Eigenvectors of the orthogonal Hamiltonian (from DM_Fermi_x).
+        Eigenvectors of the orthogonal Hamiltonian (from dm_fermi_x).
     e : (n_orb,) torch.Tensor
-        Eigenvalues of the orthogonal Hamiltonian (from DM_Fermi_x).
+        Eigenvalues of the orthogonal Hamiltonian (from dm_fermi_x).
     f : (n_orb,) torch.Tensor
-        Fermi–Dirac occupations (from DM_Fermi_x).
+        Fermi–Dirac occupations (from dm_fermi_x).
     mu0 : () torch.Tensor
         Chemical potential.
     """
@@ -91,7 +86,7 @@ def calc_q(
     H = H0 + Hcoul
 
     # if H0.dtype == torch.float32:
-    # 	Dorth, Q, e, f, mu0 = DM_Fermi_x((Z.T @ H @ Z).to(torch.float64), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
+    # 	Dorth, Q, e, f, mu0 = dm_fermi_x((Z.T @ H @ Z).to(torch.float64), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
     # 	D = Z.to(torch.float64) @ Dorth @ Z.T.to(torch.float64)
     # 	DS = 2 * (D * S.T).sum(dim=1)  # same as DS = 2 * torch.diag(D @ S)
     # 	q = -1.0 * Znuc.to(torch.float64)
@@ -104,7 +99,7 @@ def calc_q(
     # 	q = q.to(torch.get_default_dtype())
 
     # else:
-    Dorth, Q, e, f, mu0 = DM_Fermi_x(
+    Dorth, Q, e, f, mu0 = dm_fermi_x(
         (Z.T @ H @ Z), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
     )
     D = Z @ Dorth @ Z.T
@@ -206,7 +201,7 @@ def calc_q_batch(
     Hcoul = 0.5 * (Hcoul_diag.unsqueeze(-1) * S + S * Hcoul_diag.unsqueeze(-2))
     H = H0 + Hcoul
     H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H, Z))
-    Dorth, Q, e, f, mu0 = DM_Fermi_x_batch(
+    Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
         H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
     )
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -250,9 +245,9 @@ def calc_dq(
     Te : float
         Electronic temperature.
     Q : (n_orb, n_orb) torch.Tensor
-        Orthogonal eigenvectors used by _fermi_prt.
+        Orthogonal eigenvectors used by fermi_prt.
     e : (n_orb,) torch.Tensor
-        Orthogonal eigenvalues used by _fermi_prt.
+        Orthogonal eigenvalues used by fermi_prt.
     mu0 : () torch.Tensor
         Chemical potential corresponding to (Q, e).
     Nats : int
@@ -271,7 +266,7 @@ def calc_dq(
     H1_orth = Z.T @ d_Hcoul @ Z
     # First-order density response (canonical Fermi PRT)
     # _, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
-    _, D1 = _fermi_prt(H1_orth, Te, Q, e, mu0)
+    _, D1 = fermi_prt(H1_orth, Te, Q, e, mu0)
     D1 = Z @ D1 @ Z.T
     D1S = 2 * torch.diag(D1 @ S)
     # dq (atomic) from AO response
@@ -307,7 +302,7 @@ def calc_dq_batch(
 
     H1_orth = torch.matmul(Z.transpose(-1, -2), torch.matmul(d_Hcoul, Z))
     # First-order density response (canonical Fermi PRT)
-    _, D1 = Fermi_PRT_batch(H1_orth, Te, Q, e, mu0)
+    _, D1 = fermi_prt_batch(H1_orth, Te, Q, e, mu0)
     D1 = torch.matmul(Z, torch.matmul(D1, Z.transpose(-1, -2)))
     tmp = torch.matmul(D1, S)
     D1S = 2 * tmp.diagonal(dim1=-2, dim2=-1)
@@ -410,6 +405,8 @@ def kernel_update_lr(
 
         # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import calculate_PME_ewald
+
             # PME Coulomb case
             _, _, d_CoulPot = calculate_PME_ewald(
                 torch.stack((RX, RY, RZ)),
@@ -594,6 +591,8 @@ def kernel_update_lr_os(
 
         # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import calculate_PME_ewald
+
             # PME Coulomb case
             _, _, d_CoulPot = calculate_PME_ewald(
                 torch.stack((RX, RY, RZ)),
@@ -625,7 +624,7 @@ def kernel_update_lr_os(
         H1_orth = Z.T @ d_Hcoul @ Z
         # First-order density response (canonical Fermi PRT)
         # _, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
-        _, D1 = Fermi_PRT_batch(H1_orth, Te, Q, e, mu0)
+        _, D1 = fermi_prt_batch(H1_orth, Te, Q, e, mu0)
         D1 = Z @ D1 @ Z.T
         D1S = 1 * torch.diagonal(torch.matmul(D1, S), dim1=-2, dim2=-1)
         # dq (atomic) from AO response

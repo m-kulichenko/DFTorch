@@ -1,33 +1,90 @@
-import torch
+from __future__ import annotations
+
 import math
+from typing import Optional  # <-- add Optional
 
 
-def CoulombMatrix_vectorized_batch(
-    Hubbard_U,
-    TYPE,
-    RX,
-    RY,
-    RZ,
-    LBox,
-    lattice_vecs,
-    Nr_atoms,
-    Coulomb_acc,
-    nnRx,
-    nnRy,
-    nnRz,
-    nnType,
-    neighbor_I,
-    neighbor_J,
-    CALPHA,
-    verbose=False,
-):
+import torch
+
+
+def coulomb_matrix_vectorized_batch(
+    Hubbard_U: torch.Tensor,
+    TYPE: torch.Tensor,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    LBox: Optional[torch.Tensor],  # <-- was: torch.Tensor | None
+    lattice_vecs: torch.Tensor,
+    Nr_atoms: int,
+    Coulomb_acc: float,
+    nnRx: torch.Tensor,
+    nnRy: torch.Tensor,
+    nnRz: torch.Tensor,
+    nnType: torch.Tensor,
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    CALPHA: float,
+    verbose: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the batched Coulomb matrix and its Cartesian derivatives.
+
+    This function builds the Coulomb interaction matrix `CC` for each batch item
+    using an Ewald-like split into:
+
+    - Real-space sum over a neighbor list (always applied)
+    - Reciprocal-space (k-space) contribution (only if `LBox` is provided)
+
+    Parameters
+    ----------
+    Hubbard_U:
+        Tensor of shape `(B, N)` with per-atom Hubbard U parameters.
+    TYPE:
+        Long tensor of shape `(B, N)` with per-atom type indices.
+    RX, RY, RZ:
+        Coordinate tensors of shape `(B, N)` for x/y/z in Angstrom.
+    LBox:
+        Tensor of shape `(B, 3)` with box lengths. If `None`, k-space is skipped.
+    lattice_vecs:
+        Tensor of shape `(B, 3, 3)` describing lattice vectors. Used for volume and
+        reciprocal vectors in k-space.
+    Nr_atoms:
+        Number of atoms `N` (used for shaping/allocations).
+    Coulomb_acc:
+        Ewald accuracy parameter (called `COULACC` elsewhere).
+    nnRx, nnRy, nnRz:
+        Neighbor coordinates for each atom. Shape must broadcast with `RX`.
+        Typical shape: `(B, N, N)` or `(B, N, Nn)` depending on neighbor list layout.
+    nnType:
+        Neighbor type tensor; used to mask padded neighbors (`-1` indicates padding).
+    neighbor_I, neighbor_J:
+        Index tensors defining neighbor pairs in the flattened neighbor list.
+        Negative values are treated as padding and excluded.
+    CALPHA:
+        Ewald splitting parameter alpha.
+    verbose:
+        If True, prints additional info in k-space routine.
+
+    Returns
+    -------
+    CC:
+        Coulomb matrices of shape `(B, N, N)`.
+    dCC_dxyz:
+        Negative Cartesian derivatives (forces convention) of shape `(B, 3, N, N)`.
+
+    Notes
+    -----
+    - The returned derivative matches existing behavior: `return CC, -dCC_dxyz`.
+    - Division by distance uses `dR_dxyz = Rab / dR`; if any `dR` is zero, this can
+      produce NaNs. Existing logic assumes those pairs are masked out by `nnType`
+      and neighbor indices.
+    """
     Ra = torch.stack((RX.unsqueeze(-1), RY.unsqueeze(-1), RZ.unsqueeze(-1)), dim=-1)
     Rb = torch.stack((nnRx, nnRy, nnRz), dim=-1)
     Rab = Rb - Ra
     dR = torch.norm(Rab, dim=-1)
     dR_dxyz = Rab / dR.unsqueeze(-1)
 
-    CC_real, dCC_dxyz_real = Ewald_Real_Space_vectorized_batch(
+    CC_real, dCC_dxyz_real = ewald_real_space_vectorized_batch(
         Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
     )
 
@@ -35,7 +92,7 @@ def CoulombMatrix_vectorized_batch(
         CC_k, dCC_dR_k = 0.0, 0.0
     else:
         dq_J = torch.zeros(Nr_atoms, dtype=dR.dtype, device=dR.device)
-        CC_k, dCC_dR_k = Ewald_k_Space_vectorized(
+        CC_k, dCC_dR_k = ewald_k_space_vectorized(
             RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
         )
 
@@ -45,9 +102,42 @@ def CoulombMatrix_vectorized_batch(
     return CC, -dCC_dxyz
 
 
-def Ewald_Real_Space_vectorized_batch(
-    Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
-):
+def ewald_real_space_vectorized_batch(
+    Hubbard_U: torch.Tensor,
+    TYPE: torch.Tensor,
+    dR: torch.Tensor,
+    dR_dxyz: torch.Tensor,
+    nnType: torch.Tensor,
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    CALPHA: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the real-space Ewald contribution for a neighbor list (batched).
+
+    Parameters
+    ----------
+    Hubbard_U:
+        `(B, N)` float tensor
+    TYPE:
+        `(B, N)` long tensor
+    dR:
+        Distances for neighbor list entries (shape depends on neighbor list layout).
+    dR_dxyz:
+        Unit vectors for each neighbor entry; must have shape `dR.shape + (3,)`.
+    nnType:
+        Tensor used as padding mask (`-1` indicates invalid/unfilled neighbor entries).
+    neighbor_I, neighbor_J:
+        Flattened neighbor index lists (same shape), containing `-1` as padding.
+    CALPHA:
+        Real-space Ewald splitting parameter alpha.
+
+    Returns
+    -------
+    CC_real:
+        `(B, N, N)` real-space Coulomb matrices.
+    dCC_dxyz_real:
+        `(B, 3, N, N)` derivatives with respect to coordinates.
+    """
 
     batch_size = Hubbard_U.shape[0]
     Nats = TYPE.shape[-1]
@@ -143,19 +233,49 @@ def Ewald_Real_Space_vectorized_batch(
 
 
 @torch.compile(dynamic=False)
-def Ewald_k_Space_vectorized(
-    RX,
-    RY,
-    RZ,
-    LBox,
-    lattice_vecs,
-    DELTAQ,
-    Nr_atoms,
-    COULACC,
-    CALPHA,
-    verbose,
-    do_vec=False,
-):
+def ewald_k_space_vectorized(
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    LBox: torch.Tensor,
+    lattice_vecs: torch.Tensor,
+    DELTAQ: torch.Tensor,
+    Nr_atoms: int,
+    COULACC: float,
+    CALPHA: float,
+    verbose: bool,
+    do_vec: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute k-space Ewald contribution (batched).
+
+    Parameters
+    ----------
+    RX, RY, RZ:
+        `(B, N)` coordinates.
+    LBox:
+        `(B, 3)` box lengths (orthorhombic).
+    lattice_vecs:
+        `(B, 3, 3)` lattice vectors. Used for volume.
+    DELTAQ:
+        Charge tensor (currently only used for shape; kept for API compatibility).
+    Nr_atoms:
+        Number of atoms `N`.
+    COULACC:
+        Accuracy parameter.
+    CALPHA:
+        Ewald alpha.
+    verbose:
+        If True, prints progress.
+    do_vec:
+        Placeholder flag. Vectorized k-space path is not implemented for batch.
+
+    Returns
+    -------
+    COULOMBV:
+        `(B, N, N)` k-space Coulomb matrix contribution.
+    dC_dR:
+        `(B, 3, N, N)` Cartesian derivatives.
+    """
 
     batch_size = RX.shape[0]
     device = RX.device

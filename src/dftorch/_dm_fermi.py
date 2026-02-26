@@ -1,32 +1,68 @@
-import torch
+from __future__ import annotations
+
 import time
+from typing import Optional
+
+import torch
 
 
-def _dm_fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
-    """
-    Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
+def dm_fermi(
+    H0: torch.Tensor,
+    T: float,
+    nocc: int,
+    mu_0: Optional[float],
+    m: int,
+    eps: float,
+    MaxIt: int,
+    debug: bool = False,
+) -> tuple[torch.Tensor, float]:
+    """Finite-temperature density matrix via Recursive Fermi Operator Expansion (RFOE).
 
-    This function implements the recursive expansion of the Fermi-Dirac distribution to
-    evaluate the electronic density matrix `P0` at finite temperature without explicitly computing
-    matrix exponentials. It iteratively adjusts the chemical potential `mu0` to ensure the trace of the
-    density matrix matches the desired number of occupied electrons.
+    This function approximates the Fermi–Dirac occupation function using a recursive
+    polynomial/rational expansion, avoiding explicit matrix exponentials. The Hamiltonian
+    is diagonalized once, the occupation function is evaluated in the eigenvalue basis,
+    and the density matrix is reconstructed as:
 
-    Args:
-        H0 (torch.Tensor): Hamiltonian matrix in the orthonormal basis (N x N).
-        T (float): Electronic temperature in Kelvin.
-        nocc (int): Number of occupied electrons (expected trace of the density matrix).
-        mu_0 (float or None): Initial guess for chemical potential. If None, estimated from eigenvalues.
-        m (int): Depth of the recursive expansion. Higher values increase accuracy.
-        eps (float): Convergence threshold for occupation error.
-        MaxIt (int): Maximum number of _scf iterations to adjust the chemical potential.
+        H0 = V diag(h) Vᵀ
+        P0 = V diag(p0) Vᵀ
 
-    Returns:
-        P0 (torch.Tensor): Finite-temperature density matrix (N x N).
-        mu0 (float): Converged chemical potential.
+    The chemical potential μ is adjusted by Newton iterations so that:
 
-    Notes:
-        - The recursion approximates the Fermi function at finite temperature, avoiding costly exponentials.
-        - The eigenbasis is used to construct the density matrix after recursion.
+        trace(P0) = ∑_i p0_i ≈ nocc
+
+    Parameters
+    ----------
+    H0:
+        Symmetric/Hermitian Hamiltonian in an orthonormal basis, shape `(N, N)`.
+    T:
+        Electronic temperature in Kelvin.
+    nocc:
+        Target number of occupied electrons (spin-summed), integer in `[1, N-1]`.
+    mu_0:
+        Initial guess for chemical potential. If `None`, initialized as midpoint
+        between HOMO/LUMO eigenvalues: `0.5 * (h[nocc-1] + h[nocc])`.
+    m:
+        Depth of the recursion. Larger values increase sharpness/accuracy but
+        increase cost. Must be `>= 0`.
+    eps:
+        Convergence threshold for occupation error `|trace(P0) - nocc|`.
+    MaxIt:
+        Maximum number of Newton iterations for μ.
+    debug:
+        If True, synchronizes CUDA and prints basic timings.
+
+    Returns
+    -------
+    P0:
+        Density matrix, shape `(N, N)`.
+    mu0:
+        Converged chemical potential as Python float.
+
+    Notes
+    -----
+    - The recursion operates on eigenvalues only (vector operations), then reconstructs `P0`.
+    - The update uses `dPdmu = Σ β p0 (1-p0)`; when near 0, the update is skipped.
+    - Units: `kB` is in eV/K, so `H0` eigenvalues should be in eV for consistent β.
     """
     if debug:
         torch.cuda.synchronize()
@@ -68,7 +104,7 @@ def _dm_fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         Cnt += 1
     if Cnt == MaxIt:
         print(
-            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, OccErr
             )
         )

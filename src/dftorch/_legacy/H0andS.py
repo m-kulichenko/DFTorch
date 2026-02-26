@@ -1,6 +1,6 @@
 import torch
 import time
-from ._bond_integral import LoadBondIntegralParameters
+from ._bond_integral import load_bond_integral_parameters
 from ._slater_koster_pair import (
     Slater_Koster_Pair_vectorized,
     Slater_Koster_Pair_SKF_vectorized,
@@ -641,19 +641,19 @@ def H0_and_S_vectorized_OLD_FOR_POLY(
     import os
 
     param_dir = os.path.join(os.path.dirname(__file__), "params")
-    fss_sigma = LoadBondIntegralParameters(
+    fss_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "fss_sigma.csv")
     )
-    fsp_sigma = LoadBondIntegralParameters(
+    fsp_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "fsp_sigma.csv")
     )
-    fps_sigma = LoadBondIntegralParameters(
+    fps_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "fps_sigma.csv")
     )
-    fpp_sigma = LoadBondIntegralParameters(
+    fpp_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "fpp_sigma.csv")
     )
-    fpp_pi = LoadBondIntegralParameters(
+    fpp_pi = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "fpp_pi.csv")
     )
 
@@ -846,19 +846,19 @@ def H0_and_S_vectorized_OLD_FOR_POLY(
     #### S PART ###
     print("  Load S integral params")
     param_dir = os.path.join(os.path.dirname(__file__), "params")
-    fss_sigma = LoadBondIntegralParameters(
+    fss_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "S_fss_sigma.csv")
     )
-    fsp_sigma = LoadBondIntegralParameters(
+    fsp_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "S_fsp_sigma.csv")
     )
-    fps_sigma = LoadBondIntegralParameters(
+    fps_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "S_fps_sigma.csv")
     )
-    fpp_sigma = LoadBondIntegralParameters(
+    fpp_sigma = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "S_fpp_sigma.csv")
     )
-    fpp_pi = LoadBondIntegralParameters(
+    fpp_pi = load_bond_integral_parameters(
         neighbor_I, neighbor_J, TYPE, os.path.join(param_dir, "S_fpp_pi.csv")
     )
 

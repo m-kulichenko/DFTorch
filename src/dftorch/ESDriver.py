@@ -7,11 +7,11 @@ from ._nearestneighborlist import (
 )
 from ._tools import fractional_matrix_power_symm
 from ._scf import scf_x_os, SCFx, SCFx_batch
-from ._energy import Energy
+from ._energy import energy
 from ._forces import Forces, forces_spin, Forces_PME
 from ._forces_batch import forces_batch
-from ._coulomb_matrix import CoulombMatrix_vectorized
-from dftorch._coulomb_matrix_batch import CoulombMatrix_vectorized_batch
+from ._coulomb_matrix import coulomb_matrix_vectorized
+from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
 from dftorch._spin import get_spin_energy, get_h_spin
 
 
@@ -173,7 +173,7 @@ class ESDriver(torch.nn.Module):
                 verbose=verbose,
             )
 
-            structure.C, structure.dCC = CoulombMatrix_vectorized(
+            structure.C, structure.dCC = coulomb_matrix_vectorized(
                 structure.Hubbard_U,
                 structure.TYPE,
                 structure.RX,
@@ -317,7 +317,7 @@ class ESDriver(torch.nn.Module):
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = Energy(
+            ) = energy(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,
@@ -578,7 +578,7 @@ class ESDriverBatch(torch.nn.Module):
                 verbose=verbose,
             )
 
-            structure.C, structure.dCC = CoulombMatrix_vectorized_batch(
+            structure.C, structure.dCC = coulomb_matrix_vectorized_batch(
                 structure.Hubbard_U,
                 structure.TYPE,
                 structure.RX,
@@ -649,7 +649,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = Energy(
+            ) = energy(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,

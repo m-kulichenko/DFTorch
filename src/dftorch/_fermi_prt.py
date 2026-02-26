@@ -1,74 +1,20 @@
+from __future__ import annotations
+
+
 import torch
 
 
 @torch.compile(fullgraph=False, dynamic=False)
-def _fermi_prt(
+def fermi_prt(
     H1: torch.Tensor,
     Te: float,
     Q: torch.Tensor,
     ev: torch.Tensor,
     mu0: float,
-):
-    """
-    First‑order Fermi–Dirac density matrix perturbation in the eigenbasis.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """First‑order finite‑T density matrix response using Fermi–Dirac kernel (single system).
 
-    Given a first‑order perturbation of the Fock/Hamiltonian matrix ``H1``
-    (in the AO basis), this routine computes the unperturbed density matrix
-    ``D0`` and its first-order response ``D1`` at temperature ``Te`` and
-    chemical potential ``mu0`` using finite‑temperature linear response.
-
-    Parameters
-    ----------
-    H1 : torch.Tensor
-        First‑order perturbation of the Hamiltonian in the AO basis,
-        shape (n_orb, n_orb).
-    Te : float
-        Electronic temperature in Kelvin.
-    Q : torch.Tensor
-        Eigenvector matrix of the unperturbed Hamiltonian, columns are
-        eigenvectors, shape (n_orb, n_orb). It is used to transform between
-        AO and eigenbases.
-    ev : torch.Tensor
-        Eigenvalues (orbital energies) corresponding to columns of ``Q``,
-        shape (n_orb,).
-    mu0 : float
-        Zeroth‑order chemical potential.
-
-    Returns
-    -------
-    D0 : torch.Tensor
-        Zeroth‑order (unperturbed) density matrix in the AO basis,
-        shape (n_orb, n_orb).
-    D1 : torch.Tensor
-        First‑order correction to the density matrix in the AO basis,
-        shape (n_orb, n_orb).
-
-    Notes
-    -----
-    The routine builds the susceptibility kernel
-
-        χ_ij = (f_i - f_j) / (e_i - e_j),
-
-    in the eigenbasis, with the diagonal limit
-
-        χ_ii = -β f_i (1 - f_i),
-
-    where ``f_i`` are Fermi–Dirac occupations at temperature ``Te`` and
-    chemical potential ``mu0``. The first‑order response in the eigenbasis
-    is then
-
-        X = χ ⊙ (Qᵀ H1 Q),
-
-    which is transformed back to the AO basis as ``D1 = Q X Qᵀ``.
-
-    Particle-number conservation is enforced via a first‑order correction
-    to the chemical potential, ``mu1``, obtained from
-
-        dN/dμ = -β ∑_i f_i (1 - f_i),
-
-    and correcting ``X`` along the diagonal. A small numerical safeguard is
-    applied so that if ``|dN/dμ|`` is below a threshold, the correction is
-    skipped to avoid division by a near‑zero value.
+    Returns (D0, D1) in the AO basis.
     """
     kB = 8.61739e-5  # eV/K
     beta = 1 / (kB * Te)
@@ -107,15 +53,21 @@ def _fermi_prt(
 
 
 @torch.compile(fullgraph=False, dynamic=False)
-def Fermi_PRT_batch(
+def fermi_prt_batch(
     H1: torch.Tensor,
     Te: float,
     Q: torch.Tensor,
     ev: torch.Tensor,
-    mu0: float,
-):
-    """
-    First‑order Fermi–Dirac density matrix perturbation in the eigenbasis.
+    mu0: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Batched first‑order finite‑T density matrix response.
+
+    Expected shapes
+    ---------------
+    H1: (B, N, N)
+    Q : (B, N, N)
+    ev: (B, N)
+    mu0: (B,)
     """
     kB = 8.61739e-5  # eV/K
     beta = 1 / (kB * Te)

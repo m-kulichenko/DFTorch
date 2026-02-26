@@ -1,7 +1,11 @@
+from __future__ import annotations
+
+from typing import Final
+
 import torch
 import numpy as np
 
-symbol_to_number = {
+symbol_to_number: Final[dict[str, int]] = {
     "H": 1,
     "He": 2,
     "Li": 3,
@@ -123,7 +127,7 @@ symbol_to_number = {
 }
 
 
-label = np.array(
+label: Final[np.ndarray] = np.array(
     [
         "0",
         "H",
@@ -166,7 +170,7 @@ label = np.array(
 )
 
 
-atomic_num = torch.as_tensor(
+atomic_num: Final[torch.Tensor] = torch.as_tensor(
     [
         0,
         1,
@@ -209,7 +213,7 @@ atomic_num = torch.as_tensor(
     dtype=torch.int64,
 )
 
-mass = torch.as_tensor(
+mass: Final[torch.Tensor] = torch.as_tensor(
     [
         0.00000,
         1.00790,

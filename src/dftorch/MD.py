@@ -1,5 +1,5 @@
 from .ESDriver import ESDriverBatch
-from ._energy import EnergyShadow
+from ._energy import energy_shadow
 from ._forces_batch import forces_shadow_batch
 from ._forces import forces_shadow, forces_shadow_pme, forces_spin
 
@@ -16,15 +16,6 @@ from ._spin import get_h_spin, get_spin_energy_shadow
 
 import torch
 
-# from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
-from .ewald_pme import (
-    calculate_PME_ewald,
-    init_PME_data,
-    calculate_alpha_and_num_grids,
-)
-
-# from sedacs.neighbor_list import NeighborState, calculate_displacement
-from .ewald_pme.neighbor_list import NeighborState
 from typing import Any, Tuple, Optional
 import time
 from ._io import write_XYZ_trajectory
@@ -106,6 +97,11 @@ class MDXL:
         )
         self.Hubbard_U_gathered = structure.Hubbard_U[self.atom_ids]
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import (
+                init_PME_data,
+                calculate_alpha_and_num_grids,
+            )
+
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
                 structure.lattice_vecs.cpu().numpy(),
                 dftorch_params["cutoff"],
@@ -236,6 +232,11 @@ class MDXL:
         tic2_1 = time.perf_counter()
 
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import (
+                calculate_PME_ewald,
+            )
+            from .ewald_pme.neighbor_list import NeighborState
+
             nbr_state = NeighborState(
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
                 structure.lattice_vecs,
@@ -362,7 +363,7 @@ class MDXL:
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = EnergyShadow(
+            ) = energy_shadow(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,
@@ -419,7 +420,7 @@ class MDXL:
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = EnergyShadow(
+            ) = energy_shadow(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,
@@ -550,6 +551,11 @@ class MDXLOS(MDXL):
 
         self.Hubbard_U_gathered = structure.Hubbard_U[self.atom_ids]
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import (
+                init_PME_data,
+                calculate_alpha_and_num_grids,
+            )
+
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
                 structure.lattice_vecs.cpu().numpy(),
                 dftorch_params["cutoff"],
@@ -691,6 +697,11 @@ class MDXLOS(MDXL):
         tic2_1 = time.perf_counter()
 
         if dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import (
+                calculate_PME_ewald,
+            )
+            from .ewald_pme.neighbor_list import NeighborState
+
             nbr_state = NeighborState(
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
                 structure.lattice_vecs,
@@ -850,7 +861,7 @@ class MDXLOS(MDXL):
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = EnergyShadow(
+            ) = energy_shadow(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,
@@ -907,7 +918,7 @@ class MDXLOS(MDXL):
                 structure.e_dipole,
                 structure.e_entropy,
                 structure.s_ent,
-            ) = EnergyShadow(
+            ) = energy_shadow(
                 structure.H0,
                 structure.Hubbard_U,
                 structure.e_field,
@@ -1299,7 +1310,7 @@ class MDXLBatch:
             structure.e_dipole,
             structure.e_entropy,
             structure.s_ent,
-        ) = EnergyShadow(
+        ) = energy_shadow(
             structure.H0,
             structure.Hubbard_U,
             structure.e_field,

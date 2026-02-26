@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from typing import Optional
+
 import torch
 import torch._dynamo as dynamo
 
@@ -6,7 +9,7 @@ dynamo.config.capture_scalar_outputs = True
 
 
 @torch.compile(dynamic=False)
-def DM_Fermi_x(
+def dm_fermi_x(
     H0: torch.Tensor,
     T: float,
     nocc: int,
@@ -14,69 +17,57 @@ def DM_Fermi_x(
     eps: float,
     MaxIt: int,
     debug: bool = False,
-):
-    """
-    Compute the finite‑temperature density matrix using a Fermi–Dirac
-    diagonalization and Newton iteration on the chemical potential.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    """Finite-temperature density matrix via Fermi–Dirac occupations + Newton μ.
 
-    Diagonalizes the orthonormal‑basis Hamiltonian ``H0`, determines the
-    chemical potential ``mu0`` such that the total occupation matches
-    ``nocc`` at temperature ``T``, and constructs the density matrix
+    Diagonalizes the (orthonormal-basis) Hamiltonian ``H0``:
+
+        H0 = V diag(h) Vᵀ
+
+    Finds the chemical potential μ such that the total occupation matches ``nocc``:
+
+        N(μ) = ∑_i f_i(μ)  with  f_i(μ) = 1 / (exp(β (h_i − μ)) + 1)
+
+    and constructs the density matrix
 
         P0 = V diag(f) Vᵀ
 
-    where ``V`` and ``h`` are eigenvectors/eigenvalues of ``H0`` and
-    ``f_i = 1 / (exp(β (h_i − μ)) + 1)`` are Fermi–Dirac occupations.
-
     Parameters
     ----------
-    H0 : torch.Tensor
-        Hamiltonian matrix in an orthonormal basis, shape (n_orb, n_orb).
-    T : float
-        Electronic temperature in Kelvin.
-    nocc : int
-        Target number of (spin‑summed) occupied electrons; the trace of the
-        density matrix is driven to this value.
-    mu_0 : float or None
-        Initial guess for the chemical potential μ. If ``None``, it is
-        estimated as the midpoint between the nocc‑th and (nocc+1)‑th
-        eigenvalues of ``H0``.
-    eps : float
-        Convergence threshold for the occupation error
-        ``|nocc − ∑_i f_i|``.
-    MaxIt : int
-        Maximum number of Newton iterations on μ.
-    debug : bool, optional
-        If True, performs CUDA synchronizations around the main steps for
-        more reliable timing.
+    H0:
+        Hamiltonian matrix, shape `(n_orb, n_orb)`.
+    T:
+        Electronic temperature (K).
+    nocc:
+        Target total occupation (spin-summed), integer.
+    mu_0:
+        Initial guess for μ. If ``None``, set to midpoint between HOMO/LUMO
+        eigenvalues (indices `nocc-1` and `nocc`).
+    eps:
+        Convergence threshold for occupation error ``|nocc - N(μ)|``.
+    MaxIt:
+        Maximum number of Newton iterations.
+    debug:
+        If True, synchronizes CUDA at key points (kept for compatibility; minimal use).
 
     Returns
     -------
-    P0 : torch.Tensor
-        Finite‑temperature density matrix, shape (n_orb, n_orb).
-    v : torch.Tensor
-        Eigenvector matrix of ``H0`` (columns are eigenvectors), shape
-        (n_orb, n_orb).
-    h : torch.Tensor
-        Eigenvalues of ``H0`` corresponding to columns of ``v``, shape
-        (n_orb,).
-    f : torch.Tensor
-        Fermi–Dirac occupation numbers at the converged μ, shape (n_orb,).
-    mu0 : float
-        Converged chemical potential.
+    P0:
+        Density matrix, shape `(n_orb, n_orb)`.
+    v:
+        Eigenvectors, shape `(n_orb, n_orb)`.
+    h:
+        Eigenvalues, shape `(n_orb,)`.
+    f:
+        Occupations at converged μ, shape `(n_orb,)`.
+    mu0:
+        Chemical potential as Python float.
 
     Notes
     -----
-    The chemical potential is updated via a scalar Newton step
-
-        μ_{k+1} = μ_k + (nocc − N(μ_k)) / (dN/dμ),
-
-    where ``N(μ) = ∑_i f_i(μ)`` and
-
-        dN/dμ = β ∑_i f_i (1 − f_i).
-
-    A small lower bound is imposed on ``dN/dμ`` to avoid division by very
-    small derivatives in pathological cases.
+    - Newton update uses a small lower bound on `dN/dμ` to avoid division by ~0.
+    - This function is compiled with `torch.compile`; Python-side `while` control
+      is enabled via `dynamo.config.capture_scalar_outputs = True`.
     """
 
     if mu_0 is None:
@@ -111,7 +102,7 @@ def DM_Fermi_x(
 
     if cnt == MaxIt:
         print(
-            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -134,9 +125,16 @@ def dm_fermi_x_os(
     MaxIt: int,
     broken_symmetry: bool = False,
     debug: bool = False,
-):
-    """
-    Open-shell version of DM_Fermi_x.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Open-shell variant of :func:`DM_Fermi_x` (batched eigenproblems).
+
+    Important
+    ---------
+    This function expects **batched** inputs:
+    - `H0`: `(B, n_orb, n_orb)`
+    - `nocc`: `(B,)` integer tensor
+
+    Returns `mu0` as a tensor of shape `(B,)`.
     """
 
     if mu_0 is None:
@@ -178,7 +176,7 @@ def dm_fermi_x_os(
 
     if cnt == MaxIt:
         print(
-            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -201,9 +199,11 @@ def dm_fermi_x_os_shared(
     MaxIt: int,
     broken_symmetry: bool = False,
     debug: bool = False,
-):
-    """
-    Open-shell version of DM_Fermi_x.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Open-shell "shared μ" variant.
+
+    This version computes a single chemical potential `mu0` shared across the batch
+    by sorting/flattening all eigenvalues (i.e., distributing total `nocc.sum()`).
     """
 
     if mu_0 is None:
@@ -244,7 +244,7 @@ def dm_fermi_x_os_shared(
 
     if cnt == MaxIt:
         print(
-            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -260,7 +260,7 @@ def dm_fermi_x_os_shared(
 
 
 @torch.compile(dynamic=False)
-def DM_Fermi_x_batch(
+def dm_fermi_x_batch(
     H0: torch.Tensor,
     T: float,
     nocc: int,
@@ -268,20 +268,15 @@ def DM_Fermi_x_batch(
     eps: float,
     MaxIt: int,
     debug: bool = False,
-):
-    """
-    Notes
-    -----
-    The chemical potential is updated via a scalar Newton step
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Batched density matrices with per-batch chemical potentials.
 
-        μ_{k+1} = μ_k + (nocc − N(μ_k)) / (dN/dμ),
+    Parameters are kept identical to the original signature. In practice this
+    routine expects:
+    - `H0`: `(B, n_orb, n_orb)`
+    - `nocc`: `(B,)` integer tensor
 
-    where ``N(μ) = ∑_i f_i(μ)`` and
-
-        dN/dμ = β ∑_i f_i (1 − f_i).
-
-    A small lower bound is imposed on ``dN/dμ`` to avoid division by very
-    small derivatives in pathological cases.
+    Returns `mu0` as `(B,)`.
     """
 
     if mu_0 is None:
@@ -320,7 +315,7 @@ def DM_Fermi_x_batch(
         cnt += 1
     if cnt == MaxIt:
         print(
-            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )

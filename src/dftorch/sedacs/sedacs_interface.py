@@ -504,7 +504,7 @@ def kernel_global(
             )
             H1_orth = ch_structure.Z.T @ d_Hcoul @ ch_structure.Z
 
-            ### _fermi_prt
+            ### fermi_prt
             kB = 8.61739e-5  # eV/K
             beta = 1 / (kB * structure.Te)
 
@@ -540,7 +540,7 @@ def kernel_global(
 
             # D0 = Q @ torch.diag_embed(fe) @ Q.T
             D1 = ch_structure.Q @ X @ ch_structure.Q.T
-            ### end _fermi_prt
+            ### end fermi_prt
 
             D1 = ch_structure.Z @ D1 @ ch_structure.Z.T
             D1S = 2 * torch.diag(D1 @ ch_structure.S)

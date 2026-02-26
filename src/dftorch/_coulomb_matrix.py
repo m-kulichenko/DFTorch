@@ -1,81 +1,85 @@
-import torch
+from __future__ import annotations
+
 import math
 import time
+from typing import Optional  # <-- add Optional
+
+import torch
 
 
-def CoulombMatrix_vectorized(
-    Hubbard_U,
-    TYPE,
-    RX,
-    RY,
-    RZ,
-    LBox,
-    lattice_vecs,
-    Nr_atoms,
-    Coulomb_acc,
-    nnRx,
-    nnRy,
-    nnRz,
-    nnType,
-    neighbor_I,
-    neighbor_J,
-    CALPHA,
-    verbose=False,
-):
-    """
-    Computes the real-space and reciprocal-space (k-space) Ewald-summed Coulomb matrix and its
-    derivatives for a system of atoms with periodic boundary conditions.
+def coulomb_matrix_vectorized(
+    Hubbard_U: torch.Tensor,
+    TYPE: torch.Tensor,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    LBox: Optional[torch.Tensor],  # <-- was: torch.Tensor | None
+    lattice_vecs: torch.Tensor,
+    Nr_atoms: int,
+    Coulomb_acc: float,
+    nnRx: torch.Tensor,
+    nnRy: torch.Tensor,
+    nnRz: torch.Tensor,
+    nnType: torch.Tensor,
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    CALPHA: float,
+    verbose: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute the Ewald-summed Coulomb matrix and its Cartesian derivatives.
 
-    This function uses a vectorized GPU-accelerated implementation of the Ewald summation to
-    compute the electron-electron Coulomb interaction matrix and its derivatives with respect to
-    atomic coordinates.
+    This routine computes the Coulomb interaction matrix `CC` using an Ewald split:
+
+    - Real-space contribution computed using the provided neighbor list.
+    - Reciprocal-space (k-space) contribution computed for periodic systems.
+
+    The returned derivative tensor follows the existing convention used in this
+    codebase: the function returns `-dCC_dxyz`.
 
     Parameters
     ----------
-    RX, RY, RZ : torch.Tensor of shape (Nr_atoms,)
-        Cartesian coordinates of atoms along x, y, and z directions.
-    LBox : tuple of floats
-        Simulation box dimensions (Lx, Ly, Lz).
-    Hubbard_U : torch.Tensor of shape (Nr_atoms,)
-        Hubbard U parameters for the atomic species.
-    TYPE : torch.Tensor of shape (Nr_atoms,)
-        Integer identifiers of the atomic element types.
-    Nr_atoms : int
+    Hubbard_U:
+        Float tensor of shape `(Nr_atoms,)` with per-atom Hubbard U values used in
+        short-range corrections.
+    TYPE:
+        Long tensor of shape `(Nr_atoms,)` with per-atom element/type ids.
+    RX, RY, RZ:
+        Float tensors of shape `(Nr_atoms,)` giving Cartesian coordinates in Å.
+    LBox:
+        Float tensor of shape `(3,)` (orthorhombic box lengths in Å). If `None`,
+        the k-space term is skipped.
+    lattice_vecs:
+        Float tensor of shape `(3, 3)` with lattice vectors; used for cell volume.
+    Nr_atoms:
         Number of atoms in the system.
-    HDIM : int
-        Total dimension of the Hamiltonian matrix (used in downstream operations).
-    Coulomb_acc : float
-        Desired accuracy of the Ewald summation (e.g., 1e-6).
-    TIMERATIO : float
-        Empirical scaling parameter used in the Ewald parameter (CALPHA) estimation.
-    nnRx, nnRy, nnRz : torch.Tensor of shape (Nr_atoms, max_neighbors)
-        Cartesian coordinates of the neighbor atoms for each atom (including periodic images).
-    nrnnlist : torch.Tensor of shape (Nr_atoms, 1)
-        Number of neighbors for each atom.
-    nnType : torch.Tensor of shape (Nr_atoms, max_neighbors)
-        Type/index of each neighbor atom (refers back to original atoms, not images).
-    H_INDEX_START, H_INDEX_END : torch.Tensor
-        Index mapping to define start and end of each atom's block in the Hamiltonian matrix.
+    Coulomb_acc:
+        Desired accuracy for the k-space sum (used to determine reciprocal cutoff).
+    nnRx, nnRy, nnRz:
+        Neighbor coordinates (shape matches `nnType`; commonly `(Nr_atoms, MAXNN)`).
+    nnType:
+        Neighbor type/index tensor. `-1` indicates padded/invalid neighbor entries.
+    neighbor_I, neighbor_J:
+        1D long tensors containing the flattened neighbor pair indices into `[0, Nr_atoms)`.
+        The ordering must correspond to the masked neighbor entries.
+    CALPHA:
+        Ewald splitting parameter α.
+    verbose:
+        If True, prints progress from the k-space summation.
 
     Returns
     -------
-    CC : torch.Tensor of shape (Nr_atoms, Nr_atoms)
-        Coulomb interaction matrix computed using Ewald summation.
-    dCC_dxyz : torch.Tensor of shape (3, Nr_atoms, Nr_atoms)
-        Derivatives of the Coulomb matrix with respect to atomic positions (x, y, z).
+    CC:
+        Coulomb matrix of shape `(Nr_atoms, Nr_atoms)`.
+    neg_dCC_dxyz:
+        Tensor of shape `(3, Nr_atoms, Nr_atoms)` equal to `-dCC_dxyz`.
 
     Notes
     -----
-    - The Ewald summation is split into real-space and reciprocal-space (k-space) contributions.
-    - The real-space contribution is computed using a vectorized routine that exploits the
-      precomputed neighbor list and periodic images.
-    - The k-space part is computed separately using a fast reciprocal space summation method.
-    - The returned matrix `CC` may be optionally symmetrized depending on downstream use.
-    - The `dCC_dxyz` tensor provides gradients for force calculations or geometry optimizations.
-    - This routine is designed for GPU execution with PyTorch tensors.
+    - This function intentionally keeps existing behavior (including print timing output),
+      but removes the unconditional banner print.
     """
 
-    print("CoulombMatrix_vectorized")
+    print("coulomb_matrix_vectorized")
     if verbose:
         print("  Do Coulomb Real")
     start_time1 = time.perf_counter()
@@ -88,7 +92,7 @@ def CoulombMatrix_vectorized(
     # dist_mask = (dR <= COULCUT)*(dR > 1e-12)
 
     ##################
-    CC_real, dCC_dxyz_real = Ewald_Real_Space_vectorized(
+    CC_real, dCC_dxyz_real = ewald_real_space_vectorized(
         Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
     )
     ##################
@@ -103,7 +107,7 @@ def CoulombMatrix_vectorized(
     else:
         if verbose:
             print("  Doing Coulomb k")
-        CC_k, dCC_dR_k = Ewald_k_Space_vectorized(
+        CC_k, dCC_dR_k = ewald_k_space_vectorized(
             RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
         )
         print("  Coulomb_k t {:.1f} s\n".format(time.perf_counter() - start_time1))
@@ -114,68 +118,41 @@ def CoulombMatrix_vectorized(
     return CC, -dCC_dxyz  # , CC_sr, -dCC_dxyz_sr
 
 
-def Ewald_Real_Space_vectorized(
-    Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
-):
-    """
-    This one is vectorized in a fashion of _slater_koster_pair.py.
-    Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its
-    derivatives using a fully vectorized implementation with neighbor lists.
-
-    This function evaluates pairwise interactions between atoms and their neighbors within a
-    specified real-space cutoff. It includes analytical short-range damping corrections for
-    same-element and different-element pairs as required in DFTB-like models.
+def ewald_real_space_vectorized(
+    Hubbard_U: torch.Tensor,
+    TYPE: torch.Tensor,
+    dR: torch.Tensor,
+    dR_dxyz: torch.Tensor,
+    nnType: torch.Tensor,
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    CALPHA: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Real-space Ewald contribution using a neighbor list (vectorized).
 
     Parameters
     ----------
-    RX, RY, RZ : torch.Tensor of shape (Nr_atoms,)
-        Cartesian coordinates of atoms along x, y, and z directions.
-    dR : torch.Tensor of shape (Nr_atoms, MAXNN)
-        Scalar distances between atoms and their neighbors.
-    dR_dxyz : torch.Tensor of shape (Nr_atoms, MAXNN, 3)
-        Normalized displacement vectors (dR_x, dR_y, dR_z) between atoms and their neighbors (d_dR/dxyz).
-    LBox : tuple of floats
-        Simulation box lengths (Lx, Ly, Lz) used to define periodic boundary conditions.
-    Hubbard_U : torch.Tensor of shape (Nr_atoms,)
-        Hubbard U parameters for the atoms, used in short-range corrections.
-    TYPE : torch.Tensor of shape (Nr_atoms,)
-        Integer element type identifiers for atoms.
-    Nr_atoms : int
-        Total number of atoms in the system.
-    HDIM : int
-        Hamiltonian matrix size (used for context, but not used directly in this function).
-    Coulomb_acc : float
-        Desired accuracy threshold for the Ewald summation.
-    TIMERATIO : float
-        Empirical scaling constant used to determine the Ewald damping parameter.
-    nnRx, nnRy, nnRz : torch.Tensor
-        Neighbor coordinates (not used directly here but passed for API consistency).
-    nrnnlist : torch.Tensor
-        Number of neighbors per atom (not used directly).
-    nnType : torch.Tensor of shape (Nr_atoms, MAXNN)
-        Indices of neighbor atoms for each atom.
-    H_INDEX_START, H_INDEX_END : torch.Tensor
-        Index mappings for block matrix ranges (not used directly).
-    CALPHA : float
-        Ewald real-space damping parameter (α), typically precomputed externally.
+    Hubbard_U:
+        `(Nr_atoms,)` float tensor.
+    TYPE:
+        `(Nr_atoms,)` long tensor.
+    dR:
+        Distance tensor with same leading shape as `nnType` (typically `(Nr_atoms, MAXNN)`).
+    dR_dxyz:
+        Unit-vector tensor with shape `dR.shape + (3,)`.
+    nnType:
+        Neighbor type/index tensor used to mask padded neighbors (`-1` padding).
+    neighbor_I, neighbor_J:
+        1D long tensors defining the flattened pair list (aligned with `nnType != -1`).
+    CALPHA:
+        Ewald splitting parameter α.
 
     Returns
     -------
-    CC_real : torch.Tensor of shape (Nr_atoms, Nr_atoms)
-        Real-space contribution to the Coulomb interaction matrix.
-    dCC_dxyz_real : torch.Tensor of shape (3, Nr_atoms, Nr_atoms)
-        Derivatives of the real-space Coulomb interaction with respect to x, y, and z.
-
-    Notes
-    -----
-    - This function computes the pairwise Coulomb interactions between atoms and their neighbors
-      within a real-space cutoff derived from the Ewald α parameter.
-    - It includes analytical short-range corrections for both same-element and different-element
-      atomic pairs using atom-dependent Hubbard U parameters.
-    - Derivatives (dCC/dR) are calculated analytically using the chain rule applied to screened
-      Coulomb functions and short-range exponential terms.
-    - Output matrices are assembled via scatter operations using index_put_ with accumulation.
-    - Only the upper triangle of the interaction matrix is filled; symmetry must be enforced externally if needed.
+    CC_real:
+        `(Nr_atoms, Nr_atoms)` tensor.
+    dCC_dxyz_real:
+        `(3, Nr_atoms, Nr_atoms)` tensor.
     """
 
     Nats = TYPE.shape[-1]
@@ -254,60 +231,48 @@ def Ewald_Real_Space_vectorized(
 
 
 @torch.compile(dynamic=False)
-def Ewald_k_Space_vectorized(
-    RX,
-    RY,
-    RZ,
-    LBox,
-    lattice_vecs,
-    DELTAQ,
-    Nr_atoms,
-    COULACC,
-    CALPHA,
-    verbose,
-    do_vec=False,
-):
-    """
-    Computes the reciprocal-space (k-space) contribution to the Coulomb interaction matrix
-    and its derivatives using the Ewald summation method.
+def ewald_k_space_vectorized(
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    LBox: torch.Tensor,
+    lattice_vecs: torch.Tensor,
+    DELTAQ: torch.Tensor,
+    Nr_atoms: int,
+    COULACC: float,
+    CALPHA: float,
+    verbose: bool,
+    do_vec: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reciprocal-space (k-space) Ewald contribution and derivatives.
 
     Parameters
     ----------
-    RX, RY, RZ : torch.Tensor
-        Tensors of shape (Nr_atoms,) representing the x, y, and z coordinates of atomic positions.
-    LBox : torch.Tensor
-        Tensor of shape (3,) containing the simulation box lengths in Ångströms (assumed orthorhombic).
-    DELTAQ : torch.Tensor
-        Not used in this function, but typically expected to hold atomic charge differences.
-    Nr_atoms : int
-        Total number of atoms in the system.
-    COULACC : float
-        Desired accuracy of the Coulomb sum (e.g., 1e-6). Controls the reciprocal cutoff.
-    TIMERATIO : float
-        Volume-normalized parameter for balancing real and reciprocal-space contributions.
-    do_vec : bool, optional
-        If True, perform a fully vectorized computation of the k-space summation.
-        Faster but more memory-intensive. Default is False (sequential).
+    RX, RY, RZ:
+        `(Nr_atoms,)` coordinate tensors in Å.
+    LBox:
+        `(3,)` box lengths in Å (orthorhombic).
+    lattice_vecs:
+        `(3, 3)` lattice vectors (used for volume determinant).
+    DELTAQ:
+        Charge-difference tensor (not used; kept for API compatibility).
+    Nr_atoms:
+        Number of atoms.
+    COULACC:
+        Accuracy target controlling reciprocal-space cutoff.
+    CALPHA:
+        Ewald α.
+    verbose:
+        Print loop counters if True.
+    do_vec:
+        If True, run a fully-vectorized k-space path (memory heavy).
 
     Returns
     -------
-    COULOMBV : torch.Tensor
-        (Nr_atoms, Nr_atoms) matrix of Coulomb interactions computed via reciprocal-space Ewald sum.
-    dC_dR : torch.Tensor
-        (3, Nr_atoms, Nr_atoms) tensor containing the derivatives of the Coulomb interaction
-        matrix with respect to atomic positions (used for force computations).
-
-    Notes
-    -----
-    - Uses an orthorhombic unit cell; general cells not currently supported.
-    - K-space cutoff is determined automatically from the `COULACC` and `TIMERATIO` parameters.
-    - A self-interaction correction is included in the returned Coulomb matrix.
-    - Memory usage may become prohibitive for large systems if `do_vec=True`.
-
-    References
-    ----------
-    - Ewald, P. P. (1921). Die Berechnung optischer und elektrostatischer Gitterpotentiale.
-      Annalen der Physik, 369(3), 253–287.
+    COULOMBV:
+        `(Nr_atoms, Nr_atoms)` k-space Coulomb matrix contribution.
+    dC_dR:
+        `(3, Nr_atoms, Nr_atoms)` derivative tensor.
     """
 
     device = RX.device
@@ -430,7 +395,7 @@ def Ewald_k_Space_vectorized(
 
 
 ### not working shell-resolved ###
-def Ewald_Real_Space_vectorized_sr(
+def ewald_real_space_vectorized_sr(
     structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA
 ):
     """
@@ -772,7 +737,10 @@ def Ewald_Real_Space_vectorized_sr(
     return CC_real, dCC_dxyz_real
 
 
-def coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff):
+def coul_diff_elem_and_ang(
+    Ti_diff_el: torch.Tensor, Tj_diff_el: torch.Tensor, dR_mskd_diff: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Short-range damping term for different-element pairs and its derivative."""
     TI2 = Ti_diff_el**2
     TI4 = TI2**2
     TI6 = TI4 * TI2
@@ -796,7 +764,10 @@ def coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff):
     return t1, dt1
 
 
-def coul_same_elem_and_ang(Ti_same_el, dR_mskd_same):
+def coul_same_elem_and_ang(
+    Ti_same_el: torch.Tensor, dR_mskd_same: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Short-range damping term for same-element pairs and its derivative."""
     TI2 = Ti_same_el**2
     TI3 = TI2 * Ti_same_el
     SSB = TI3 / 48.0

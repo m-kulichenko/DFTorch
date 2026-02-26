@@ -1,9 +1,14 @@
-import torch
-from pathlib import Path
+from __future__ import annotations
+
 import os
+from pathlib import Path
+from typing import Final
+
+import torch
+
 from ._tools import ordered_pairs_from_TYPE
 
-symbol_to_number = {
+symbol_to_number: Final[dict[str, int]] = {
     "H": 1,
     "He": 2,
     "Li": 3,
@@ -42,31 +47,72 @@ symbol_to_number = {
     "Kr": 36,
 }
 
+_CHANNELS: Final[list[str]] = [
+    "Hdd0",
+    "Hdd1",
+    "Hdd2",
+    "Hpd0",
+    "Hpd1",
+    "Hpp0",
+    "Hpp1",
+    "Hsd0",
+    "Hsp0",
+    "Hss0",
+    "Sdd0",
+    "Sdd1",
+    "Sdd2",
+    "Spd0",
+    "Spd1",
+    "Spp0",
+    "Spp1",
+    "Ssd0",
+    "Ssp0",
+    "Sss0",
+]
 
-def LoadBondIntegralParameters(neighbor_I, neighbor_J, TYPE, fname):
-    """
-    Loads bond integral parameters for given atomic pairs from a file.
 
-    Parameters:
-    - neighbor_I (Tensor[int]): Tensor of atom indices representing the first atom in each bonded pair.
-    - neighbor_J (Tensor[int]): Tensor of atom indices representing the second atom in each bonded pair.
-    - TYPE (Tensor[int]): Tensor mapping atom indices to atomic types (e.g., H=0, C=1, etc.).
-    - fname (str): Path to the CSV-like text file containing bond integral parameters.
+def load_bond_integral_parameters(
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    TYPE: torch.Tensor,
+    fname: str,
+) -> torch.Tensor:
+    """Load bond-integral parameters for neighbor pairs from a CSV-like table.
 
-    File Format:
-    - The file must be comma-separated with a header row containing "id1,id2,...".
-    - Each subsequent row must contain:
-        - id1 (int): Atomic type of the first atom.
-        - id2 (int): Atomic type of the second atom.
-        - 14 float values: The bond integral parameters associated with the (id1, id2) pair.
+    The input file is expected to be comma-separated with a header row containing
+    `id1,id2,...`. Each subsequent row should contain:
 
-    Returns:
-    - fss_sigma (Tensor[float]): Tensor of shape `(len(neighbor_I), 14)` containing
-      bond integral parameters for each pair of neighboring atoms defined by `neighbor_I` and `neighbor_J`.
+    - `id1` (int): type id of the first element
+    - `id2` (int): type id of the second element
+    - 14 floats: parameter vector for the pair `(id1, id2)`
 
-    Notes:
-    - The function constructs a (m+1, m+1, 14) lookup tensor, where m is the highest atomic type in TYPE.
-    - Only pairs present in the provided TYPE set are considered when loading data from the file.
+    A dense lookup tensor `q` of shape `(m+1, m+1, 14)` is constructed, where
+    `m = max(TYPE)`. The output parameters for each neighbor pair are gathered as
+    `q[type_I, type_J]`.
+
+    Parameters
+    ----------
+    neighbor_I:
+        1D integer tensor with atom indices for the first atom in each pair.
+    neighbor_J:
+        1D integer tensor with atom indices for the second atom in each pair.
+    TYPE:
+        1D integer tensor mapping each atom index to a type id.
+    fname:
+        Path to the parameter file.
+
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape `(len(neighbor_I), 14)` containing the parameter vector for
+        each neighbor pair.
+
+    Notes
+    -----
+    This function intentionally preserves the original behavior:
+    - `m = max(TYPE)` uses Python's `max` over the tensor.
+    - The lookup tensor is allocated on `neighbor_I.device`.
+    - Only rows whose `id1` and `id2` appear in `TYPE` are loaded.
     """
 
     type_I = TYPE[neighbor_I]
@@ -93,33 +139,27 @@ def LoadBondIntegralParameters(neighbor_I, neighbor_J, TYPE, fname):
 
 
 def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
-    """
-    Computes bond integrals in a fully vectorized form using distance-dependent
-    piecewise functions defined by bond integral parameters.
+    """Compute bond integrals for many pairs in a vectorized piecewise form.
 
-    Parameters:
-    - dR (Tensor): Tensor of shape (N,) containing interatomic distances.
-    - f (Tensor): Tensor of shape (N, 14) where each row contains the 14 bond
-      integral parameters for a corresponding pair of atoms.
+    Parameters
+    ----------
+    dR:
+        Tensor of shape `(N,)` with interatomic distances.
+    f:
+        Tensor of shape `(N, 14)` with bond-integral parameters per pair.
 
-    Returns:
-    - Tensor of shape (N,): The computed bond integral values for each distance in dR.
+        Layout (by column index):
+        - `f[:,0]`: prefactor
+        - `f[:,5]`: R0 (shift for region-1 polynomial)
+        - `f[:,6]`: R1 (region-1/2 boundary)
+        - `f[:,7]`: R2 (cutoff boundary)
+        - `f[:,1:5]`: coefficients for the quartic polynomial (region 1)
+        - `f[:,8:14]`: coefficients for the quintic polynomial (region 2)
 
-    Description:
-    The function evaluates the bond integral between atomic pairs using three
-    regions defined by the parameter thresholds `f[:,6]` (R1) and `f[:,7]` (R2):
-
-    Region 1 (`dR <= f[:,6]`):
-        The bond integral is computed using an exponential of a quartic polynomial:
-        X = exp((dR - f[:,5]) * (f[:,1] + ... + f[:,4]*(dR - f[:,5])^3))
-
-    Region 2 (`f[:,6] < dR < f[:,7]`):
-        A smooth quintic polynomial interpolation is used.
-
-    Region 3 (`dR >= f[:,7]`):
-        The bond integral is set to zero (no interaction beyond this range).
-
-    Finally, the bond integral is scaled by `f[:,0]` as a prefactor.
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape `(N,)` with bond-integral values.
     """
     # Masks
     region1 = (dR > 1e-12) & (dR <= f[:, 6])
@@ -156,18 +196,22 @@ def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
 def bond_integral_with_grad_vectorized(
     dR: torch.Tensor, f: torch.Tensor
 ) -> torch.Tensor:
-    """
-    Computes derivatives of bond integrals (dX/dr) in a fully vectorized form using distance-dependent
-    piecewise functions defined by bond integral parameters.
+    """Compute radial derivative of the bond integral (dX/dr), vectorized.
 
-    Parameters:
-    - dR (Tensor): Tensor of shape (N,) containing interatomic distances.
-    - f (Tensor): Tensor of shape (N, 14) where each row contains the 14 bond
-      integral parameters for a corresponding pair of atoms.
+    This matches :func:`bond_integral_vectorized` but returns the derivative
+    with respect to `dR`, and applies the same prefactor `f[:,0]`.
 
-    Returns:
-    - Tensor of shape (N,): The computed derivatives of bond integral values for each distance in dR.
+    Parameters
+    ----------
+    dR:
+        Tensor of shape `(N,)` with interatomic distances.
+    f:
+        Tensor of shape `(N, 14)` with bond-integral parameters per pair.
 
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape `(N,)` with d(bond_integral)/dr values.
     """
     # Masks
     region1 = (dR > 1e-12) & (dR <= f[:, 6])
@@ -219,32 +263,23 @@ def bond_integral_with_grad_vectorized(
     return f[:, 0] * dSx
 
 
-_CHANNELS = [
-    "Hdd0",
-    "Hdd1",
-    "Hdd2",
-    "Hpd0",
-    "Hpd1",
-    "Hpp0",
-    "Hpp1",
-    "Hsd0",
-    "Hsp0",
-    "Hss0",
-    "Sdd0",
-    "Sdd1",
-    "Sdd2",
-    "Spd0",
-    "Spd1",
-    "Spp0",
-    "Spp1",
-    "Ssd0",
-    "Ssp0",
-    "Sss0",
-]
+def _expand_tokens(tokens: list[str]) -> list[str]:
+    """Expand Fortran-style repetition tokens.
 
+    Examples
+    --------
+    `"3*0.0"` becomes `"0.0", "0.0", "0.0"`.
 
-def _expand_tokens(tokens):
-    """Expand compressed tokens like '3*0.0' -> ['0.0','0.0','0.0']"""
+    Parameters
+    ----------
+    tokens:
+        List of string tokens.
+
+    Returns
+    -------
+    list[str]
+        Expanded token list.
+    """
     out = []
     for t in tokens:
         if "*" in t:
@@ -256,31 +291,42 @@ def _expand_tokens(tokens):
 
 
 def read_skf_table(
-    path,
-    N_ORB,
-    MAX_ANG,
-    MAX_ANG_OCC,
-    TORE,
-    N_S,
-    N_P,
-    N_D,
-    ES,
-    EP,
-    ED,
-    US,
-    UP,
-    UD,
-):
-    """
-    Read an SKF file and extract R grid + 20 channel integrals as tensors.
+    path: str,
+    N_ORB: torch.Tensor,
+    MAX_ANG: torch.Tensor,
+    MAX_ANG_OCC: torch.Tensor,
+    TORE: torch.Tensor,
+    N_S: torch.Tensor,
+    N_P: torch.Tensor,
+    N_D: torch.Tensor,
+    ES: torch.Tensor,
+    EP: torch.Tensor,
+    ED: torch.Tensor,
+    US: torch.Tensor,
+    UP: torch.Tensor,
+    UD: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+    """Read a DFTB+ `.skf` file and extract integral channels + repulsion spline data.
 
-    Args:
-        path (str): path to .skf file
-        elemA, elemB (str): element symbols (to detect homo/hetero)
+    Parameters
+    ----------
+    path:
+        Path to the `.skf` file. Filename should resemble `ElemA-ElemB.skf`.
+    N_ORB, MAX_ANG, MAX_ANG_OCC, TORE:
+        Integer tensors updated in-place for homonuclear files.
+    N_S, N_P, N_D:
+        Integer tensors updated in-place for homonuclear files.
+    ES, EP, ED, US, UP, UD:
+        Float tensors updated in-place for homonuclear files.
 
-    Returns:
-        R (Tensor): shape (npts,)
-        channels (dict): channel_name -> Tensor (npts,)
+    Returns
+    -------
+    tuple
+        `(R, channels, R_rep, rep_splines)` where:
+        - `R`: `(1001,)` padded orbital radial grid in Angstrom
+        - `channels`: dict[str, Tensor] channel_name -> `(npts, )` values in eV
+        - `R_rep`: repulsive radial grid in Angstrom
+        - `rep_splines`: spline polynomial coefficients
     """
     lines = Path(path).read_text(errors="ignore").splitlines()
     data_lines = [
@@ -397,30 +443,28 @@ def read_skf_table(
     return R, channels, R_rep, rep_splines
 
 
-def channels_to_matrix(channels, order=_CHANNELS):
-    """
-    Convert dict of channel tensors into a (n, m) matrix.
-    Args:
-        channels (dict): channel_name -> Tensor(n,)
-        order (list): list of channel names in fixed order
-    Returns:
-        M (Tensor): shape (n, m)
-    """
+def channels_to_matrix(
+    channels: dict[str, torch.Tensor],
+    order: list[str] = _CHANNELS,
+) -> torch.Tensor:
+    """Convert channel dict into a dense matrix of shape `(npts, len(order))`."""
     return torch.stack([channels[ch] for ch in order], dim=1)
 
 
-def cubic_spline_coeffs(R, M):
-    """
-    Vectorized cubic spline with:
-        - natural left boundary
-        - clamped right boundary: y(R[-1])=0, y'(R[-1])=0
+def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+    """Compute cubic spline coefficients for all channels.
 
-    Args:
-        R (Tensor): (n,) knot positions
-        M (Tensor): (n,m) values for m channels
+    Parameters
+    ----------
+    R:
+        Knot positions, shape `(n,)`.
+    M:
+        Values at knots, shape `(n, m)`.
 
-    Returns:
-        coeffs (Tensor): (n-1, m, 4), spline coeffs [a,b,c,d] per interval
+    Returns
+    -------
+    torch.Tensor
+        Coefficients of shape `(n-1, m, 4)` with `[a, b, c, d]` per interval.
     """
     n, m = M.shape
     h = (R[1:] - R[:-1]).unsqueeze(1)  # (n-1,1)
@@ -460,68 +504,32 @@ def cubic_spline_coeffs(R, M):
     return coeffs
 
 
-def spline_eval_all_and_search_coef(R, coeffs, x):
+def get_skf_tensors(
+    TYPE: torch.Tensor, skfpath: str
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Load SKF tensors for all unique element pairs present in `TYPE`.
+
+    Returns a tuple matching the historical layout used elsewhere in the project.
     """
-    Evaluate all-channel splines + derivatives at x.
-    Beyond R[-1] → force y=0, dy=0.
-
-    Args:
-        R (Tensor): (n,)
-        coeffs (Tensor): (n-1,m,4)
-        x (Tensor): (k,)
-
-    Returns:
-        y  (Tensor): (k,m)
-        dy (Tensor): (k,m)
-    """
-    n = len(R)
-    idx = torch.searchsorted(R, x, right=True) - 1
-    idx = torch.clamp(idx, 0, n - 2)  # which interval each x falls in
-
-    dx = (x - R[idx]).unsqueeze(1)  # (k,1)
-    a, b, c, d = [coeffs[idx, :, j] for j in range(4)]  # each (k,m)
-
-    y = a + b * dx + c * dx**2 + d * dx**3
-    dy = b + 2 * c * dx + 3 * d * dx**2
-
-    # Enforce cutoff
-    mask_hi = x >= R[-1]
-    y[mask_hi] = 0.0
-    dy[mask_hi] = 0.0
-    return y, dy
-
-
-def spline_eval_all(R, coeffs, x):
-    """
-    Evaluate all-channel splines + derivatives at x.
-    Beyond R[-1] → force y=0, dy=0.
-
-    Args:
-        R (Tensor): (n,)
-        coeffs (Tensor): (n-1,m,4)
-        x (Tensor): (k,)
-
-    Returns:
-        y  (Tensor): (k,m)
-        dy (Tensor): (k,m)
-    """
-    n = len(R)
-    idx = torch.searchsorted(R, x, right=True) - 1
-    idx = torch.clamp(idx, 0, n - 2)  # which interval each x falls in
-
-    dx = x - R
-
-    y = coeffs[:, 0] + coeffs[:, 1] * dx + coeffs[:, 2] * dx**2 + coeffs[:, 3] * dx**3
-    dy = coeffs[:, 1] + 2 * coeffs[:, 2] * dx + 3 * coeffs[:, 3] * dx**2
-
-    # Enforce cutoff
-    mask_hi = x >= R[-1]
-    y[mask_hi] = 0.0
-    dy[mask_hi] = 0.0
-    return y, dy
-
-
-def get_skf_tensors(TYPE, skfpath):
     _, _, label_list = ordered_pairs_from_TYPE(TYPE)
 
     # Allocate padded tensors

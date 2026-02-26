@@ -3,9 +3,8 @@ from ._elements import label, symbol_to_number
 from typing import Tuple, Optional, List
 import re
 
-
-# from sedacs.neighbor_list import NeighborState, calculate_displacement
-from .ewald_pme.neighbor_list import NeighborState, calculate_displacement
+# IMPORTANT: do not import `dftorch.ewald_pme` (or neighbor_list) at module import
+# time; it can try to load optional Triton backends and emit warnings.
 
 
 # compile options you can tweak:
@@ -164,7 +163,7 @@ def list_global_tensors(ns):
 
 
 def calculate_dist_dips(
-    pos_T: torch.Tensor, long_nbr_state: "NeighborState", cutoff: float
+    pos_T, long_nbr_state, cutoff
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute neighbor displacements, distances, and filtered neighbor indices.
@@ -194,6 +193,10 @@ def calculate_dist_dips(
     - Zero distance entries are replaced by 1 in dists to avoid division issues downstream.
     - Casting to float64 for displacement calculation improves numerical stability.
     """
+    # Local import to avoid pulling in optional Triton code (and related warnings)
+    # during normal `import dftorch`.
+    from .ewald_pme.neighbor_list import calculate_displacement
+
     nbr_inds = long_nbr_state.nbr_inds
     disps = calculate_displacement(
         pos_T.to(torch.float64),

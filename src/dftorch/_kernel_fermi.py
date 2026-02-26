@@ -64,7 +64,7 @@ def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
         d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
 
         H1 = Z.T @ d_Hcoul @ Z
-        # [D0,D_dq_J] = _fermi_prt(H0,H1,T,Q,e,mu0);
+        # [D0,D_dq_J] = fermi_prt(H0,H1,T,Q,e,mu0);
         D0, D_dq_J = Canon_DM_PRT(H1, T, Q, e, mu0, 10)
 
         D_dq_J = 2 * Z @ D_dq_J @ Z.T

@@ -1,19 +1,71 @@
+from __future__ import annotations
+
+from typing import Protocol
+
 import torch
 
 
-def atomic_density_matrix(H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
-    """
-    Vectorized construction of the atomic density matrix D_atomic.
+class _ConstLike(Protocol):
+    """Minimal protocol for the `const` argument used in this module."""
 
-    Parameters:
-    - Nr_atoms (int): Number of atoms
-    - H_INDEX_START (Tensor[int]): Start orbital indices per atom (length Nr_atoms)
-    - H_INDEX_END (Tensor[int]): End orbital indices per atom (length Nr_atoms)
-    - HDIM (int): Total dimension of the density matrix (number of orbitals)
-    - Znuc (Tensor[float]): Nuclear charges per atom (length Nr_atoms)
+    n_s: torch.Tensor  # [n_types]
+    n_p: torch.Tensor  # [n_types]
+    n_d: torch.Tensor  # [n_types]
 
-    Returns:
-    - D_atomic (Tensor[float]): Atomic density matrix as 1D tensor of length HDIM
+
+def atomic_density_matrix(
+    H_INDEX_START: torch.Tensor,
+    HDIM: int,
+    TYPE: torch.Tensor,
+    const: _ConstLike,
+    has_p: torch.Tensor,
+    has_d: torch.Tensor,
+) -> torch.Tensor:
+    """Build the per-orbital *atomic* occupation vector.
+
+    This helper constructs a 1D tensor `D_atomic` of length `HDIM` containing
+    default (initial) orbital occupations for each atom, based on the element/type
+    occupations stored in `const`.
+
+    Orbital layout per atom is assumed to be:
+
+    - `s` orbital: offset `0`
+    - `p` orbitals: offsets `1,2,3` (px, py, pz)
+    - `d` orbitals: offsets `4,5,6,7,8` (five d functions)
+
+    Occupations are distributed uniformly within a shell:
+    - s: `const.n_s[type]`
+    - p: `const.n_p[type] / 3`
+    - d: `const.n_d[type] / 5`
+
+    Parameters
+    ----------
+    H_INDEX_START:
+        Long tensor of shape `[N_atoms]` with the starting orbital index for each atom.
+    HDIM:
+        Total number of orbitals (length of the returned vector).
+    TYPE:
+        Long tensor of shape `[N_atoms]` with the per-atom type index.
+    const:
+        Object providing `n_s`, `n_p`, `n_d` tensors indexable by `TYPE`.
+    has_p:
+        Bool tensor of shape `[N_atoms]`, `True` for atoms with p orbitals.
+    has_d:
+        Bool tensor of shape `[N_atoms]`, `True` for atoms with d orbitals.
+
+    Returns
+    -------
+    torch.Tensor
+        1D tensor of shape `[HDIM]` with floating dtype `torch.get_default_dtype()`.
+
+    Raises
+    ------
+    IndexError
+        If any computed orbital indices fall outside `[0, HDIM)`.
+    ValueError
+        If input shapes are inconsistent.
+    TypeError
+        If inputs have unexpected dtypes.
     """
     # Initialize the atomic density matrix with zeros
     D_atomic = torch.zeros(
@@ -34,22 +86,46 @@ def atomic_density_matrix(H_INDEX_START, HDIM, TYPE, const, has_p, has_d):
 
 
 def atomic_density_matrix_batch(
-    batch_size, H_INDEX_START, HDIM, TYPE, const, has_p, has_d
-):
-    """
-    Vectorized batched atomic density matrix.
+    batch_size: int,
+    H_INDEX_START: torch.Tensor,
+    HDIM: int,
+    TYPE: torch.Tensor,
+    const: _ConstLike,
+    has_p: torch.Tensor,
+    has_d: torch.Tensor,
+) -> torch.Tensor:
+    """Batched version of :func:`atomic_density_matrix`.
 
-    Parameters:
-    - batch_size (int)
-    - H_INDEX_START: LongTensor [B, N_atoms]
-    - HDIM (int)
-    - TYPE: LongTensor [B, N_atoms]
-    - const: object with n_s, n_p, n_d tensors indexed by TYPE
-    - has_p: BoolTensor [B, N_atoms] atoms possessing p orbitals
-    - has_d: BoolTensor [B, N_atoms] atoms possessing d orbitals
+    Parameters
+    ----------
+    batch_size:
+        Expected batch size `B`. Must match `H_INDEX_START.shape[0]`.
+    H_INDEX_START:
+        Long tensor of shape `[B, N_atoms]` with starting orbital indices per atom.
+    HDIM:
+        Total number of orbitals (second dimension of the output).
+    TYPE:
+        Long tensor of shape `[B, N_atoms]` with per-atom type indices.
+    const:
+        Object providing `n_s`, `n_p`, `n_d` tensors indexable by `TYPE`.
+    has_p:
+        Bool tensor of shape `[B, N_atoms]`, `True` for atoms with p orbitals.
+    has_d:
+        Bool tensor of shape `[B, N_atoms]`, `True` for atoms with d orbitals.
 
-    Returns:
-    - D_atomic: FloatTensor [B, HDIM]
+    Returns
+    -------
+    torch.Tensor
+        Float tensor of shape `[B, HDIM]` with dtype `torch.get_default_dtype()`.
+
+    Raises
+    ------
+    IndexError
+        If any computed orbital indices fall outside `[0, HDIM)`.
+    ValueError
+        If input shapes are inconsistent.
+    TypeError
+        If inputs have unexpected dtypes.
     """
     device = H_INDEX_START.device
     B = H_INDEX_START.shape[0]
@@ -85,5 +161,4 @@ def atomic_density_matrix_batch(
                 raise IndexError("d orbital index out of range")
             D_atomic[b_d, idx_k] = occ_d
 
-    return D_atomic
     return D_atomic

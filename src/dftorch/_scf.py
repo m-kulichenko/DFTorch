@@ -3,11 +3,11 @@ import torch
 from collections import deque
 
 from ._tools import fractional_matrix_power_symm
-from ._dm_fermi import _dm_fermi
+from ._dm_fermi import dm_fermi
 from ._dm_fermi_x import (
-    DM_Fermi_x,
+    dm_fermi_x,
     dm_fermi_x_os_shared,
-    DM_Fermi_x_batch,
+    dm_fermi_x_batch,
 )
 
 # from ._kernel_fermi import _kernel_fermi
@@ -23,15 +23,6 @@ from ._xl_tools import (
 
 from ._spin import get_h_spin
 
-# from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
-from .ewald_pme import (
-    calculate_PME_ewald,
-    init_PME_data,
-    calculate_alpha_and_num_grids,
-)
-
-# from sedacs.neighbor_list import NeighborState
-from .ewald_pme.neighbor_list import NeighborState
 
 import time
 from typing import Optional, Dict, Any, Tuple
@@ -105,7 +96,7 @@ def SCFx(
     Z : torch.Tensor
         Symmetric orthogonalizer S^(-1/2) in AO basis, shape (n_orb, n_orb).
         Must satisfy approximately Z.T @ S @ Z = I. Used to transform
-        to/from the orthogonal representation where DM_Fermi_x is applied.
+        to/from the orthogonal representation where dm_fermi_x is applied.
     Efield : torch.Tensor
         External electric field vector (3,).
     C : torch.Tensor
@@ -156,6 +147,13 @@ def SCFx(
     Hubbard_U_gathered = Hubbard_U[atom_ids]
 
     if dftorch_params["coul_method"] == "PME":
+        from .ewald_pme import (
+            calculate_PME_ewald,
+            init_PME_data,
+            calculate_alpha_and_num_grids,
+        )
+        from .ewald_pme.neighbor_list import NeighborState
+
         # positions = torch.stack((RX, RY, RZ))
         positions = torch.stack(
             (RX, RY, RZ),
@@ -191,7 +189,7 @@ def SCFx(
         # if 1:
 
         # Initial density matrix
-        print("  Initial _dm_fermi")
+        print("  Initial dm_fermi")
 
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
@@ -200,7 +198,7 @@ def SCFx(
         )
         Hdipole = 0.5 * Hdipole @ S + 0.5 * S @ Hdipole
         H0 = H0 + Hdipole
-        Dorth, Q, e, f, mu0 = DM_Fermi_x(
+        Dorth, Q, e, f, mu0 = dm_fermi_x(
             Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
         )
         D = Z @ Dorth @ Z.T
@@ -412,6 +410,13 @@ def scf_x_os(
     Hubbard_U_gathered = Hubbard_U[atom_ids]
 
     if dftorch_params["coul_method"] == "PME":
+        from .ewald_pme import (
+            calculate_PME_ewald,
+            init_PME_data,
+            calculate_alpha_and_num_grids,
+        )
+        from .ewald_pme.neighbor_list import NeighborState
+
         # positions = torch.stack((RX, RY, RZ))
         positions = torch.stack(
             (RX, RY, RZ),
@@ -446,7 +451,7 @@ def scf_x_os(
     with torch.no_grad():
         # if 1:
         # Initial density matrix
-        print("  Initial _dm_fermi")
+        print("  Initial dm_fermi")
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
             - RY[atom_ids] * Efield[1]
@@ -762,7 +767,7 @@ def SCFx_batch(
         H0 = H0 + Hdipole
 
         H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H0, Z))
-        Dorth, Q, e, f, mu0 = DM_Fermi_x_batch(
+        Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
             H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
         )
         D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -980,8 +985,8 @@ def _scf(
         # mu0 = 0.5 * (h[nocc - 1] + h[nocc])
 
         # Initial density matrix
-        print("  Initial _dm_fermi")
-        Dorth, mu0 = _dm_fermi(
+        print("  Initial dm_fermi")
+        Dorth, mu0 = dm_fermi(
             Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50
         )
         D = Z @ Dorth @ Z.T
@@ -1039,8 +1044,8 @@ def _scf(
 
             start_time1 = time.perf_counter()
 
-            # Dorth, mu0 = _dm_fermi((Z.T @ H @ Z).to(torch.float64), Te, nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=debug)
-            Dorth, mu0 = _dm_fermi(
+            # Dorth, mu0 = dm_fermi((Z.T @ H @ Z).to(torch.float64), Te, nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=debug)
+            Dorth, mu0 = dm_fermi(
                 (Z.T @ H @ Z),
                 Te,
                 nocc,
@@ -1053,13 +1058,13 @@ def _scf(
             # Dorth = Dorth.to(torch.get_default_dtype())
 
             #####
-            # Dorth_sr, mu0_sr = _dm_fermi((Z.T @ H_sr @ Z).to(torch.float64), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
+            # Dorth_sr, mu0_sr = dm_fermi((Z.T @ H_sr @ Z).to(torch.float64), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
             # Dorth_sr = Dorth_sr.to(torch.get_default_dtype())
             #####
 
             if debug:
                 torch.cuda.synchronize()
-            print("  _dm_fermi {:.1f} s".format(time.perf_counter() - start_time1))
+            print("  dm_fermi {:.1f} s".format(time.perf_counter() - start_time1))
 
             start_time1 = time.perf_counter()
 
@@ -1264,8 +1269,8 @@ def SCF_adaptive_mixing(
     H0 = H0 + Hdipole
 
     # Initial density via Fermi operator on H0
-    print("  Initial _dm_fermi")
-    Dorth, mu0 = _dm_fermi(Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
+    print("  Initial dm_fermi")
+    Dorth, mu0 = dm_fermi(Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
     D = Z @ Dorth @ Z.T
     DS = 2 * torch.diag(D @ S)  # AO populations per orbital
     # Build initial atomic charges q (Mulliken-like): q_A = sum_occ_on_A - Z_A
@@ -1307,10 +1312,10 @@ def SCF_adaptive_mixing(
 
         # --- New density (out) for current H ------------------------------
         t1 = time.perf_counter()
-        Dorth, mu0 = _dm_fermi(
+        Dorth, mu0 = dm_fermi(
             Z.T @ H @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50
         )
-        print("  _dm_fermi {:.3f} s".format(time.perf_counter() - t1))
+        print("  dm_fermi {:.3f} s".format(time.perf_counter() - t1))
 
         # --- Back-transform density --------------------------------------
         t1 = time.perf_counter()

@@ -53,7 +53,7 @@ def get_repulsion_energy(
     Notes
     -----
     - Distances converted to Bohr internally (factor 0.52917721).
-    - Energy converted Hartree → eV using 27.21138625.
+    - energy converted Hartree → eV using 27.21138625.
     - Neighbor list uses minimum image (min_image_only=True).
     """
     _, _, nnRx, nnRy, nnRz, nnType, _, _, neighbor_I, neighbor_J, IJ_pair_type, _ = (
@@ -146,7 +146,7 @@ def get_repulsion_energy_batch(
     Notes
     -----
     - Distances converted to Bohr internally (factor 0.52917721).
-    - Energy converted Hartree → eV using 27.21138625.
+    - energy converted Hartree → eV using 27.21138625.
     - Neighbor list uses minimum image (min_image_only=True).
     """
     batch_size = RX.shape[0]

@@ -1,7 +1,7 @@
 import torch
 
 
-def Energy(
+def energy(
     H0: torch.Tensor,
     U: torch.Tensor,
     Efield: torch.Tensor,
@@ -125,7 +125,7 @@ def Energy(
     return Etot, Eband0, Ecoul, Edipole, E_entropy, S_ent
 
 
-def EnergyShadow(
+def energy_shadow(
     H0: torch.Tensor,
     U: torch.Tensor,
     Efield: torch.Tensor,
@@ -147,7 +147,7 @@ def EnergyShadow(
     This variant modifies the SCC Coulomb term by introducing an auxiliary
     charge-like vector ``n``. The standard SCC energy is recovered if
     ``n == q``. Band, dipole, and entropy terms are unchanged relative to
-    :func:`Energy`.
+    :func:`energy`.
 
     Parameters
     ----------
@@ -205,7 +205,7 @@ def EnergyShadow(
         Etot = Eband0 + Ecoul + Edipole - 2 * Te * S_ent
 
     Setting ``n = q`` reduces this to the standard SCC expression in
-    :func:`Energy`.
+    :func:`energy`.
     """
     kB = 8.61739e-5  # eV/K
 
