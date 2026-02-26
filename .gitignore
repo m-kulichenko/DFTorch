@@ -16,3 +16,10 @@ personal_github
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+*.pt
+*.zip
+*md_trj*.xyz
+
+/tests/**/*.pt
+/tests/**/md_trj*.xyz
