@@ -5,7 +5,7 @@ from typing import Union, Tuple
 from ._tools import ordered_pairs_from_TYPE
 
 
-@torch.compile(dynamic=False)
+# @torch.compile(dynamic=False)
 def vectorized_nearestneighborlist(
     TYPE: torch.Tensor,
     Rx: torch.Tensor,
@@ -249,7 +249,7 @@ def vectorized_nearestneighborlist(
     )
 
 
-@torch.compile(dynamic=False)
+# @torch.compile(dynamic=False)
 def vectorized_nearestneighborlist_batch(
     TYPE,
     Rx,

@@ -203,14 +203,12 @@ def SCFx(
         Dorth, Q, e, f, mu0 = DM_Fermi_x(
             Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
         )
-        print("mu0 initial:", mu0)
         D = Z @ Dorth @ Z.T
         DS = 2 * torch.diag(D @ S)
         q = -1.0 * Znuc
         q.scatter_add_(
             0, atom_ids, DS
         )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-        print("Initial q_global:", q)
 
         KK = -dftorch_params["SCF_ALPHA"] * torch.eye(
             Nats, device=H0.device
