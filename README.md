@@ -54,7 +54,5 @@ from dftorch import (
 
 All other modules are internal implementation details and may change.
 
-This folder contains legacy code kept for reference.
-
 ## Authors
  M. Kulichenko, A.M.N. Niklasson
