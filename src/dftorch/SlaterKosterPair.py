@@ -1,8 +1,5 @@
 import torch
 
-# from .BondIntegral import *
-from .BondIntegral import bond_integral_vectorized, bond_integral_with_grad_vectorized
-
 
 # @torch.compile(fullgraph=True, dynamic=True)  # optional extra flags
 def Slater_Koster_Pair_SKF_vectorized(
@@ -4242,6 +4239,11 @@ def Slater_Koster_Pair_vectorized(
     # %%% Type_pair(1 or 2): Character of the type of each atom in the pair, e.g. 'H' for hydrogen of 'O' for oxygen
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1
+
+    from ._bond_integral import (
+        bond_integral_vectorized,
+        bond_integral_with_grad_vectorized,
+    )
 
     dH0 = torch.zeros(3, HDIM * HDIM, dtype=H0.dtype, device=H0.device)
 

@@ -1,7 +1,6 @@
 import torch
 import time
-from .BondIntegral import *
-from .BondIntegral import LoadBondIntegralParameters
+from ._bond_integral import LoadBondIntegralParameters
 from .SlaterKosterPair import (
     Slater_Koster_Pair_vectorized,
     Slater_Koster_Pair_SKF_vectorized,

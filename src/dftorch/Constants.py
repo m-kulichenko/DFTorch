@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-from .BondIntegral import get_skf_tensors
 from .Elements import symbol_to_number, label, atomic_num, mass
 from .io import read_xyz
 from .Tools import load_spinw_to_matrix
@@ -34,6 +33,8 @@ class Constants(torch.nn.Module):
         else:
             species, _ = read_xyz(file, sort=False)  # Input coordinate file
         TYPE = torch.tensor(species.flatten())
+
+        from ._bond_integral import get_skf_tensors
 
         (
             R_tensor,

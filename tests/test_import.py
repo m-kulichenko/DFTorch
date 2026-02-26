@@ -19,7 +19,7 @@ def test_import_key_modules():
     """
     from dftorch import (  # noqa: F401
         AtomicDensityMatrix,
-        BondIntegral,
+        _bond_integral,
         CoulombMatrix,
         DM_Fermi,
         Energy,
