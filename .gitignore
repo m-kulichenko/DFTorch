@@ -12,3 +12,6 @@ experiments/*.ipynb
 **/.ipynb_checkpoints/
 personal_github
 
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
