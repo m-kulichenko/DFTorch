@@ -111,7 +111,7 @@ def DM_Fermi_x(
 
     if cnt == MaxIt:
         print(
-            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -178,7 +178,7 @@ def dm_fermi_x_os(
 
     if cnt == MaxIt:
         print(
-            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -244,7 +244,7 @@ def dm_fermi_x_os_shared(
 
     if cnt == MaxIt:
         print(
-            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )
@@ -320,7 +320,7 @@ def DM_Fermi_x_batch(
         cnt += 1
     if cnt == MaxIt:
         print(
-            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, occ_err_val
             )
         )

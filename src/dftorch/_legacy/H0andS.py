@@ -6,8 +6,8 @@ from ._slater_koster_pair import (
     Slater_Koster_Pair_SKF_vectorized,
     Slater_Koster_Pair_SKF_vectorized_batch,
 )
-from .AtomicDensityMatrix import atomic_density_matrix
-from .Tools import ordered_pairs_from_TYPE
+from ._atomic_density_matrix import atomic_density_matrix
+from ._tools import ordered_pairs_from_TYPE
 
 
 # @torch.compile

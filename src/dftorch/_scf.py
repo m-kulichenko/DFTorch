@@ -2,17 +2,17 @@ import torch
 
 from collections import deque
 
-from .Tools import fractional_matrix_power_symm
-from .DM_Fermi import DM_Fermi
-from .DM_Fermi_x import (
+from ._tools import fractional_matrix_power_symm
+from ._dm_fermi import _dm_fermi
+from ._dm_fermi_x import (
     DM_Fermi_x,
     dm_fermi_x_os_shared,
     DM_Fermi_x_batch,
 )
 
-# from .Kernel_Fermi import Kernel_Fermi
-from .Tools import calculate_dist_dips
-from .XLTools import (
+# from ._kernel_fermi import _kernel_fermi
+from ._tools import calculate_dist_dips
+from ._xl_tools import (
     kernel_update_lr,
     kernel_update_lr_os,
     kernel_update_lr_batch,
@@ -21,7 +21,7 @@ from .XLTools import (
     calc_q_batch,
 )
 
-from .Spin import get_h_spin
+from ._spin import get_h_spin
 
 # from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
 from .ewald_pme import (
@@ -71,14 +71,14 @@ def SCFx(
     Optional[torch.Tensor],  # dq_p1 (PME only)
 ]:
     """
-    Self-consistent field (SCF) cycle with finite electronic temperature and
+    Self-consistent field (_scf) cycle with finite electronic temperature and
     Fermi–Dirac occupations, using a preconditioned low-rank Krylov charge mixer.
     Supports PME Ewald electrostatics via `sedacs` or a direct Coulomb matrix.
 
     Parameters
     ----------
     dftorch_params : dict
-        SCF/control parameters. Expected keys include:
+        _scf/control parameters. Expected keys include:
         - 'coul_method': str, 'PME' or 'direct'
         - 'cutoff': float, real-space cutoff (PME)
         - 'Coulomb_acc': float, accuracy target for PME alpha/grid (PME)
@@ -97,7 +97,7 @@ def SCFx(
         - Nats: int, number of atoms
     D0 : torch.Tensor or None
         Reference density matrix for band-energy shifts. Currently unused in the
-        SCF loop (kept for compatibility).
+        _scf loop (kept for compatibility).
     H0 : torch.Tensor
         One-electron Hamiltonian in AO basis, shape (n_orb, n_orb).
     S : torch.Tensor
@@ -120,7 +120,7 @@ def SCFx(
     Hdipole : torch.Tensor
         Symmetrized dipole correction from the external field, (n_orb, n_orb).
     KK : torch.Tensor
-        Mixing/preconditioning matrix used by the Krylov SCF accelerator, (Nats, Nats).
+        Mixing/preconditioning matrix used by the Krylov _scf accelerator, (Nats, Nats).
     D : torch.Tensor
         Final density matrix in AO basis, (n_orb, n_orb).
     q : torch.Tensor
@@ -146,7 +146,7 @@ def SCFx(
         * 'PME': periodic Ewald via sedacs (real/reciprocal space split).
         * 'direct': direct Coulomb via supplied C.
     """
-    print("### Do SCF ###")
+    print("### Do _scf ###")
 
     device = H0.device
     atom_ids = torch.repeat_interleave(
@@ -191,7 +191,7 @@ def SCFx(
         # if 1:
 
         # Initial density matrix
-        print("  Initial DM_Fermi")
+        print("  Initial _dm_fermi")
 
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
@@ -272,11 +272,11 @@ def SCFx(
             if (
                 it == dftorch_params["KRYLOV_START"]
             ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = Kernel_Fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
+                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
                 # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
                 # KK0 = KK.clone()  # To be kept as preconditioner
                 1
-            # Preconditioned Low-Rank Krylov SCF acceleration
+            # Preconditioned Low-Rank Krylov _scf acceleration
             if it > dftorch_params["KRYLOV_START"]:
                 # Preconditioned residual
                 K0Res = kernel_update_lr(
@@ -398,7 +398,7 @@ def scf_x_os(
     Optional[torch.Tensor],  # dq_p1 (PME only)
 ]:
     """ """
-    print("### Do SCF ###")
+    print("### Do _scf ###")
 
     device = H0.device
     atom_ids = torch.repeat_interleave(
@@ -448,7 +448,7 @@ def scf_x_os(
     with torch.no_grad():
         # if 1:
         # Initial density matrix
-        print("  Initial DM_Fermi")
+        print("  Initial _dm_fermi")
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
             - RY[atom_ids] * Efield[1]
@@ -570,11 +570,11 @@ def scf_x_os(
             if (
                 it == dftorch_params["KRYLOV_START"]
             ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = Kernel_Fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
+                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
                 # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
                 # KK0 = KK.clone()  # To be kept as preconditioner
                 1
-            # Preconditioned Low-Rank Krylov SCF acceleration
+            # Preconditioned Low-Rank Krylov _scf acceleration
             if it > dftorch_params["KRYLOV_START"]:
                 # Preconditioned residual
                 K0Res = kernel_update_lr_os(
@@ -726,7 +726,7 @@ def SCFx_batch(
     Optional[torch.Tensor],  # dq_p1 (PME only)
 ]:
     """
-    Self-consistent field (SCF) cycle with finite electronic temperature and
+    Self-consistent field (_scf) cycle with finite electronic temperature and
     Fermi–Dirac occupations, using a preconditioned low-rank Krylov charge mixer.
     Supports PME Ewald electrostatics via `sedacs` or a direct Coulomb matrix.
     """
@@ -815,11 +815,11 @@ def SCFx_batch(
             if (
                 it == dftorch_params["KRYLOV_START"]
             ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = Kernel_Fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
+                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
                 # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
                 # KK0 = KK.clone()  # To be kept as preconditioner
                 1
-            # Preconditioned Low-Rank Krylov SCF acceleration
+            # Preconditioned Low-Rank Krylov _scf acceleration
             if it > dftorch_params["KRYLOV_START"]:
                 # Preconditioned residual
                 K0Res = kernel_update_lr_batch(
@@ -878,7 +878,7 @@ def SCFx_batch(
     return H, Hcoul, Hdipole, KK, D, q, f, mu0, Ecoul, forces1, dq_p1
 
 
-def SCF(
+def _scf(
     structure,
     D0,
     H0,
@@ -898,7 +898,7 @@ def SCF(
     debug=False,
 ):
     """
-    Performs a self-consistent field (SCF) cycle with finite electronic temperature
+    Performs a self-consistent field (_scf) cycle with finite electronic temperature
     and Fermi-Dirac occupations for a DFTB-like semiempirical Hamiltonian.
 
     Parameters
@@ -930,16 +930,16 @@ def SCF(
     const : object
         DFTB constants object with attribute `n_orb`, which gives orbitals per atom type.
     alpha : float, optional
-        Mixing coefficient for SCF charge update: (1 - alpha) * q_old + alpha * q. Default is 0.2.
+        Mixing coefficient for _scf charge update: (1 - alpha) * q_old + alpha * q. Default is 0.2.
     acc : float, optional
-        Convergence threshold for SCF loop based on charge difference norm. Default is 1e-7.
+        Convergence threshold for _scf loop based on charge difference norm. Default is 1e-7.
     MAX_ITER : int, optional
-        Maximum number of SCF iterations. Default is 200.
+        Maximum number of _scf iterations. Default is 200.
 
     Returns
     -------
     H : torch.Tensor
-        Final one-electron Hamiltonian matrix after SCF.
+        Final one-electron Hamiltonian matrix after _scf.
     Hcoul : torch.Tensor
         Final Coulomb contribution to the Hamiltonian.
     Hdipole : torch.Tensor
@@ -953,12 +953,12 @@ def SCF(
 
     Notes
     -----
-    - SCF convergence is checked via the L2 norm of charge difference between iterations.
+    - _scf convergence is checked via the L2 norm of charge difference between iterations.
     - The Hamiltonian is corrected for the external electric field through a symmetrized dipole term.
     - Charge density is constructed from Fermi-Dirac occupations.
     - Mixing helps stabilize convergence, especially for metallic systems or small gaps.
     """
-    print("### Do SCF ###")
+    print("### Do _scf ###")
     device = H0.device
     atom_ids = torch.repeat_interleave(
         torch.arange(len(structure.n_orbitals_per_atom), device=Rx.device),
@@ -982,8 +982,8 @@ def SCF(
         # mu0 = 0.5 * (h[nocc - 1] + h[nocc])
 
         # Initial density matrix
-        print("  Initial DM_Fermi")
-        Dorth, mu0 = DM_Fermi(
+        print("  Initial _dm_fermi")
+        Dorth, mu0 = _dm_fermi(
             Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50
         )
         D = Z @ Dorth @ Z.T
@@ -1041,8 +1041,8 @@ def SCF(
 
             start_time1 = time.perf_counter()
 
-            # Dorth, mu0 = DM_Fermi((Z.T @ H @ Z).to(torch.float64), Te, nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=debug)
-            Dorth, mu0 = DM_Fermi(
+            # Dorth, mu0 = _dm_fermi((Z.T @ H @ Z).to(torch.float64), Te, nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=debug)
+            Dorth, mu0 = _dm_fermi(
                 (Z.T @ H @ Z),
                 Te,
                 nocc,
@@ -1055,13 +1055,13 @@ def SCF(
             # Dorth = Dorth.to(torch.get_default_dtype())
 
             #####
-            # Dorth_sr, mu0_sr = DM_Fermi((Z.T @ H_sr @ Z).to(torch.float64), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
+            # Dorth_sr, mu0_sr = _dm_fermi((Z.T @ H_sr @ Z).to(torch.float64), Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50, debug=debug)
             # Dorth_sr = Dorth_sr.to(torch.get_default_dtype())
             #####
 
             if debug:
                 torch.cuda.synchronize()
-            print("  DM_Fermi {:.1f} s".format(time.perf_counter() - start_time1))
+            print("  _dm_fermi {:.1f} s".format(time.perf_counter() - start_time1))
 
             start_time1 = time.perf_counter()
 
@@ -1240,13 +1240,13 @@ def SCF_adaptive_mixing(
     MAX_ITER=200,
 ):
     """
-    SCF with adaptive mixing:
+    _scf with adaptive mixing:
     - mixing='adaptive': auto-tunes linear α from residual history
     - mixing='anderson': Anderson (Pulay-like) charge mixing (recommended)
 
     Returns: H, Hcoul, Hdipole, D, q, f
     """
-    print("### Do SCF (adaptive mixing) ###")
+    print("### Do _scf (adaptive mixing) ###")
     dtype = H0.dtype
     device = H0.device
 
@@ -1266,8 +1266,8 @@ def SCF_adaptive_mixing(
     H0 = H0 + Hdipole
 
     # Initial density via Fermi operator on H0
-    print("  Initial DM_Fermi")
-    Dorth, mu0 = DM_Fermi(Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
+    print("  Initial _dm_fermi")
+    Dorth, mu0 = _dm_fermi(Z.T @ H0 @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50)
     D = Z @ Dorth @ Z.T
     DS = 2 * torch.diag(D @ S)  # AO populations per orbital
     # Build initial atomic charges q (Mulliken-like): q_A = sum_occ_on_A - Z_A
@@ -1309,10 +1309,10 @@ def SCF_adaptive_mixing(
 
         # --- New density (out) for current H ------------------------------
         t1 = time.perf_counter()
-        Dorth, mu0 = DM_Fermi(
+        Dorth, mu0 = _dm_fermi(
             Z.T @ H @ Z, Te, nocc, mu_0=None, m=18, eps=1e-9, MaxIt=50
         )
-        print("  DM_Fermi {:.3f} s".format(time.perf_counter() - t1))
+        print("  _dm_fermi {:.3f} s".format(time.perf_counter() - t1))
 
         # --- Back-transform density --------------------------------------
         t1 = time.perf_counter()
@@ -1355,7 +1355,7 @@ def SCF_adaptive_mixing(
         print("  iter wall {:.3f} s\n".format(time.perf_counter() - t0))
 
     if it >= MAX_ITER and Res > acc:
-        print("WARNING: SCF did not converge (Res={:.3e})".format(Res.item()))
+        print("WARNING: _scf did not converge (Res={:.3e})".format(Res.item()))
 
     f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
     return H, Hcoul, Hdipole, D, q, f

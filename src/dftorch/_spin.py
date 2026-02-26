@@ -1,7 +1,7 @@
 import torch
 
 
-@torch.compile
+# @torch.compile
 def get_h_spin(TYPE, net_spin, w, n_shells_per_atom, shell_types):
 
     n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
@@ -62,7 +62,7 @@ def get_h_spin(TYPE, net_spin, w, n_shells_per_atom, shell_types):
     return H_spin
 
 
-@torch.compile
+# @torch.compile
 def get_spin_energy(TYPE, net_spin, w, n_shells_per_atom):
 
     # s atoms
@@ -116,7 +116,7 @@ def get_spin_energy(TYPE, net_spin, w, n_shells_per_atom):
     return 0.5 * e_spin
 
 
-@torch.compile
+# @torch.compile
 def get_spin_energy_shadow(TYPE, net_spin, n_net_spin, w, n_shells_per_atom):
 
     diff = 2 * net_spin - n_net_spin

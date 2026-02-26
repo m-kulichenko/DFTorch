@@ -18,7 +18,7 @@ from .sedacs_interface import (
 
 from .MD import MDXL_Graph
 
-from .SCF import scf
+from ._scf import scf
 
 __all__ = [
     "get_ch",

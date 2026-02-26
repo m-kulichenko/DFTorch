@@ -2,7 +2,7 @@ import torch
 import time
 from typing import Union, Tuple
 
-from .Tools import ordered_pairs_from_TYPE
+from ._tools import ordered_pairs_from_TYPE
 
 
 @torch.compile(dynamic=False)

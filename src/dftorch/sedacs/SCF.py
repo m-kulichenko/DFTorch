@@ -6,7 +6,7 @@ from dftorch.ewald_pme import (
     init_PME_data,
     calculate_alpha_and_num_grids,
 )
-from dftorch.RepulsiveSpline import get_repulsion_energy
+from dftorch._repulsive_spline import get_repulsion_energy
 
 from sedacs.chemical_potential import get_mu
 
@@ -202,7 +202,7 @@ def scf(
 
         if dist.get_rank() == 0:
             scf_error = torch.norm(q_global - q_global_old)
-            print("SCF error:", scf_error.item())
+            print("_scf error:", scf_error.item())
         dist.barrier()
         dist.broadcast(scf_error, 0)
 

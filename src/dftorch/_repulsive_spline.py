@@ -1,5 +1,5 @@
 import torch
-from .nearestneighborlist import (
+from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,
 )

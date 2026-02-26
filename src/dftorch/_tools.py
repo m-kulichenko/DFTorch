@@ -1,5 +1,5 @@
 import torch
-from .Elements import label, symbol_to_number
+from ._elements import label, symbol_to_number
 from typing import Tuple, Optional, List
 import re
 

@@ -18,17 +18,17 @@ def test_import_key_modules():
     Import modules.
     """
     from dftorch import (  # noqa: F401
-        AtomicDensityMatrix,
+        _atomic_density_matrix,
         _bond_integral,
-        CoulombMatrix,
-        DM_Fermi,
-        Energy,
-        Forces,
+        _coulomb_matrix,
+        _dm_fermi,
+        _energy,
+        _forces,
         _h0ands,
-        SCF,
+        _scf,
         _slater_koster_pair,
-        Tools,
-        nearestneighborlist,
+        _tools,
+        _nearestneighborlist,
     )
 
 
@@ -51,7 +51,7 @@ def test_nearestneighborlist_small_xyz(device):
     torch.set_default_dtype(torch.float64)
 
     from dftorch.Constants import Constants
-    from dftorch.nearestneighborlist import vectorized_nearestneighborlist
+    from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 
     # Minimal coordinates for 3 atoms in a triangle
     Rx = torch.tensor([0.0, 1.0, 0.0])
@@ -93,7 +93,7 @@ def test_energy_smoke_import_and_call(device):
     """
     CI smoke test:
     - Imports core modules.
-    - Runs a *small* SCF + forces calculation on CPU.
+    - Runs a *small* _scf + forces calculation on CPU.
     - Skips automatically if required SKF test data is not present.
     """
 
@@ -118,13 +118,13 @@ def test_energy_smoke_import_and_call(device):
         "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
         "cutoff": 10.0,  # Coulomb cutoff
         "PME_order": 4,  # Ignored for FULL coulomb method
-        "SCF_MAX_ITER": 25,  # Maximum number of SCF iterations
-        "SCF_TOL": 1e-6,  # SCF convergence tolerance on density matrix
+        "SCF_MAX_ITER": 25,  # Maximum number of _scf iterations
+        "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
         "SCF_ALPHA": 0.2,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
         "KRYLOV_MAXRANK": 10,  # Maximum Krylov subspace rank
-        "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in SCF
-        "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD SCF
-        "KRYLOV_START": 5,  # Number of initial SCF iterations before starting Krylov acceleration
+        "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in _scf
+        "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD _scf
+        "KRYLOV_START": 5,  # Number of initial _scf iterations before starting Krylov acceleration
     }
 
     LBox = torch.tensor(
@@ -140,14 +140,14 @@ def test_energy_smoke_import_and_call(device):
         str(xyz_path), LBox, const, charge=0, Te=1000.0, device=device
     )
 
-    # Create ESDriver object and run SCF calculation
+    # Create ESDriver object and run _scf calculation
     # electronic_rcut and repulsive_rcut are in Angstroms.
     # They should be >= cutoffs defined in SKF files for the element pair with largest cutoff present in the system.
     es_driver = ESDriver(
         dftorch_params, electronic_rcut=8.0, repulsive_rcut=6.0, device=device
     )
     es_driver(structure1, const, do_scf=True)
-    es_driver.calc_forces(structure1, const)  # Calculate forces after SCF
+    es_driver.calc_forces(structure1, const)  # Calculate forces after _scf
 
     assert hasattr(structure1, "e_tot")
     assert torch.isfinite(structure1.e_tot).all()

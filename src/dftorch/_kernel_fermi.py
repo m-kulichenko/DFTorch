@@ -1,17 +1,17 @@
 import torch
-from .Fermi_PRT import Canon_DM_PRT
+from ._fermi_prt import Canon_DM_PRT
 
 
-def Kernel_Fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
+def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
     """
-    Build the charge-response kernel for Krylov/Anderson SCF acceleration.
+    Build the charge-response kernel for Krylov/Anderson _scf acceleration.
 
     This computes the atomic charge response matrix dq_dn with elements
       dq_dn[J, I] = ∂q_I / ∂n_J
     by applying a unit perturbation on atomic population n_J, forming the
     induced Coulomb/Hubbard AO Hamiltonian perturbation dH, and obtaining
     the density response D1 via canonical Fermi perturbation theory in the
-    orthogonalized AO basis. The SCF kernel returned is
+    orthogonalized AO basis. The _scf kernel returned is
       KK = (dq_dn^T − I)^{-1},
     which maps residuals on atomic charges to a mixed update.
 
@@ -19,7 +19,7 @@ def Kernel_Fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
         structure: Structure with fields
             - n_orbitals_per_atom (list/1D tensor int)
             - Hubbard_U (Nats,)
-        mu0 (tensor or float): Chemical potential at the current SCF point.
+        mu0 (tensor or float): Chemical potential at the current _scf point.
         T (tensor or float): Electronic temperature (Kelvin).
         Nr_atoms (int): Number of atoms (Nats).
         H (tensor): Current AO Hamiltonian, shape (NAO, NAO).
@@ -30,7 +30,7 @@ def Kernel_Fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
         e (tensor): Eigenvalues corresponding to Q, shape (NAO,).
 
     Returns:
-        KK (tensor): SCF kernel, shape (Nats, Nats), KK = (dq_dn^T − I)^{-1}.
+        KK (tensor): _scf kernel, shape (Nats, Nats), KK = (dq_dn^T − I)^{-1}.
         D0 (tensor): Unperturbed density matrix in the orthogonal basis as returned by Canon_DM_PRT.
 
     Notes:
@@ -64,7 +64,7 @@ def Kernel_Fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
         d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
 
         H1 = Z.T @ d_Hcoul @ Z
-        # [D0,D_dq_J] = Fermi_PRT(H0,H1,T,Q,e,mu0);
+        # [D0,D_dq_J] = _fermi_prt(H0,H1,T,Q,e,mu0);
         D0, D_dq_J = Canon_DM_PRT(H1, T, Q, e, mu0, 10)
 
         D_dq_J = 2 * Z @ D_dq_J @ Z.T

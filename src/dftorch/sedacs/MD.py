@@ -2,15 +2,15 @@ import torch
 import torch.distributed as dist
 import time
 
-from dftorch.io import write_XYZ_trajectory
+from dftorch._io import write_XYZ_trajectory
 from dftorch.MD import MDXL, initialize_velocities
 from dftorch.ewald_pme import (
     calculate_PME_ewald,
     init_PME_data,
     calculate_alpha_and_num_grids,
 )
-from dftorch.Tools import calculate_dist_dips
-from dftorch.RepulsiveSpline import get_repulsion_energy
+from dftorch._tools import calculate_dist_dips
+from dftorch._repulsive_spline import get_repulsion_energy
 
 from sedacs.chemical_potential import get_mu
 

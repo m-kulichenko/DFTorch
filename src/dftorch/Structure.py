@@ -1,6 +1,6 @@
 import torch
-from .io import read_xyz
-from .AtomicDensityMatrix import atomic_density_matrix, atomic_density_matrix_batch
+from ._io import read_xyz
+from ._atomic_density_matrix import atomic_density_matrix, atomic_density_matrix_batch
 
 
 class Structure(torch.nn.Module):

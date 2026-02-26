@@ -2,7 +2,7 @@ import torch
 
 
 @torch.compile(fullgraph=False, dynamic=False)
-def Fermi_PRT(
+def _fermi_prt(
     H1: torch.Tensor,
     Te: float,
     Q: torch.Tensor,

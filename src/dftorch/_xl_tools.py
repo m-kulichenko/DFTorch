@@ -6,14 +6,14 @@ from .ewald_pme import (
 )
 
 
-from .Fermi_PRT import Canon_DM_PRT, Fermi_PRT, Fermi_PRT_batch  # noqa: F401
-from .DM_Fermi_x import (
+from ._fermi_prt import Canon_DM_PRT, _fermi_prt, Fermi_PRT_batch  # noqa: F401
+from ._dm_fermi_x import (
     DM_Fermi_x,
     dm_fermi_x_os,  # noqa: F401
     DM_Fermi_x_batch,
     dm_fermi_x_os_shared,
 )
-from .Spin import get_h_spin
+from ._spin import get_h_spin
 from typing import Any, Tuple
 
 
@@ -41,7 +41,7 @@ def calc_q(
     torch.Tensor,
 ]:
     """
-    Build SCF quantities from AO-level inputs and return updated atomic charges.
+    Build _scf quantities from AO-level inputs and return updated atomic charges.
     Parameters
     ----------
     H0 : (n_orb, n_orb) torch.Tensor
@@ -198,7 +198,7 @@ def calc_q_batch(
     torch.Tensor,
 ]:
     """
-    Build SCF quantities from AO-level inputs and return updated atomic charges.
+    Build _scf quantities from AO-level inputs and return updated atomic charges.
     Parameters
     ----------
     """
@@ -250,9 +250,9 @@ def calc_dq(
     Te : float
         Electronic temperature.
     Q : (n_orb, n_orb) torch.Tensor
-        Orthogonal eigenvectors used by Fermi_PRT.
+        Orthogonal eigenvectors used by _fermi_prt.
     e : (n_orb,) torch.Tensor
-        Orthogonal eigenvalues used by Fermi_PRT.
+        Orthogonal eigenvalues used by _fermi_prt.
     mu0 : () torch.Tensor
         Chemical potential corresponding to (Q, e).
     Nats : int
@@ -271,7 +271,7 @@ def calc_dq(
     H1_orth = Z.T @ d_Hcoul @ Z
     # First-order density response (canonical Fermi PRT)
     # _, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
-    _, D1 = Fermi_PRT(H1_orth, Te, Q, e, mu0)
+    _, D1 = _fermi_prt(H1_orth, Te, Q, e, mu0)
     D1 = Z @ D1 @ Z.T
     D1S = 2 * torch.diag(D1 @ S)
     # dq (atomic) from AO response
@@ -345,7 +345,7 @@ def kernel_update_lr(
     CALPHA: torch.Tensor = None,
 ) -> torch.Tensor:
     """
-    Preconditioned low-rank Krylov update for SCF charge mixing.
+    Preconditioned low-rank Krylov update for _scf charge mixing.
 
     Builds an orthonormal basis in charge space using the preconditioned residual,
     evaluates a small projected system to determine the optimal correction, and
@@ -514,7 +514,7 @@ def kernel_update_lr_os(
     CALPHA: torch.Tensor = None,
 ) -> torch.Tensor:
     """
-    Preconditioned low-rank Krylov update for SCF charge mixing.
+    Preconditioned low-rank Krylov update for _scf charge mixing.
 
     Builds an orthonormal basis in charge space using the preconditioned residual,
     evaluates a small projected system to determine the optimal correction, and
@@ -691,7 +691,7 @@ def kernel_update_lr_batch(
     CALPHA: torch.Tensor = None,
 ) -> torch.Tensor:
     """
-    Preconditioned low-rank Krylov update for SCF charge mixing.
+    Preconditioned low-rank Krylov update for _scf charge mixing.
 
     Builds an orthonormal basis in charge space using the preconditioned residual,
     evaluates a small projected system to determine the optimal correction, and

@@ -3,7 +3,7 @@ import torch.distributed as dist
 import time
 
 from dftorch.ewald_pme.neighbor_list import NeighborState
-from dftorch.Tools import (
+from dftorch._tools import (
     calculate_dist_dips,
     fractional_matrix_power_symm,
     ordered_pairs_from_TYPE,
@@ -504,7 +504,7 @@ def kernel_global(
             )
             H1_orth = ch_structure.Z.T @ d_Hcoul @ ch_structure.Z
 
-            ### Fermi_PRT
+            ### _fermi_prt
             kB = 8.61739e-5  # eV/K
             beta = 1 / (kB * structure.Te)
 
@@ -540,7 +540,7 @@ def kernel_global(
 
             # D0 = Q @ torch.diag_embed(fe) @ Q.T
             D1 = ch_structure.Q @ X @ ch_structure.Q.T
-            ### end Fermi_PRT
+            ### end _fermi_prt
 
             D1 = ch_structure.Z @ D1 @ ch_structure.Z.T
             D1S = 2 * torch.diag(D1 @ ch_structure.S)

@@ -1,7 +1,7 @@
 import torch
 from pathlib import Path
 import os
-from .Tools import ordered_pairs_from_TYPE
+from ._tools import ordered_pairs_from_TYPE
 
 symbol_to_number = {
     "H": 1,

@@ -1,10 +1,10 @@
 from .ESDriver import ESDriverBatch
-from .Energy import EnergyShadow
-from .ForcesBatch import forces_shadow_batch
-from .Forces import forces_shadow, forces_shadow_pme, forces_spin
+from ._energy import EnergyShadow
+from ._forces_batch import forces_shadow_batch
+from ._forces import forces_shadow, forces_shadow_pme, forces_spin
 
-# from .Kernel_Fermi import Kernel_Fermi
-from .XLTools import (
+# from ._kernel_fermi import _kernel_fermi
+from ._xl_tools import (
     kernel_update_lr,
     kernel_update_lr_os,
     kernel_update_lr_batch,
@@ -12,7 +12,7 @@ from .XLTools import (
     calc_q_os,
     calc_q_batch,
 )
-from .Spin import get_h_spin, get_spin_energy_shadow
+from ._spin import get_h_spin, get_spin_energy_shadow
 
 import torch
 
@@ -27,8 +27,8 @@ from .ewald_pme import (
 from .ewald_pme.neighbor_list import NeighborState
 from typing import Any, Tuple, Optional
 import time
-from .io import write_XYZ_trajectory
-from dftorch.Tools import calculate_dist_dips
+from ._io import write_XYZ_trajectory
+from dftorch._tools import calculate_dist_dips
 
 
 class MDXL:
@@ -305,7 +305,7 @@ class MDXL:
         Res = structure.q - self.n
         if md_step % 100000 == 0 and self.do_full_kernel:
             1
-            # KK, _ = Kernel_Fermi(
+            # KK, _ = _kernel_fermi(
             #     structure,
             #     structure.mu0,
             #     structure.Te,
@@ -320,7 +320,7 @@ class MDXL:
             # self.K0Res = KK @ Res
         elif self.NoRank:
             self.K0Res = -dftorch_params["SCF_ALPHA"] * Res
-        else:  # Preconditioned Low-Rank Krylov SCF acceleration
+        else:  # Preconditioned Low-Rank Krylov _scf acceleration
             self.K0Res = kernel_update_lr(
                 structure.RX,
                 structure.RY,
@@ -781,7 +781,7 @@ class MDXLOS(MDXL):
         Res = structure.q_spin_sr - self.n
         if md_step % 100000 == 0 and self.do_full_kernel:
             1
-            # KK, _ = Kernel_Fermi(
+            # KK, _ = _kernel_fermi(
             #     structure,
             #     structure.mu0,
             #     structure.Te,
@@ -796,7 +796,7 @@ class MDXLOS(MDXL):
             # self.K0Res = KK @ Res
         elif self.NoRank:
             self.K0Res = -dftorch_params["SCF_ALPHA"] * Res
-        else:  # Preconditioned Low-Rank Krylov SCF acceleration
+        else:  # Preconditioned Low-Rank Krylov _scf acceleration
             self.K0Res = kernel_update_lr_os(
                 structure.RX,
                 structure.RY,
@@ -1248,7 +1248,7 @@ class MDXLBatch:
         Res = structure.q - self.n
         if md_step % 10000 == 0 and self.do_full_kernel:
             1
-            # KK, _ = Kernel_Fermi(
+            # KK, _ = _kernel_fermi(
             #     structure,
             #     structure.mu0,
             #     structure.Te,
@@ -1263,7 +1263,7 @@ class MDXLBatch:
             # self.K0Res = KK @ Res
         elif self.NoRank:
             self.K0Res = -dftorch_params["SCF_ALPHA"] * Res
-        else:  # Preconditioned Low-Rank Krylov SCF acceleration
+        else:  # Preconditioned Low-Rank Krylov _scf acceleration
             self.K0Res = kernel_update_lr_batch(
                 structure.Nats,
                 self.Hubbard_U_gathered,

@@ -2,7 +2,7 @@ import torch
 import time
 
 
-def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
+def _dm_fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
     """
     Computes the finite-temperature density matrix using Recursive Fermi Operator Expansion.
 
@@ -18,7 +18,7 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         mu_0 (float or None): Initial guess for chemical potential. If None, estimated from eigenvalues.
         m (int): Depth of the recursive expansion. Higher values increase accuracy.
         eps (float): Convergence threshold for occupation error.
-        MaxIt (int): Maximum number of SCF iterations to adjust the chemical potential.
+        MaxIt (int): Maximum number of _scf iterations to adjust the chemical potential.
 
     Returns:
         P0 (torch.Tensor): Finite-temperature density matrix (N x N).
@@ -68,7 +68,7 @@ def DM_Fermi(H0, T, nocc, mu_0, m, eps, MaxIt, debug=False):
         Cnt += 1
     if Cnt == MaxIt:
         print(
-            "Warning: DM_Fermi did not converge in {} iterations, occ error = {}".format(
+            "Warning: _dm_fermi did not converge in {} iterations, occ error = {}".format(
                 MaxIt, OccErr
             )
         )

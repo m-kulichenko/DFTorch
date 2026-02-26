@@ -16,14 +16,14 @@ os.environ["TORCHDYNAMO_DISABLE"] = "1"  # hard-disable capture
 
 import numpy as np
 
-from dftorch.SCF import SCFx, SCFx_batch
+from dftorch._scf import SCFx, SCFx_batch
 from dftorch.Constants import Constants
 from dftorch.Structure import Structure, StructureBatch
 from dftorch.MD import MDXL, MDXLBatch, MDXLOS
 from dftorch.ESDriver import ESDriver, ESDriverBatch
 
 from sedacs.graph import get_initial_graph
-from dftorch.Tools import calculate_dist_dips
+from dftorch._tools import calculate_dist_dips
 
 from sedacs.graph_partition import (
     get_coreHaloIndices,
@@ -38,7 +38,7 @@ from dftorch.ewald_pme import (
     ewald_energy,
 )
 from dftorch.ewald_pme.neighbor_list import NeighborState
-from dftorch.nearestneighborlist import vectorized_nearestneighborlist
+from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 
 ### Configure torch and torch.compile ###
 # Silence warnings and module logs
@@ -122,13 +122,13 @@ if __name__ == "__main__":
         "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
         "cutoff": 12.0,  # Coulomb cutoff
         "PME_order": 4,  # Ignored for FULL coulomb method
-        "SCF_MAX_ITER": 100,  # Maximum number of SCF iterations
-        "SCF_TOL": 1e-6,  # SCF convergence tolerance on density matrix
+        "SCF_MAX_ITER": 100,  # Maximum number of _scf iterations
+        "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
         "SCF_ALPHA": 0.1,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
         "KRYLOV_MAXRANK": 20,  # Maximum Krylov subspace rank
-        "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in SCF
-        "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD SCF
-        "KRYLOV_START": 10,  # Number of initial SCF iterations before starting Krylov acceleration
+        "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in _scf
+        "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD _scf
+        "KRYLOV_START": 10,  # Number of initial _scf iterations before starting Krylov acceleration
     }
     # device = 'cuda' if torch.cuda.is_available() else 'cpu'
     device = "cpu"

@@ -1,8 +1,8 @@
 import torch
 import numpy as np
-from .Elements import symbol_to_number, label, atomic_num, mass
-from .io import read_xyz
-from .Tools import load_spinw_to_matrix
+from ._elements import symbol_to_number, label, atomic_num, mass
+from ._io import read_xyz
+from ._tools import load_spinw_to_matrix
 
 
 class Constants(torch.nn.Module):
@@ -63,7 +63,6 @@ class Constants(torch.nn.Module):
             w_shell = load_spinw_to_matrix(skfpath + "spinw.txt", device=TYPE.device)
             self.w_shell = torch.nn.Parameter(w_shell, requires_grad=False)
             w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
-            print(w_atom.dtype, TYPE.dtype)
             w_atom[TYPE] = self.w_shell[
                 TYPE, MAX_ANG_OCC[TYPE] - 1, MAX_ANG_OCC[TYPE] - 1
             ]

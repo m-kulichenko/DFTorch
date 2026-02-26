@@ -1,18 +1,18 @@
 import torch
 from ._h0ands import H0_and_S_vectorized, H0_and_S_vectorized_batch
-from .RepulsiveSpline import get_repulsion_energy, get_repulsion_energy_batch
-from .nearestneighborlist import (
+from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch
+from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,
 )
-from .Tools import fractional_matrix_power_symm
-from .SCF import scf_x_os, SCFx, SCFx_batch
-from .Energy import Energy
-from .Forces import Forces, forces_spin, Forces_PME
-from .ForcesBatch import forces_batch
-from .CoulombMatrix import CoulombMatrix_vectorized
-from dftorch.CoulombMatrixBatch import CoulombMatrix_vectorized_batch
-from dftorch.Spin import get_spin_energy, get_h_spin
+from ._tools import fractional_matrix_power_symm
+from ._scf import scf_x_os, SCFx, SCFx_batch
+from ._energy import Energy
+from ._forces import Forces, forces_spin, Forces_PME
+from ._forces_batch import forces_batch
+from ._coulomb_matrix import CoulombMatrix_vectorized
+from dftorch._coulomb_matrix_batch import CoulombMatrix_vectorized_batch
+from dftorch._spin import get_spin_energy, get_h_spin
 
 
 import math
@@ -342,8 +342,8 @@ class ESDriver(torch.nn.Module):
         with torch.no_grad():
             if (
                 self.dftorch_params["coul_method"] == "PME"
-            ):  # f_coul was calculated in SCF via calculate_PME_ewald
-                # structure.f_coul was calculated in SCF via calculate_PME_ewald
+            ):  # f_coul was calculated in _scf via calculate_PME_ewald
+                # structure.f_coul was calculated in _scf via calculate_PME_ewald
                 (
                     f_tot,
                     _,
