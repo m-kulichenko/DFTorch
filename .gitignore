@@ -11,6 +11,7 @@ experiments/*.ipynb
 !experiments/1_tutorial.ipynb
 **/.ipynb_checkpoints/
 personal_github
+/experiments/sk_orig/ptbp/complete_set/
 
 .pytest_cache/
 .mypy_cache/
