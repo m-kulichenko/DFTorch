@@ -33,9 +33,28 @@ pip install .
 
 ## Usage
 
-Import modules from DFTorch after installation:
+See `experiments/1_tutorial.ipynb` for examples.
 
-see /experiments/1_tutorial.ipynb for examples.
+### Public API
+
+Supported public imports:
+
+```python
+from dftorch import (
+    Constants,
+    Structure,
+    StructureBatch,
+    ESDriver,
+    ESDriverBatch,
+    MDXL,
+    MDXLBatch,
+    MDXLOS,
+)
+```
+
+All other modules are internal implementation details and may change.
+
+This folder contains legacy code kept for reference.
 
 ## Authors
  M. Kulichenko, A.M.N. Niklasson
