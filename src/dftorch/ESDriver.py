@@ -1,5 +1,5 @@
 import torch
-from .H0andS import H0_and_S_vectorized, H0_and_S_vectorized_batch
+from ._h0ands import H0_and_S_vectorized, H0_and_S_vectorized_batch
 from .RepulsiveSpline import get_repulsion_energy, get_repulsion_energy_batch
 from .nearestneighborlist import (
     vectorized_nearestneighborlist,
@@ -704,3 +704,6 @@ class ESDriverBatch(torch.nn.Module):
                     const,
                     structure.TYPE,
                 )
+
+
+__all__ = ["ESDriver", "ESDriverBatch"]

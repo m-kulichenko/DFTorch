@@ -1010,3 +1010,6 @@ class ConstantsTest(torch.nn.Module):
 
     def forward(self):
         pass
+
+
+__all__ = ["Constants"]

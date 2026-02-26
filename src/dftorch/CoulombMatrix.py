@@ -118,7 +118,7 @@ def Ewald_Real_Space_vectorized(
     Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
 ):
     """
-    This one is vectorized in a fashion of SlaterKosterPair.py.
+    This one is vectorized in a fashion of _slater_koster_pair.py.
     Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its
     derivatives using a fully vectorized implementation with neighbor lists.
 
@@ -434,7 +434,7 @@ def Ewald_Real_Space_vectorized_sr(
     structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA
 ):
     """
-    Shell-resolved Coulomb matrix. This one is vectorized in a fashion of SlaterKosterPair.py.
+    Shell-resolved Coulomb matrix. This one is vectorized in a fashion of _slater_koster_pair.py.
     Computes the real-space component of the Ewald-summed Coulomb interaction matrix and its
     derivatives using a fully vectorized implementation with neighbor lists.
 

@@ -1614,3 +1614,6 @@ def initialize_velocities_batch(
                 V = V * scale.unsqueeze(-1).unsqueeze(-1)
 
     return V[:, :, 0].contiguous(), V[:, :, 1].contiguous(), V[:, :, 2].contiguous()
+
+
+__all__ = ["MDXL", "MDXLBatch", "MDXLOS"]

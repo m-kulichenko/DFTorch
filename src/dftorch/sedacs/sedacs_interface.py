@@ -9,7 +9,7 @@ from dftorch.Tools import (
     ordered_pairs_from_TYPE,
 )
 from dftorch.Structure import Structure
-from dftorch.H0andS import H0_and_S_vectorized
+from dftorch._h0ands import H0_and_S_vectorized
 
 from dftorch.ewald_pme import calculate_PME_ewald
 

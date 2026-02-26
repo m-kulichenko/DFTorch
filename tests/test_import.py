@@ -24,9 +24,9 @@ def test_import_key_modules():
         DM_Fermi,
         Energy,
         Forces,
-        H0andS,
+        _h0ands,
         SCF,
-        SlaterKosterPair,
+        _slater_koster_pair,
         Tools,
         nearestneighborlist,
     )
@@ -114,7 +114,7 @@ def test_energy_smoke_import_and_call(device):
     from dftorch.ESDriver import ESDriver
 
     dftorch_params = {
-        "coul_method": "FULL",  # 'FULL' for full coulomb matrix, 'PME' for PME method
+        "coul_method": "PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
         "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
         "cutoff": 10.0,  # Coulomb cutoff
         "PME_order": 4,  # Ignored for FULL coulomb method

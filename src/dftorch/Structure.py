@@ -444,3 +444,6 @@ class StructureBatch(torch.nn.Module):
             self.has_d,
         )
         self.D0 = 0.5 * self.D0
+
+
+__all__ = ["Structure", "StructureBatch"]
