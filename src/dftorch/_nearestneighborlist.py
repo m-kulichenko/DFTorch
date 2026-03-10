@@ -184,7 +184,6 @@ def vectorized_nearestneighborlist(
     nnRz[i_idx_sorted, local_idx] = neighbor_pos[:, 2]
     # nnType[i_idx_sorted, local_idx] = j_idx_sorted
     nnType[i_idx_sorted, local_idx] = j_idx
-
     nnStruct[i_idx_sorted, local_idx] = j_idx
     nrnnStruct = torch.bincount(i_idx_sorted, minlength=N)
 

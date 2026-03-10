@@ -91,9 +91,11 @@ def coulomb_matrix_vectorized(
     dR_dxyz = Rab / dR.unsqueeze(-1)
     # dist_mask = (dR <= COULCUT)*(dR > 1e-12)
 
+    use_ewald = LBox is not None
+
     ##################
     CC_real, dCC_dxyz_real = ewald_real_space_vectorized(
-        Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA
+        Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA, use_ewald
     )
     ##################
 
@@ -127,6 +129,7 @@ def ewald_real_space_vectorized(
     neighbor_I: torch.Tensor,
     neighbor_J: torch.Tensor,
     CALPHA: float,
+    use_ewald: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Real-space Ewald contribution using a neighbor list (vectorized).
 
@@ -173,9 +176,18 @@ def ewald_real_space_vectorized(
     Ti = TFACT * Hubbard_U[neighbor_I]
     Tj = TFACT * Hubbard_U[neighbor_J]
     CC_real = torch.zeros((Nats * Nats), device=dR.device, dtype=dR.dtype)
-    CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
-    tmp1 = CA.clone()
-    dtmp1 = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI) / dR_mskd
+
+    if use_ewald:
+        CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
+        dCA = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI) / dR_mskd
+        tmp1 = CA.clone()
+        dtmp1 = dCA.clone()
+
+    else:
+        CA = 1.0 / dR_mskd
+        dCA = -1.0 / (dR_mskd**2)
+        tmp1 = CA.clone()
+        dtmp1 = dCA.clone()
 
     mask_same_elem = TYPE[neighbor_I] == TYPE[neighbor_J]
     if mask_same_elem.any():

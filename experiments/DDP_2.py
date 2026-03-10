@@ -1,3 +1,4 @@
+# ruff: noqa
 import os
 import argparse
 import time
@@ -7,28 +8,23 @@ import torch.distributed as dist
 # import warnings
 import logging
 
+import sys
+
+proxya_path = "/home/maxim/Projects/SEDACS_github/sedacs/src/"
+# sys.path.append(proxya_path)
+sys.path.insert(1, proxya_path)
+
 # to disable torchdynamo completely. Faster for smaller systems and single-point calculations.
 os.environ["TORCHDYNAMO_DISABLE"] = "1"  # hard-disable capture
 os.environ["TORCH_COMPILE_DISABLE"] = "1"  # disables torch.compile / Inductor globally
 
 
-from dftorch.Constants import Constants
-from dftorch.Structure import Structure
+from dftorch import Constants, Structure
 
-from sedacs.graph import (
-    get_initial_graph,
-)
+from sedacs.graph import get_initial_graph
 from sedacs.graph_partition import get_coreHaloIndices, graph_partition
-
-from dftorch._tools import (
-    calculate_dist_dips,
-)
-
-# from sedacs.ewald import calculate_PME_ewald, init_PME_data, calculate_alpha_and_num_grids, ewald_energy
-
+from dftorch._tools import calculate_dist_dips
 from dftorch.ewald_pme.neighbor_list import NeighborState
-
-
 from dftorch.sedacs import pack_lol_int, unpack_lol_int, bcast_1d_int, scf, MDXL_Graph
 
 
@@ -46,10 +42,10 @@ torch._dynamo.config.capture_dynamic_output_shape_ops = True
 # default data type
 torch.set_default_dtype(torch.float64)
 
-# Environment variables set by torch.distributed.launch
-LOCAL_RANK = int(os.environ["LOCAL_RANK"])
-WORLD_SIZE = int(os.environ["WORLD_SIZE"])
-WORLD_RANK = int(os.environ["RANK"])
+# # Environment variables set by torch.distributed.launch
+# LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+# WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+# WORLD_RANK = int(os.environ["RANK"])
 
 MAX_DEG = 600
 GTHRESH = 0.0002
@@ -91,7 +87,7 @@ def prepare_structure(device):
         filename,
         #'/home/maxim/Projects/DFTB/DFTorch/tests/sk_orig/ptbp/complete_set',
         #'C:\\000_MyFiles\\Programs\\DFTorch\\tests\\sk_orig\\ptbp\\complete_set\\',
-        "/home/maxim/Projects/DFTB/DFTorch/tests/sk_orig/mio-1-1/mio-1-1/",
+        "/home/maxim/Projects/DFTB/DFTorch/experiments/sk_orig/mio-1-1/mio-1-1/",
         magnetic_hubbard_ldep=False,
     ).to(device)
     structure = Structure(filename, LBox, const, charge=0, Te=5000.0, device=device)
@@ -101,6 +97,11 @@ def prepare_structure(device):
 
 
 def init_processes(backend):
+    # Environment variables set by torch.distributed.launch
+    LOCAL_RANK = int(os.environ["LOCAL_RANK"])
+    WORLD_SIZE = int(os.environ["WORLD_SIZE"])
+    WORLD_RANK = int(os.environ["RANK"])
+
     dist.init_process_group(backend, rank=WORLD_RANK, world_size=WORLD_SIZE)
     # choose device for collectives
     if backend == "nccl":

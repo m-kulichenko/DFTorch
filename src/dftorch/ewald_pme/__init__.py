@@ -1,5 +1,7 @@
 # ruff: noqa
 import logging
+import torch
+
 from . import ewald_torch as torch_impl
 from .util import (
     calculate_num_kvecs_dynamic,
@@ -9,7 +11,6 @@ from .util import (
     CONV_FACTOR,
     calculate_alpha_and_num_grids,
 )
-import torch
 
 # Initialize the backend variable
 is_triton_available = False

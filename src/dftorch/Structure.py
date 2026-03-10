@@ -75,26 +75,50 @@ class Structure(torch.nn.Module):
         if species is None or coordinates is None:
             species, coordinates = read_xyz([file], sort=False)  # Input coordinate file
 
-        self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
+        # self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
 
-        self.RX = torch.tensor(
-            coordinates[0, :, 0],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
+        if isinstance(coordinates, torch.Tensor):
+            coordinates = coordinates.to(device=device, dtype=torch.get_default_dtype())
+        else:
+            coordinates = torch.as_tensor(
+                coordinates, device=device, dtype=torch.get_default_dtype()
+            )
+
+        if isinstance(species, torch.Tensor):
+            species = species.to(device=device, dtype=torch.int64)
+        else:
+            species = torch.as_tensor(species, device=device, dtype=torch.int64)
+
+        self.TYPE = species[0]
+
+        self.RX = (
+            coordinates[0, :, 0].clone().detach().requires_grad_(self.req_grad_xyz)
         )
-        self.RY = torch.tensor(
-            coordinates[0, :, 1],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
+        self.RY = (
+            coordinates[0, :, 1].clone().detach().requires_grad_(self.req_grad_xyz)
         )
-        self.RZ = torch.tensor(
-            coordinates[0, :, 2],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
+        self.RZ = (
+            coordinates[0, :, 2].clone().detach().requires_grad_(self.req_grad_xyz)
         )
+
+        # self.RX = torch.tensor(
+        #     coordinates[0, :, 0],
+        #     device=device,
+        #     dtype=torch.get_default_dtype(),
+        #     requires_grad=self.req_grad_xyz,
+        # )
+        # self.RY = torch.tensor(
+        #     coordinates[0, :, 1],
+        #     device=device,
+        #     dtype=torch.get_default_dtype(),
+        #     requires_grad=self.req_grad_xyz,
+        # )
+        # self.RZ = torch.tensor(
+        #     coordinates[0, :, 2],
+        #     device=device,
+        #     dtype=torch.get_default_dtype(),
+        #     requires_grad=self.req_grad_xyz,
+        # )
 
         if LBox is None:
             self.LBox = None

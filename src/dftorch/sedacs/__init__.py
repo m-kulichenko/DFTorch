@@ -1,7 +1,6 @@
 "DFTorch ↔ SEDACS integration utilities."
 
 from .sedacs_interface import (
-    get_ch,
     pack_lol_int,
     unpack_lol_int,
     bcast_1d_int,
@@ -18,10 +17,9 @@ from .sedacs_interface import (
 
 from .MD import MDXL_Graph
 
-from ._scf import scf
+from .SCF import scf
 
 __all__ = [
-    "get_ch",
     "pack_lol_int",
     "unpack_lol_int",
     "bcast_1d_int",

@@ -6,6 +6,7 @@ from ._tools import fractional_matrix_power_symm
 from ._dm_fermi import dm_fermi
 from ._dm_fermi_x import (
     dm_fermi_x,
+    dm_fermi_x_os,
     dm_fermi_x_os_shared,
     dm_fermi_x_batch,
 )
@@ -464,15 +465,29 @@ def scf_x_os(
         # Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
         # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
         broken_symmetry = dftorch_params.get("BROKEN_SYM", False)
-        Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
-            Z.T @ H0 @ Z,
-            Te,
-            Nocc,
-            mu_0=None,
-            eps=1e-9,
-            MaxIt=50,
-            broken_symmetry=broken_symmetry,
-        )
+        shared_mu0 = dftorch_params.get("SHARED_MU", False)
+
+        if shared_mu0:
+            Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
+                Z.T @ H0 @ Z,
+                Te,
+                Nocc,
+                mu_0=None,
+                eps=1e-9,
+                MaxIt=50,
+                broken_symmetry=broken_symmetry,
+            )
+        else:
+            Dorth, Q, e, f, mu0 = dm_fermi_x_os(
+                Z.T @ H0 @ Z,
+                Te,
+                Nocc,
+                mu_0=None,
+                eps=1e-9,
+                MaxIt=50,
+                broken_symmetry=broken_symmetry,
+            )
+
         # print(mu0, mu0_)
         D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
         DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
@@ -507,10 +522,10 @@ def scf_x_os(
         )  # shell-resolved. Initial mixing coefficient for linear mixing
         # KK0 = KK*torch.eye(Nats, device=H0.device)
 
-        ResNorm = torch.tensor([2.0], device=device)
-        dEc = torch.tensor([1000.0], device=device)
+        ResNorm = torch.tensor(2.0, device=device)
+        dEc = torch.tensor(1000.0, device=device)
         it = 0
-        Ecoul = torch.tensor([0.0], device=device)
+        Ecoul = torch.tensor(0.0, device=device)
 
         print("\nStarting cycle")
         while (
@@ -559,6 +574,7 @@ def scf_x_os(
                 atom_ids,
                 atom_ids_sr,
                 el_per_shell,
+                dftorch_params.get("SHARED_MU", False),
             )
 
             q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))

@@ -770,6 +770,7 @@ class MDXLOS(MDXL):
             self.atom_ids,
             self.atom_ids_sr,
             structure.el_per_shell,
+            dftorch_params.get("SHARED_MU", False),
         )
 
         net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]

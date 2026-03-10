@@ -126,6 +126,7 @@ def calc_q_os(
     atom_ids: torch.Tensor,
     atom_ids_sr: torch.Tensor,
     el_per_shell: torch.Tensor,
+    shared_mu: bool = False,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -152,10 +153,14 @@ def calc_q_os(
         * torch.tensor([[[1]], [[-1]]], device=H_spin.device)
     )
 
-    # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
-    Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
-        Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
-    )
+    if shared_mu:
+        Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
+            Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
+        )
+    else:
+        Dorth, Q, e, f, mu0 = dm_fermi_x_os(
+            Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
+        )
     # print(mu0, mu0_)
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
