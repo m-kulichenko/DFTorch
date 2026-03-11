@@ -544,9 +544,11 @@ def kernel_global(
 
             D1 = ch_structure.Z @ D1 @ ch_structure.Z.T
             D1S = 2 * torch.diag(D1 @ ch_structure.S)
+
             # dq (atomic) from AO response
             dq = torch.zeros(ch_structure.Nats, device=device)
             dq.scatter_add_(0, ch_structure.atom_ids, D1S)
+            del D1, D1S
             #### end calc_dq
 
             # Here we compute the charges response (q1) from P1 and we store it on
@@ -637,7 +639,7 @@ def kernel_global(
 
             # Residual norm in the subspace
             Fel = torch.norm(F_small @ Y - K0Res_global)
-            print("  Krylov rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
+            print("  Krylov rank: {:}, Fel = {:.7f}".format(krylov_rank, Fel.item()))
         else:
             Fel = torch.tensor(0.0, device=device)  # scalar, same shape as rank 0
         dist.broadcast(Fel, 0)

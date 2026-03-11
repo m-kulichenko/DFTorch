@@ -172,7 +172,7 @@ def scf(
                 "Rank",
                 dist.get_rank(),
                 "has core and core-halo size:",
-                core_size[i],
+                core_size[i].item(),
                 len(ch[i]),
             )
 
@@ -203,7 +203,8 @@ def scf(
         if dist.get_rank() == 0:
             scf_error = torch.norm(q_global - q_global_old)
             print("_scf error:", scf_error.item())
-        dist.barrier()
+        # dist.barrier()
+        dist.barrier(device_ids=[torch.cuda.current_device()])  # ← one word change
         dist.broadcast(scf_error, 0)
 
         graphOnRank_tensor = torch.tensor(

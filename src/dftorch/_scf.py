@@ -7,7 +7,6 @@ from ._dm_fermi import dm_fermi
 from ._dm_fermi_x import (
     dm_fermi_x,
     dm_fermi_x_os,
-    dm_fermi_x_os_shared,
     dm_fermi_x_batch,
 )
 
@@ -465,28 +464,28 @@ def scf_x_os(
         # Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
         # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
         broken_symmetry = dftorch_params.get("BROKEN_SYM", False)
-        shared_mu0 = dftorch_params.get("SHARED_MU", False)
+        # shared_mu0 = dftorch_params.get("SHARED_MU", False)
 
-        if shared_mu0:
-            Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
-                Z.T @ H0 @ Z,
-                Te,
-                Nocc,
-                mu_0=None,
-                eps=1e-9,
-                MaxIt=50,
-                broken_symmetry=broken_symmetry,
-            )
-        else:
-            Dorth, Q, e, f, mu0 = dm_fermi_x_os(
-                Z.T @ H0 @ Z,
-                Te,
-                Nocc,
-                mu_0=None,
-                eps=1e-9,
-                MaxIt=50,
-                broken_symmetry=broken_symmetry,
-            )
+        # if shared_mu0:
+        #     Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
+        #         Z.T @ H0 @ Z,
+        #         Te,
+        #         Nocc,
+        #         mu_0=None,
+        #         eps=1e-9,
+        #         MaxIt=50,
+        #         broken_symmetry=False,
+        #     )
+        # else:
+        Dorth, Q, e, f, mu0 = dm_fermi_x_os(
+            Z.T @ H0 @ Z,
+            Te,
+            Nocc,
+            mu_0=None,
+            eps=1e-9,
+            MaxIt=50,
+            broken_symmetry=broken_symmetry,
+        )
 
         # print(mu0, mu0_)
         D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -497,15 +496,18 @@ def scf_x_os(
             1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS
         )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
 
-        # elec = 0.1
-        # q_spin_sr[0,1] += elec
-        # q_spin_sr[0,2] -= elec
+        # break spin symmetry on q_spin_sr, not on density matrix
+        # if broken_symmetry:
+        #     # shift spin density: add electrons to alpha, remove from beta
+        #     # on shells belonging to atom with highest Znuc (most polarizable)
+        #     most_polarizable_atom = Znuc.argmax()
+        #     atom_shells = (shell_to_atom == most_polarizable_atom).nonzero().squeeze()
+        #     delta = 0.01
+        #     q_spin_sr[0, atom_shells] += delta   # alpha gets more
+        #     q_spin_sr[1, atom_shells] -= delta   # beta gets less
+        #     print(f"  Broken symmetry: perturbed shells {atom_shells.tolist()} "
+        #           f"on atom {most_polarizable_atom.item()} (Znuc={Znuc[most_polarizable_atom].item()})")
 
-        # q_spin_sr[1,1] -= elec
-
-        # q_spin_sr[1,2] += elec
-
-        # q_tot_sr = q_spin_sr.sum(dim=0)
         net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
 
         q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))

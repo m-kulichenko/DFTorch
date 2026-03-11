@@ -548,6 +548,8 @@ def kernel_update_lr_os(
     K0Res : (Nats,) torch.Tensor
         Preconditioned low-rank correction step in charge space.
     """
+    Nshells = n_shells_per_atom.sum().item()
+
     vi = torch.zeros(
         2, n_shells_per_atom.sum(), dftorch_params["KRYLOV_MAXRANK"], device=S.device
     )
@@ -564,28 +566,28 @@ def kernel_update_lr_os(
     while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
         # Normalize current direction
         norm_dr = torch.norm(dr)
-        if (norm_dr < 1e-9).any():
+        if norm_dr < 1e-9:
             print("zero norm_dr")
             break
 
         vi[:, :, krylov_rank] = dr / norm_dr.unsqueeze(-1)
 
-        # Modified Gram-Schmidt against previous vi
+        # FIX: Gram-Schmidt in full (2*Nshells) space
         if krylov_rank > 0:
-            Vprev = vi[:, :, :krylov_rank]  # (Nats, krylov_rank)
-            coeffs = torch.bmm(
-                Vprev.transpose(-1, -2), vi[:, :, krylov_rank].unsqueeze(-1)
-            )  # (B_active, krylov_rank, 1)
-            vi[:, :, krylov_rank] = vi[:, :, krylov_rank] - torch.bmm(
-                Vprev, coeffs
-            ).squeeze(-1)
+            Vprev = vi[:, :, :krylov_rank]  # (2, Nshells, rank)
+            # dot product over BOTH dimensions 0 and 1 (full vector)
+            # vi_flat: (2*Nshells,), Vprev_flat: (2*Nshells, rank)
+            vi_flat = vi[:, :, krylov_rank].reshape(-1)  # (2*Nshells,)
+            Vprev_flat = Vprev.reshape(-1, krylov_rank)  # (2*Nshells, rank)
+            coeffs = Vprev_flat.T @ vi_flat  # (rank,)
+            correction = (Vprev_flat @ coeffs).reshape(2, Nshells)  # (2, Nshells)
+            vi[:, :, krylov_rank] = vi[:, :, krylov_rank] - correction
 
-        norm_vi = torch.norm(vi[:, :, krylov_rank])
-        if (norm_vi < 1e-9).any():
-            print("zero norm_vi")
+        norm_vi = torch.norm(vi[:, :, krylov_rank])  # scalar over full space
+        if norm_vi < 1e-9:
             break
-        vi[:, :, krylov_rank] = vi[:, :, krylov_rank] / norm_vi.unsqueeze(-1)
-        v = vi[:, :, krylov_rank].clone()  # current search direction
+        vi[:, :, krylov_rank] = vi[:, :, krylov_rank] / norm_vi
+        v = vi[:, :, krylov_rank].clone()
 
         v_atomic = torch.zeros_like(RX)
         shell_to_atom = torch.repeat_interleave(
@@ -641,35 +643,29 @@ def kernel_update_lr_os(
         # New residual (df/dlambda), preconditioned
         dr = dq - v
         dr = torch.bmm(KK0, dr.unsqueeze(-1)).squeeze(-1)
-
-        # Store fi column
         fi[:, :, krylov_rank] = dr
 
-        # Small overlap O and RHS (vectorized)
+        # FIX: O and rhs in full (2*Nshells) space
         rank_m = krylov_rank + 1
-        F_small = fi[:, :, :rank_m]  # (Nats, r)
-        O = torch.bmm(F_small.transpose(-1, -2), F_small)  # noqa: E741
-        rhs = torch.bmm(F_small.transpose(-1, -2), K0Res.unsqueeze(-1)).squeeze(
-            -1
-        )  # (B, r)
+        F_small = fi[:, :, :rank_m]  # (2, Nshells, rank)
+        F_flat = F_small.reshape(-1, rank_m)  # (2*Nshells, rank)
+        K0Res_flat = K0Res.reshape(-1)  # (2*Nshells,)
 
-        # Solve O Y = rhs (stable) instead of explicit inverse
-        Y = torch.linalg.solve(O, rhs)  # (r,)
+        O = F_flat.T @ F_flat  # (rank, rank) # noqa: E741
+        rhs = F_flat.T @ K0Res_flat  # (rank,)
+        Y = torch.linalg.solve(O, rhs)  # (rank,)
 
-        # Residual norm in the subspace
-        proj = torch.bmm(F_small, Y.unsqueeze(-1)).squeeze(-1)
-        Fel = torch.norm(proj - K0Res)
+        Fel = torch.norm(F_flat @ Y - K0Res_flat)
         print("  rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
         krylov_rank += 1
 
-    # If no Krylov steps were taken, return preconditioned residual
     if krylov_rank == 0:
         return K0Res
 
-    # Combine correction: K0Res := V Y
-    step = torch.bmm(vi[:, :, :rank_m], Y.unsqueeze(-1)).squeeze(-1)
-    K0Res = step  # (Nats,)
-    return K0Res
+    rank_m = krylov_rank
+    Vi_flat = vi[:, :, :rank_m].reshape(-1, rank_m)  # (2*Nshells, rank)
+    step = (Vi_flat @ Y).reshape(2, Nshells)  # (2, Nshells) ✓
+    return step
 
 
 def kernel_update_lr_batch(

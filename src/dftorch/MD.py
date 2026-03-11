@@ -627,7 +627,7 @@ class MDXLOS(MDXL):
         )
 
         if md_step % dump_interval == 0:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}\n"
+            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, NS = {structure.net_spin_sr.sum().item():.4f}, Res = {ResErr:.6f}\n"
             write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
         self.VX = (
             self.VX
@@ -773,7 +773,7 @@ class MDXLOS(MDXL):
             dftorch_params.get("SHARED_MU", False),
         )
 
-        net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
+        structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
         q_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
         q_spin_atom.scatter_add_(
             1, self.shell_to_atom.unsqueeze(0).expand(2, -1), structure.q_spin_sr
@@ -848,7 +848,7 @@ class MDXLOS(MDXL):
 
         structure.e_spin = get_spin_energy_shadow(
             structure.TYPE,
-            net_spin_sr,
+            structure.net_spin_sr,
             n_net_spin_sr,
             self.const.w,
             structure.n_shells_per_atom,
@@ -1002,11 +1002,12 @@ class MDXLOS(MDXL):
         print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
 
         print(
-            "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}, t = {:.1f} s".format(
+            "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f},  NS = {:.4f}, ResErr = {:.6f}, t = {:.1f} s".format(
                 Energ,
                 self.EPOT.item(),
                 self.EKIN.item(),
                 Temperature.item(),
+                structure.net_spin_sr.sum().item(),
                 ResErr.item(),
                 time.perf_counter() - start_time,
             )
