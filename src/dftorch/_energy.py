@@ -301,7 +301,6 @@ def energy_shadow(
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
     factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
-    print(factor)
     E_entropy = factor * Te * S_ent
 
     # Total energy
