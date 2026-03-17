@@ -234,7 +234,7 @@ class MDXL:
         )
 
         if md_step % dump_interval == 0:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV\n"
+            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV"
             write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
 
             write_pdb_frame(
@@ -720,7 +720,7 @@ class MDXLOS(MDXL):
         )
 
         if md_step % dump_interval == 0:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, NS = {structure.net_spin_sr.sum().item():.4f}, Res = {ResErr:.6f}\n"
+            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, NS = {structure.net_spin_sr.sum().item():.4f}, Res = {ResErr:.6f}"
             write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
         self.VX = (
             self.VX

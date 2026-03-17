@@ -88,9 +88,8 @@ def energy(
 
     # Band energy
     if Rx.dim() == 1:  # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
         D = D - D0_diag.expand(2, -1, -1)
-        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+        Eband0 = 1 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
     else:  # batched
         Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
 
@@ -248,9 +247,8 @@ def energy_shadow(
 
     # Band energy
     if Rx.dim() == 1:  # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
         D = D - D0_diag.expand(2, -1, -1)
-        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+        Eband0 = 1 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
     else:  # batched
         Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
 
@@ -303,7 +301,7 @@ def energy_shadow(
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
     factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
-    print(f.dim())
+    print(factor)
     E_entropy = factor * Te * S_ent
 
     # Total energy
