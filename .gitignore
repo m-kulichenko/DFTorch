@@ -25,3 +25,4 @@ personal_github
 /tests/**/*.pt
 /tests/**/md_trj*.xyz
 *.pdb
+*.xyz
