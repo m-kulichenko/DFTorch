@@ -122,6 +122,7 @@ class ESDriver(torch.nn.Module):
         structure.e_repulsion, structure.dVr = get_repulsion_energy(
             const.R_rep_tensor,
             const.rep_splines_tensor,
+            const.close_exp_tensor,
             structure.TYPE,
             structure.RX,
             structure.RY,
@@ -242,6 +243,7 @@ class ESDriver(torch.nn.Module):
                     structure.TYPE,
                     structure.Te,
                     structure.Hubbard_U,
+                    structure.dU_dq,
                     structure.D0,
                     structure.H0,
                     structure.S,
@@ -249,6 +251,7 @@ class ESDriver(torch.nn.Module):
                     structure.e_field,
                     structure.C,
                     structure.req_grad_xyz,
+                    structure.q_spin_sr,
                 )
 
                 structure.q = structure.q_tot_atom
@@ -300,6 +303,7 @@ class ESDriver(torch.nn.Module):
                     structure.TYPE,
                     structure.Te,
                     structure.Hubbard_U,
+                    structure.dU_dq,
                     structure.D0,
                     structure.H0,
                     structure.S,
@@ -331,6 +335,7 @@ class ESDriver(torch.nn.Module):
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             structure.e_tot = (
@@ -371,6 +376,7 @@ class ESDriver(torch.nn.Module):
                     structure.Nats,
                     const,
                     structure.TYPE,
+                    structure.dU_dq,
                 )
                 structure.f_tot = f_tot + structure.f_coul
             else:
@@ -402,6 +408,7 @@ class ESDriver(torch.nn.Module):
                     structure.Nats,
                     const,
                     structure.TYPE,
+                    structure.dU_dq,
                 )
 
             if self.dftorch_params.get("UNRESTRICTED", False):  # open-shell
@@ -525,6 +532,7 @@ class ESDriverBatch(torch.nn.Module):
         structure.e_repulsion, structure.dVr = get_repulsion_energy_batch(
             const.R_rep_tensor,
             const.rep_splines_tensor,
+            const.close_exp_tensor,
             structure.TYPE,
             structure.RX,
             structure.RY,
@@ -634,6 +642,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.Znuc,
                 structure.Te,
                 structure.Hubbard_U,
+                structure.dU_dq,
                 structure.D0,
                 structure.H0,
                 structure.S,
@@ -663,6 +672,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             structure.e_tot = structure.e_elec_tot + structure.e_repulsion
@@ -703,6 +713,7 @@ class ESDriverBatch(torch.nn.Module):
                     structure.Nats,
                     const,
                     structure.TYPE,
+                    structure.dU_dq,
                 )
 
 

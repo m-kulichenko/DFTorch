@@ -21,6 +21,7 @@ def Forces(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
     verbose: bool = False,
 ):
     """
@@ -72,6 +73,8 @@ def Forces(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy. If None, the DFTB3 correction is not applied.
     verbose : bool, optional
         If True, allows callers to hook in additional logging (currently not
         used inside this routine).
@@ -129,13 +132,27 @@ def Forces(
 
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
+    # Fcoul = q * (q @ dC)
+
+    # ── DFTB3: add Fcoul3 = dU/dq * q^2 * (q @ dC) term ─────────────────
+    # if dU_dq is not None:
+    #     Fcoul = (q + dU_dq * q**2) * (q @ dC)  # equivalent, more efficient
+    # else:
     Fcoul = q * (q @ dC)
+    # ─────────────────────────────────────────────────────────────────────
 
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ q
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot) * 2
+
+    # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
+    if dU_dq is not None:
+        factor = (U * q + CoulPot + 0.5 * dU_dq * q**2) * 2
+    else:
+        factor = (U * q + CoulPot) * 2
+    # ─────────────────────────────────────────────────────────────────────
+
     dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
     FScoul.scatter_add_(
@@ -251,6 +268,7 @@ def Forces_PME(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
     verbose: bool = False,
 ):
     """
@@ -304,6 +322,8 @@ def Forces_PME(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy. If None, the DFTB3 correction is not applied.
     verbose : bool, optional
         If True, allows callers to hook in additional logging (currently not
         used inside this routine).
@@ -371,7 +391,13 @@ def Forces_PME(
     # FScoul
     CoulPot = dq_p1
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot) * 2
+    # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
+    if dU_dq is not None:
+        factor = (U * q + CoulPot + 0.5 * dU_dq * q**2) * 2
+    else:
+        factor = (U * q + CoulPot) * 2
+    # ─────────────────────────────────────────────────────────────────────
+
     dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
     FScoul.scatter_add_(
@@ -449,6 +475,7 @@ def forces_shadow(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
     verbose: bool = False,
 ):
     """
@@ -510,6 +537,8 @@ def forces_shadow(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy.
     verbose : bool, optional
         If True, allows callers to hook in additional logging (currently not
         used inside this routine).
@@ -576,7 +605,13 @@ def forces_shadow(
     # FScoul
     CoulPot = C @ n
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * n + CoulPot) * 2
+    # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
+    if dU_dq is not None:
+        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+    else:
+        factor = (U * n + CoulPot) * 2
+    # ─────────────────────────────────────────────────────────────────────
+
     dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
     FScoul.scatter_add_(
@@ -655,6 +690,7 @@ def forces_shadow_pme(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a “shadow” DFTB-like total energy expression
@@ -712,6 +748,8 @@ def forces_shadow_pme(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy. If None, the DFTB3 correction is not applied.
 
     Returns
     -------
@@ -770,7 +808,13 @@ def forces_shadow_pme(
     # FScoul
     CoulPot = C
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (U * n + CoulPot) * 2
+    # ── DFTB3 shadow PME ──────────────────────────────────────────────────
+    if dU_dq is not None:
+        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+    else:
+        factor = (U * n + CoulPot) * 2
+    # ─────────────────────────────────────────────────────────────────────
+
     dS_times_D = D * dS * factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
     FScoul.scatter_add_(

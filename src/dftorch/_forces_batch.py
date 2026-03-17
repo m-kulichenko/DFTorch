@@ -21,6 +21,7 @@ def forces_batch(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
     verbose: bool = False,
 ):
     """
@@ -72,6 +73,9 @@ def forces_batch(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy. If None, the DFTB3 correction is not applied.
+
     verbose : bool, optional
         If True, allows callers to hook in additional logging (currently not
         used inside this routine).
@@ -140,7 +144,13 @@ def forces_batch(
     # FScoul
     CoulPot = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B, N)
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)
-    factor = (U * q + CoulPot) * 2  # (B, N)
+    # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
+    if dU_dq is not None:
+        factor = (U * q + CoulPot + 0.5 * dU_dq * q**2) * 2
+    else:
+        factor = (U * q + CoulPot) * 2
+    # ─────────────────────────────────────────────────────────────────────
+
     # Map atom-based factor to orbitals
     orbital_factor = factor.gather(1, atom_ids)  # (B, n_orb_total)
     # Build (B,3,n_orb,n_orb) tensor: (D * dS) scaled per row (orbital) by orbital_factor
@@ -223,6 +233,7 @@ def forces_shadow_batch(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    dU_dq: torch.Tensor = None,
     verbose: bool = False,
 ):
     """
@@ -284,6 +295,8 @@ def forces_shadow_batch(
     TYPE : torch.Tensor
         Element type indices for each atom, shape (Nats,). Used to map into
         `const.n_orb`.
+    dU_dq : torch.Tensor, optional
+        Derivative of Hubbard U with respect to charge, shape (Nats,). If provided, it is used to compute the DFTB3 correction terms in both the forces and the energy.
     verbose : bool, optional
         If True, allows callers to hook in additional logging (currently not
         used inside this routine).
@@ -353,6 +366,13 @@ def forces_shadow_batch(
     CoulPot = torch.bmm(C, n.unsqueeze(-1)).squeeze(-1)  # (B, N)
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)
     factor = (U * n + CoulPot) * 2  # (B, N)
+    # ── DFTB3 shadow ──────────────────────────────────────────────────
+    if dU_dq is not None:
+        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+    else:
+        factor = (U * n + CoulPot) * 2  # (B, N)
+    # ─────────────────────────────────────────────────────────────────────
+
     # Map atom-based factor to orbitals
     orbital_factor = factor.gather(1, atom_ids)  # (B, n_orb_total)
     # Build (B,3,n_orb,n_orb) tensor: (D * dS) scaled per row (orbital) by orbital_factor

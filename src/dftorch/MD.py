@@ -18,7 +18,7 @@ import torch
 
 from typing import Any, Tuple, Optional
 import time
-from ._io import write_XYZ_trajectory
+from ._io import write_XYZ_trajectory, write_pdb_frame
 from dftorch._tools import calculate_dist_dips
 
 
@@ -41,6 +41,10 @@ class MDXL:
         self.kappa = 1.82
         self.alpha = 0.018  # Coefficients for modified Verlet integration
 
+        # Langevin thermostat parameters
+        self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
+        self.langevin_enabled = False
+
         self.es_driver = es_driver
         self.temperature_K = temperature_K
         self.n = None
@@ -59,6 +63,58 @@ class MDXL:
         self.Res_array = None
 
         self.cuda_sync = False
+
+    def enable_langevin(self, gamma: float):
+        """
+        Enable Langevin thermostat.
+
+        Parameters
+        ----------
+        gamma : float
+            Friction coefficient in 1/fs. Typical values: 0.001–0.1 1/fs.
+            Higher = stronger coupling to bath, less NVE-like.
+        """
+        self.langevin_gamma = gamma
+        self.langevin_enabled = True
+
+    def _langevin_kick(self, structure, dt):
+        """
+        Apply Langevin friction + random force as a velocity correction.
+        Called once per half-step (splitting scheme).
+
+        The impulse for half-step dt/2:
+          v <- v * c1 + c2 * xi / sqrt(M)
+        where
+          c1 = exp(-gamma * dt/2)
+          c2 = sqrt((1 - c1^2) * kB * T / MVV2KE)
+        """
+        kB_eV = 8.617333262145e-5  # eV/K
+        T = (
+            self.temperature_K.item()
+            if hasattr(self.temperature_K, "item")
+            else float(self.temperature_K)
+        )
+
+        dt_half = 0.5 * dt
+        c1 = torch.exp(
+            torch.tensor(
+                -self.langevin_gamma * dt_half,
+                dtype=structure.RX.dtype,
+                device=structure.RX.device,
+            )
+        )
+        # noise magnitude: sqrt(kB*T / (M * MVV2KE)) * sqrt(1 - c1^2)
+        noise_scale = torch.sqrt(
+            (1.0 - c1**2) * kB_eV * T / (structure.Mnuc * self.MVV2KE)
+        )  # shape (N,)
+
+        xi_x = torch.randn_like(self.VX)
+        xi_y = torch.randn_like(self.VY)
+        xi_z = torch.randn_like(self.VZ)
+
+        self.VX = c1 * self.VX + noise_scale * xi_x
+        self.VY = c1 * self.VY + noise_scale * xi_y
+        self.VZ = c1 * self.VZ + noise_scale * xi_z
 
     def run(
         self,
@@ -96,6 +152,11 @@ class MDXL:
             structure.n_orbitals_per_atom,
         )
         self.Hubbard_U_gathered = structure.Hubbard_U[self.atom_ids]
+        if structure.dU_dq is not None:
+            self.dU_dq_gathered = structure.dU_dq[self.atom_ids]
+        else:
+            self.dU_dq_gathered = None
+
         if dftorch_params["coul_method"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
@@ -175,6 +236,17 @@ class MDXL:
         if md_step % dump_interval == 0:
             comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV\n"
             write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
+
+            write_pdb_frame(
+                traj_filename + ".pdb",
+                structure,
+                structure.LBox,
+                step=md_step,
+                etot=Energ,
+                temp=Temperature,
+                mode="a",
+            )  # 'w' — create fresh file
+
         self.VX = (
             self.VX
             + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
@@ -190,6 +262,11 @@ class MDXL:
             + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
             - self.fric * self.VZ
         )  # -c*V c>0 => Fricition
+
+        # ── Langevin half-kick (before position update) ──────────────────
+        if self.langevin_enabled:
+            self._langevin_kick(structure, dt)
+
         # update positions and translate coordinates if go beyond box. Apply periodic boundary conditions
         if structure.LBox is not None:
             structure.RX = (structure.RX + dt * self.VX) % structure.LBox[0]
@@ -295,6 +372,7 @@ class MDXL:
             structure.Nocc,
             structure.Znuc,
             self.atom_ids,
+            self.dU_dq_gathered,
         )
 
         if self.cuda_sync:
@@ -348,6 +426,7 @@ class MDXL:
                 disps,
                 dists,
                 self.CALPHA,
+                structure.dU_dq,
             )
 
         if self.cuda_sync:
@@ -378,6 +457,7 @@ class MDXL:
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             # no f_coul in PME forces_shadow_pme. Done in calculate_PME_ewald
@@ -409,6 +489,7 @@ class MDXL:
                 structure.Nats,
                 self.const,
                 structure.TYPE,
+                structure.dU_dq,
             )
             structure.f_coul = forces1 * (2 * structure.q / self.n - 1.0)
             structure.f_tot = structure.f_tot + structure.f_coul
@@ -435,6 +516,7 @@ class MDXL:
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             (
@@ -466,6 +548,7 @@ class MDXL:
                 structure.Nats,
                 self.const,
                 structure.TYPE,
+                structure.dU_dq,
             )
 
         structure.e_tot = structure.e_elec_tot + structure.e_repulsion
@@ -486,6 +569,11 @@ class MDXL:
             + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
             - self.fric * self.VZ
         )
+
+        # ── Langevin half-kick (after force update) ──────────────────────
+        if self.langevin_enabled:
+            self._langevin_kick(structure, dt)
+
         if self.cuda_sync:
             torch.cuda.synchronize()
         print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
@@ -550,6 +638,11 @@ class MDXLOS(MDXL):
         )
 
         self.Hubbard_U_gathered = structure.Hubbard_U[self.atom_ids]
+        if structure.dU_dq is not None:
+            self.dU_dq_gathered = structure.dU_dq[self.atom_ids]
+        else:
+            self.dU_dq_gathered = None
+
         if dftorch_params["coul_method"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
@@ -658,21 +751,31 @@ class MDXLOS(MDXL):
             torch.cuda.synchronize()
         tic2_1 = time.perf_counter()
 
-        self.es_driver(structure, self.const, do_scf=False)
-        self.n = (
-            2 * self.n_0
-            - self.n_1
-            - self.kappa * self.K0Res
-            + self.alpha
-            * (
-                self.C0 * self.n_0
-                + self.C1 * self.n_1
-                + self.C2 * self.n_2
-                + self.C3 * self.n_3
-                + self.C4 * self.n_4
-                + self.C5 * self.n_5
+        if ResErr > 0.012:
+            self.es_driver(structure, self.const, do_scf=True)
+            self.n = structure.q_spin_sr.clone()
+            self.n_5 = self.n
+            self.n_4 = self.n
+            self.n_3 = self.n
+            self.n_2 = self.n
+            self.n_1 = self.n
+            self.n_0 = self.n
+        else:
+            self.es_driver(structure, self.const, do_scf=False)
+            self.n = (
+                2 * self.n_0
+                - self.n_1
+                - self.kappa * self.K0Res
+                + self.alpha
+                * (
+                    self.C0 * self.n_0
+                    + self.C1 * self.n_1
+                    + self.C2 * self.n_2
+                    + self.C3 * self.n_3
+                    + self.C4 * self.n_4
+                    + self.C5 * self.n_5
+                )
             )
-        )
         self.n_5 = self.n_4
         self.n_4 = self.n_3
         self.n_3 = self.n_2
@@ -770,6 +873,7 @@ class MDXLOS(MDXL):
             self.atom_ids,
             self.atom_ids_sr,
             structure.el_per_shell,
+            self.dU_dq_gathered,
             dftorch_params.get("SHARED_MU", False),
         )
 
@@ -839,6 +943,7 @@ class MDXLOS(MDXL):
                 disps,
                 dists,
                 self.CALPHA,
+                structure.dU_dq,
             )
 
         if self.cuda_sync:
@@ -877,6 +982,7 @@ class MDXLOS(MDXL):
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             # no f_coul in PME forces_shadow_pme. Done in calculate_PME_ewald
@@ -908,6 +1014,7 @@ class MDXLOS(MDXL):
                 structure.Nats,
                 self.const,
                 structure.TYPE,
+                structure.dU_dq,
             )
             structure.f_coul = forces1 * (2 * structure.q / self.n - 1.0)
             structure.f_tot = structure.f_tot + structure.f_coul
@@ -934,6 +1041,7 @@ class MDXLOS(MDXL):
                 structure.RZ,
                 structure.f,
                 structure.Te,
+                structure.dU_dq,
             )
 
             (
@@ -965,6 +1073,7 @@ class MDXLOS(MDXL):
                 structure.Nats,
                 self.const,
                 structure.TYPE,
+                structure.dU_dq,
             )
 
         structure.f_spin = forces_spin(
@@ -1098,6 +1207,11 @@ class MDXLBatch:
             (r.unsqueeze(2) < cum_counts.unsqueeze(1)).int().argmax(dim=2)
         )  # (B, total_orbs)
         self.Hubbard_U_gathered = structure.Hubbard_U.gather(1, self.atom_ids)
+        if structure.dU_dq is not None:
+            self.dU_dq_gathered = structure.dU_dq.gather(1, self.atom_ids)
+        else:
+            self.dU_dq_gathered = None
+
         self.PME_data = None
         self.nbr_inds = None
         self.disps = None
@@ -1250,6 +1364,7 @@ class MDXLBatch:
             structure.Nocc,
             structure.Znuc,
             self.atom_ids,
+            self.dU_dq_gathered,
         )
 
         if self.cuda_sync:
@@ -1298,6 +1413,7 @@ class MDXLBatch:
                 self.disps,
                 self.dists,
                 self.CALPHA,
+                self.dU_dq_gathered,
             )
 
         if self.cuda_sync:
@@ -1327,6 +1443,7 @@ class MDXLBatch:
             structure.RZ,
             structure.f,
             structure.Te,
+            structure.dU_dq,
         )
 
         structure.e_tot = structure.e_elec_tot + structure.e_repulsion
@@ -1361,6 +1478,7 @@ class MDXLBatch:
             structure.Nats,
             self.const,
             structure.TYPE,
+            structure.dU_dq,
         )
 
         self.VX = (

@@ -41,6 +41,7 @@ def SCFx(
     TYPE: torch.Tensor,
     Te: float,
     Hubbard_U: torch.Tensor,
+    dU_dq: Optional[torch.Tensor],
     D0: Optional[torch.Tensor],
     H0: torch.Tensor,
     S: torch.Tensor,
@@ -145,6 +146,10 @@ def SCFx(
     )  # Generate atom index for each orbital
 
     Hubbard_U_gathered = Hubbard_U[atom_ids]
+    if dU_dq is not None:
+        dU_dq_gathered = dU_dq[atom_ids]
+    else:
+        dU_dq_gathered = None
 
     if dftorch_params["coul_method"] == "PME":
         from .ewald_pme import (
@@ -249,6 +254,7 @@ def SCFx(
             else:
                 CoulPot = C @ q
             q_old = q.clone()
+
             q, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q(
                 H0,
                 Hubbard_U_gathered,
@@ -260,6 +266,7 @@ def SCFx(
                 Nocc,
                 Znuc,
                 atom_ids,
+                dU_dq_gathered,
             )
             Res = q - q_old
             ResNorm = torch.norm(Res)
@@ -301,6 +308,7 @@ def SCFx(
                     disps,
                     dists,
                     CALPHA,
+                    dU_dq,
                 )
 
             # Mixing update (vector-form)
@@ -311,6 +319,9 @@ def SCFx(
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
             else:
                 Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * Hubbard_U)
+
+            if dU_dq is not None:
+                Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3)  # ← ADD
 
             # dEb = torch.abs(Eband0_old - Eband0)
             dEc = torch.abs(Ecoul_old - Ecoul)
@@ -373,6 +384,7 @@ def scf_x_os(
     TYPE: torch.Tensor,
     Te: float,
     Hubbard_U: torch.Tensor,
+    dU_dq: Optional[torch.Tensor],
     D0: Optional[torch.Tensor],
     H0: torch.Tensor,
     S: torch.Tensor,
@@ -380,6 +392,7 @@ def scf_x_os(
     Efield: torch.Tensor,
     C: torch.Tensor,
     req_grad_xyz: bool,
+    q_spin_sr_init: Optional[torch.Tensor] = None,
 ) -> Tuple[
     torch.Tensor,  # H
     torch.Tensor,  # Hcoul
@@ -408,6 +421,10 @@ def scf_x_os(
     )
 
     Hubbard_U_gathered = Hubbard_U[atom_ids]
+    if dU_dq is not None:
+        dU_dq_gathered = dU_dq[atom_ids]
+    else:
+        dU_dq_gathered = None
 
     if dftorch_params["coul_method"] == "PME":
         from .ewald_pme import (
@@ -477,24 +494,26 @@ def scf_x_os(
         #         broken_symmetry=False,
         #     )
         # else:
-        Dorth, Q, e, f, mu0 = dm_fermi_x_os(
-            Z.T @ H0 @ Z,
-            Te,
-            Nocc,
-            mu_0=None,
-            eps=1e-9,
-            MaxIt=50,
-            broken_symmetry=broken_symmetry,
-        )
+        if q_spin_sr_init is not None:
+            q_spin_sr = q_spin_sr_init.clone()
+        else:
+            Dorth, Q, e, f, mu0 = dm_fermi_x_os(
+                Z.T @ H0 @ Z,
+                Te,
+                Nocc,
+                mu_0=None,
+                eps=1e-9,
+                MaxIt=50,
+                broken_symmetry=broken_symmetry,
+            )
 
-        # print(mu0, mu0_)
-        D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
-        DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+            D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
+            DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
 
-        q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
-        q_spin_sr.scatter_add_(
-            1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS
-        )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+            q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
+            q_spin_sr.scatter_add_(
+                1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS
+            )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
 
         # break spin symmetry on q_spin_sr, not on density matrix
         # if broken_symmetry:
@@ -576,6 +595,7 @@ def scf_x_os(
                 atom_ids,
                 atom_ids_sr,
                 el_per_shell,
+                dU_dq_gathered,
                 dftorch_params.get("SHARED_MU", False),
             )
 
@@ -628,6 +648,7 @@ def scf_x_os(
                     disps,
                     dists,
                     CALPHA,
+                    dU_dq,
                 )
 
             # Mixing update (vector-form)
@@ -727,6 +748,7 @@ def SCFx_batch(
     Znuc: torch.Tensor,
     Te: float,
     Hubbard_U: torch.Tensor,
+    dU_dq: Optional[torch.Tensor],
     D0: Optional[torch.Tensor],
     H0: torch.Tensor,
     S: torch.Tensor,
@@ -772,6 +794,10 @@ def SCFx_batch(
     CALPHA = None
 
     Hubbard_U_gathered = Hubbard_U.gather(1, atom_ids)
+    if dU_dq is not None:
+        dU_dq_gathered = dU_dq.gather(1, atom_ids)
+    else:
+        dU_dq_gathered = None
 
     # with torch.no_grad():
     if 1:
@@ -828,6 +854,7 @@ def SCFx_batch(
                 Nocc,
                 Znuc,
                 atom_ids,
+                dU_dq_gathered,
             )
             Res = q - q_old
             ResNorm = torch.norm(Res, dim=1)
@@ -864,6 +891,7 @@ def SCFx_batch(
                     disps,
                     dists,
                     CALPHA,
+                    dU_dq_gathered,
                 )
 
             # Mixing update (vector-form)

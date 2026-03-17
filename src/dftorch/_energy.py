@@ -15,6 +15,7 @@ def energy(
     Rz: torch.Tensor,
     f: torch.Tensor,
     Te: float,
+    dU_dq: torch.Tensor = None,
 ):
     """
     Compute the total DFTB energy in the standard SCC formulation.
@@ -48,6 +49,8 @@ def energy(
         Orbital occupation numbers, shape (n_orb,).
     Te : float
         Electronic temperature in Kelvin.
+    dU_dq : torch.Tensor, optional
+        Derivative of the Hubbard U with respect to charge, shape (Nats,). If provided, adds the DFTB3 third-order correction to the Coulomb energy.
 
     Returns
     -------
@@ -84,12 +87,12 @@ def energy(
         D0_diag = torch.diag(D0)
 
     # Band energy
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1 # closed-shell or open-shell
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
         D = D - D0_diag.expand(2, -1, -1)
-        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum() 
-    else: # batched
-        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1) 
+        Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+    else:  # batched
+        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
 
     # Coulomb energy
     if Rx.dim() == 1:  # non-batched
@@ -101,11 +104,23 @@ def energy(
             Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
         elif C is not None and dq_p1 is not None:
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
+
+        # ── DFTB3 third-order correction ─────────────────────────────────
+        # E3 = (1/3) * sum_alpha (dU_alpha/dq_alpha) * q_alpha^3
+        if dU_dq is not None:
+            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3)
+        # ─────────────────────────────────────────────────────────────────
+
     else:  # batched, only full Coulomb matrix for batches
         if dq_p1 is not None:
             raise ValueError("Batched PME Coulomb not implemented.")
         Cq = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B,N)
         Ecoul = 0.5 * torch.sum(q * Cq, dim=-1) + 0.5 * torch.sum(q**2 * U, dim=1)
+
+        # ── DFTB3 batched ─────────────────────────────────────────────────
+        if dU_dq is not None:
+            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3, dim=1)
+        # ─────────────────────────────────────────────────────────────────
 
     # Dipole energy
     Efield_term = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -124,7 +139,7 @@ def energy(
     else:
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
-    factor = -2 if f.dim() == 1 else -1 # closed-shell or open-shell
+    factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
     E_entropy = factor * Te * S_ent
 
     # Total energy
@@ -148,6 +163,7 @@ def energy_shadow(
     Rz: torch.Tensor,
     f: torch.Tensor,
     Te: float,
+    dU_dq: torch.Tensor = None,
 ):
     """
     Compute the total “shadow” DFTB energy.
@@ -187,6 +203,8 @@ def energy_shadow(
         Orbital occupation numbers, shape (n_orb,).
     Te : float
         Electronic temperature in Kelvin.
+    dU_dq : torch.Tensor, optional
+        Derivative of the Hubbard U with respect to charge, shape (Nats,). If provided, adds the DFTB3 third-order correction to the Coulomb energy, using ``n
 
     Returns
     -------
@@ -222,21 +240,19 @@ def energy_shadow(
     elif torch.get_default_dtype() == torch.float64:
         eps = 1e-10
 
-
     # Ensure D0 is diagonal for consistent subtraction
     if D0.ndim == 2:
         D0_diag = torch.diag(D0)
     else:
         D0_diag = torch.diag(D0)
-    
+
     # Band energy
-    if Rx.dim() == 1: # non-batched. both cs and os.
-        factor = 2 if D.dim() == 2 else 1 # closed-shell or open-shell
+    if Rx.dim() == 1:  # non-batched. both cs and os.
+        factor = 2 if D.dim() == 2 else 1  # closed-shell or open-shell
         D = D - D0_diag.expand(2, -1, -1)
         Eband0 = factor * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
-    else: # batched
+    else:  # batched
         Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
-
 
     # Coulomb energy
     if Rx.dim() == 1:  # non-batched
@@ -248,6 +264,12 @@ def energy_shadow(
             Ecoul = 0.5 * (2 * q - n) @ (C @ n) + 0.5 * torch.sum((2.0 * q - n) * U * n)
         elif C is not None and dq_p1 is not None:
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
+
+        # ── DFTB3 shadow third-order correction ──────────────────────────
+        if dU_dq is not None:
+            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * (2.0 * q - n) * n**2)
+        # ─────────────────────────────────────────────────────────────────
+
     else:  # batched, only full Coulomb matrix for batches
         if dq_p1 is not None:
             raise ValueError("Batched PME Coulomb not implemented.")
@@ -255,6 +277,13 @@ def energy_shadow(
         Ecoul = 0.5 * torch.sum((2 * q - n) * Cn, dim=-1) + 0.5 * torch.sum(
             (2.0 * q - n) * U * n, dim=1
         )
+
+        # ── DFTB3 shadow batched ──────────────────────────────────────────
+        if dU_dq is not None:
+            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(
+                0.5 * dU_dq * (2.0 * q - n) * n**2, dim=1
+            )
+        # ─────────────────────────────────────────────────────────────────
 
     # Dipole energy
     Efield_term = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
@@ -273,7 +302,7 @@ def energy_shadow(
     else:
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
-    factor = -2 if f.dim() == 1 else -1 # closed-shell or open-shell
+    factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
     print(f.dim())
     E_entropy = factor * Te * S_ent
 

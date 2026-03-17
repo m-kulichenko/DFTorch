@@ -9,7 +9,7 @@ from ._dm_fermi_x import (
     dm_fermi_x_os_shared,
 )
 from ._spin import get_h_spin
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 
 @torch.compile(fullgraph=False, dynamic=False)
@@ -24,6 +24,7 @@ def calc_q(
     Nocc: int,
     Znuc: torch.Tensor,
     atom_ids: torch.Tensor,
+    dU_dq: Optional[torch.Tensor] = None,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -60,6 +61,8 @@ def calc_q(
         Nuclear charges per atom.
     atom_ids : (n_orb,) torch.Tensor
         Map from AO index to atom index.
+    dU_dq : Optional[(n_orb,) torch.Tensor]
+        AO-mapped derivative of Hubbard U with respect to atomic charge, used to form the Coulomb diagonal. If None, dU_dq is ignored and not included in the Coulomb diagonal.
     Returns
     -------
     q : (Nats,) torch.Tensor
@@ -82,23 +85,16 @@ def calc_q(
         Chemical potential.
     """
     Hcoul_diag = U * n + CoulPot
+    # ── DFTB3: add (1/2) * dU/dq * q^2 to diagonal ───────────────────────
+    # This comes from d/dq [(1/3) dU/dq * q^3] = dU/dq * q^2,
+    # and the factor 1/2 is from symmetrization of the Hamiltonian
+    if dU_dq is not None:
+        Hcoul_diag = Hcoul_diag + 0.5 * dU_dq * n**2
+    # ─────────────────────────────────────────────────────────────────────
+
     Hcoul = 0.5 * (Hcoul_diag.unsqueeze(1) * S + S * Hcoul_diag.unsqueeze(0))
     H = H0 + Hcoul
 
-    # if H0.dtype == torch.float32:
-    # 	Dorth, Q, e, f, mu0 = dm_fermi_x((Z.T @ H @ Z).to(torch.float64), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False)
-    # 	D = Z.to(torch.float64) @ Dorth @ Z.T.to(torch.float64)
-    # 	DS = 2 * (D * S.T).sum(dim=1)  # same as DS = 2 * torch.diag(D @ S)
-    # 	q = -1.0 * Znuc.to(torch.float64)
-    # 	q.scatter_add_(0, atom_ids, DS) # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-
-    # 	Dorth = Dorth.to(torch.get_default_dtype())
-    # 	Q = Q.to(torch.get_default_dtype())
-    # 	e = e.to(torch.get_default_dtype())
-    # 	D = D.to(torch.get_default_dtype())
-    # 	q = q.to(torch.get_default_dtype())
-
-    # else:
     Dorth, Q, e, f, mu0 = dm_fermi_x(
         (Z.T @ H @ Z), Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
     )
@@ -126,6 +122,7 @@ def calc_q_os(
     atom_ids: torch.Tensor,
     atom_ids_sr: torch.Tensor,
     el_per_shell: torch.Tensor,
+    dU_dq: Optional[torch.Tensor] = None,
     shared_mu: bool = False,
 ) -> Tuple[
     torch.Tensor,
@@ -143,6 +140,10 @@ def calc_q_os(
     ----------
     """
     Hcoul_diag = U * n + CoulPot
+    if dU_dq is not None:
+        Hcoul_diag = Hcoul_diag + 0.5 * dU_dq * n**2
+    # ─────────────────────────────────────────────────────────────────────
+
     Hcoul = 0.5 * (Hcoul_diag.unsqueeze(1) * S + S * Hcoul_diag.unsqueeze(0))
     H = (
         H0
@@ -186,6 +187,7 @@ def calc_q_batch(
     Nocc: int,
     Znuc: torch.Tensor,
     atom_ids: torch.Tensor,
+    dU_dq: Optional[torch.Tensor] = None,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -203,6 +205,14 @@ def calc_q_batch(
     ----------
     """
     Hcoul_diag = U * n + CoulPot
+
+    # ── DFTB3: add (1/2) * dU/dq * q^2 to diagonal ───────────────────────
+    # This comes from d/dq [(1/3) dU/dq * q^3] = dU/dq * q^2,
+    # and the factor 1/2 is from symmetrization of the Hamiltonian
+    if dU_dq is not None:
+        Hcoul_diag = Hcoul_diag + 0.5 * dU_dq * n**2
+    # ─────────────────────────────────────────────────────────────────────
+
     Hcoul = 0.5 * (Hcoul_diag.unsqueeze(-1) * S + S * Hcoul_diag.unsqueeze(-2))
     H = H0 + Hcoul
     H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H, Z))
@@ -231,6 +241,8 @@ def calc_dq(
     mu0: torch.Tensor,
     Nats: int,
     atom_ids: torch.Tensor,
+    dU_dq: Optional[torch.Tensor] = None,
+    n: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Linear charge response dq for a perturbation direction v in atomic charge space.
@@ -259,13 +271,23 @@ def calc_dq(
         Number of atoms.
     atom_ids : (n_orb,) torch.Tensor
         Map from AO index to atom index.
-
+    dU_dq : Optional[(n_orb,) torch.Tensor]
+        Change in Hubbard U with respect to charge. If not None, included in the Coulomb diagonal response as dU_dq * n_gathered * v, where n_gathered is the AO-mapped atomic charge (n[atom_ids]) gathered from the orthogonal density matrix response. This term captures how changes in atomic charge affect the Hubbard U contribution to the Hamiltonian, and thus the overall charge response.
+    n : Optional[(n_orb,) torch.Tensor]
+        AO-mapped atomic charge (n[atom_ids]) gathered from the orthogonal density matrix response.
     Returns
     -------
     dq : (Nats,) torch.Tensor
         Atomic charge response to the perturbation v.
     """
     d_Hcoul_diag = U * v + d_CoulPot
+
+    # ── DFTB3: linearized response of third-order term ────────────────────
+    # d/dlambda [(1/2) dU/dq * (q + lambda*v)^2]|_{lambda=0} = dU/dq * q * v
+    if dU_dq is not None:
+        d_Hcoul_diag = d_Hcoul_diag + dU_dq * n * v
+    # ─────────────────────────────────────────────────────────────────────
+
     d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
 
     H1_orth = Z.T @ d_Hcoul @ Z
@@ -293,6 +315,8 @@ def calc_dq_batch(
     mu0: torch.Tensor,
     Nats: int,
     atom_ids: torch.Tensor,
+    dU_dq: Optional[torch.Tensor] = None,
+    n: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Linear charge response dq for a perturbation direction v in atomic charge space.
@@ -303,6 +327,12 @@ def calc_dq_batch(
     """
     batch_size = U.shape[0]
     d_Hcoul_diag = U * v + d_CoulPot
+    # ── DFTB3: linearized response of third-order term ────────────────────
+    # d/dlambda [(1/2) dU/dq * (q + lambda*v)^2]|_{lambda=0} = dU/dq * q * v
+    if dU_dq is not None:
+        d_Hcoul_diag = d_Hcoul_diag + dU_dq * n * v
+    # ─────────────────────────────────────────────────────────────────────
+
     d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(-1) * S + S * d_Hcoul_diag.unsqueeze(-2))
 
     H1_orth = torch.matmul(Z.transpose(-1, -2), torch.matmul(d_Hcoul, Z))
@@ -343,6 +373,7 @@ def kernel_update_lr(
     disps: torch.Tensor = None,
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
+    dU_dq: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -377,6 +408,13 @@ def kernel_update_lr(
     K0Res : (Nats,) torch.Tensor
         Preconditioned low-rank correction step in charge space.
     """
+
+    Hubbard_U_gathered = Hubbard_U[atom_ids]
+    if dU_dq is not None:
+        dU_dq_gathered = dU_dq[atom_ids]
+    else:
+        dU_dq_gathered = None
+
     vi = torch.zeros(n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device)
     fi = torch.zeros(n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device)
 
@@ -433,7 +471,7 @@ def kernel_update_lr(
             d_CoulPot = C @ v
 
         dq = calc_dq(
-            Hubbard_U[atom_ids],
+            Hubbard_U_gathered,
             v[atom_ids],
             d_CoulPot[atom_ids],
             S,
@@ -444,6 +482,8 @@ def kernel_update_lr(
             mu0,
             n_atoms,
             atom_ids,
+            dU_dq_gathered,
+            q[atom_ids],
         )
 
         # New residual (df/dlambda), preconditioned
@@ -514,6 +554,7 @@ def kernel_update_lr_os(
     disps: torch.Tensor = None,
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
+    dU_dq: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -561,7 +602,13 @@ def kernel_update_lr_os(
     K0Res = torch.bmm(KK0, Res.unsqueeze(-1)).squeeze(-1)
     dr = K0Res.clone()
     krylov_rank = 0
-    Fel = torch.tensor(float("inf"), dtype=q.dtype, device=q.device)
+    Fel = torch.tensor(float("inf"), device=S.device)
+
+    shell_to_atom = torch.repeat_interleave(
+        torch.arange(len(TYPE), device=S.device), n_shells_per_atom
+    )
+    q_atomic = torch.zeros_like(RX)
+    q_atomic.scatter_add_(0, shell_to_atom, q.sum(dim=0))
 
     while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
         # Normalize current direction
@@ -590,9 +637,6 @@ def kernel_update_lr_os(
         v = vi[:, :, krylov_rank].clone()
 
         v_atomic = torch.zeros_like(RX)
-        shell_to_atom = torch.repeat_interleave(
-            torch.arange(len(TYPE), device=S.device), n_shells_per_atom
-        )
         v_atomic.scatter_add_(0, shell_to_atom, v.sum(dim=0))  # atom-resolved
         v_net_spin = v[0] - v[1]  # shell-resolved
 
@@ -621,7 +665,16 @@ def kernel_update_lr_os(
             d_CoulPot = C @ v_atomic
 
         H_spin = get_h_spin(TYPE, v_net_spin, w, n_shells_per_atom, shell_types)
+
         d_Hcoul_diag = Hubbard_U[atom_ids] * v_atomic[atom_ids] + d_CoulPot[atom_ids]
+        # ── DFTB3: linearized response of third-order term ────────────────────
+        # d/dlambda [(1/2) dU/dq * (q + lambda*v)^2]|_{lambda=0} = dU/dq * q * v
+        if dU_dq is not None:
+            d_Hcoul_diag = (
+                d_Hcoul_diag + dU_dq[atom_ids] * q_atomic[atom_ids] * v_atomic[atom_ids]
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         d_Hcoul = 0.5 * (
             d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0)
         ) + 0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor(
@@ -664,7 +717,7 @@ def kernel_update_lr_os(
 
     rank_m = krylov_rank
     Vi_flat = vi[:, :, :rank_m].reshape(-1, rank_m)  # (2*Nshells, rank)
-    step = (Vi_flat @ Y).reshape(2, Nshells)  # (2, Nshells) ✓
+    step = (Vi_flat @ Y).reshape(2, Nshells)  # (2, Nshells)
     return step
 
 
@@ -689,6 +742,7 @@ def kernel_update_lr_batch(
     disps: torch.Tensor = None,
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
+    dU_dq_gathered: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -734,7 +788,7 @@ def kernel_update_lr_batch(
     K0Res = torch.matmul(KK0, Res.unsqueeze(-1)).squeeze(-1)
     dr = K0Res.clone()
     krylov_rank = 0
-    Fel_all = torch.tensor([float("inf")] * batch_size, dtype=q.dtype, device=q.device)
+    Fel_all = torch.tensor([float("inf")] * batch_size, device=q.device)
 
     active_mask = torch.tensor([True] * batch_size, dtype=torch.bool, device=q.device)
 
@@ -795,6 +849,8 @@ def kernel_update_lr_batch(
             mu0[active_mask],
             n_atoms,
             atom_ids[active_mask],
+            dU_dq_gathered[active_mask] if dU_dq_gathered is not None else None,
+            q.gather(1, atom_ids[active_mask]),
         )
 
         # New residual (df/dlambda), preconditioned

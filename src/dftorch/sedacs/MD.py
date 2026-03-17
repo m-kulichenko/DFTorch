@@ -458,6 +458,7 @@ class MDXL_Graph(MDXL):
             e_repulsion, dVr = get_repulsion_energy(
                 structure.const.R_rep_tensor,
                 structure.const.rep_splines_tensor,
+                structure.const.close_exp_tensor,
                 structure.TYPE,
                 structure.RX,
                 structure.RY,

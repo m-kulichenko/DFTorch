@@ -8,6 +8,7 @@ from ._nearestneighborlist import (
 def get_repulsion_energy(
     R_rep_tensor: torch.Tensor,
     rep_splines_tensor: torch.Tensor,
+    close_exp_tensor: torch.Tensor,
     TYPE: torch.Tensor,
     RX: torch.Tensor,
     RY: torch.Tensor,
@@ -27,6 +28,8 @@ def get_repulsion_energy(
         Radial grid (Å) per pair type (P = number of pair types).
     rep_splines_tensor : (P, M, >=6) torch.Tensor
         Spline coefficients c0..c5 (Hartree) for 5th‑order local polynomial segments.
+    close_exp_tensor : (P, 3) torch.Tensor
+        Close exponential parameters for each pair type.
     TYPE : (Nats,) torch.Tensor
         Atom type indices (compatible with const.label).
     RX, RY, RZ : (Nats,) torch.Tensor
@@ -79,10 +82,11 @@ def get_repulsion_energy(
     nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list
     dR_mskd = dR[nn_mask]
 
-    # indices = torch.zeros((len(dR_mskd)), dtype=torch.int64, device=RX.device)
-    # for i in range(len(dR_mskd)):
-    #     idx = torch.searchsorted(R_rep_tensor[IJ_pair_type[i]], dR_mskd[i], right=True) - 1
-    #     indices[i] = idx
+    # ── per-pair starting distance ────────────────────────────────────
+    R0 = R_rep_tensor[IJ_pair_type, 0]  # (P,) first spline knot
+    use_exp = dR_mskd < R0  # (P,) bool mask
+
+    # ── spline indices (only needed for spline region) ────────────────
     indices = (
         torch.searchsorted(
             R_rep_tensor[IJ_pair_type], dR_mskd.unsqueeze(-1), right=True
@@ -94,6 +98,8 @@ def get_repulsion_energy(
     # indices = indices.clamp(min=0, max=K-1)
 
     dx = (dR_mskd - R_rep_tensor[IJ_pair_type, indices]) / 0.52917721
+
+    # ── spline energy ─────────────────────────────────────────────────
     Vr = (
         rep_splines_tensor[IJ_pair_type, indices, 0]
         + rep_splines_tensor[IJ_pair_type, indices, 1] * dx
@@ -103,10 +109,20 @@ def get_repulsion_energy(
         + rep_splines_tensor[IJ_pair_type, indices, 5] * dx**5
     )
 
+    # ── exponential energy  E = exp(a0*r + a1) + a2 ──────────────────
+    Vr_exp = (
+        torch.exp(
+            -close_exp_tensor[IJ_pair_type, 0] * dR_mskd / 0.52917721
+            + close_exp_tensor[IJ_pair_type, 1]
+        )
+        + close_exp_tensor[IJ_pair_type, 2]
+    )
+
+    # ── select per pair ───────────────────────────────────────────────
+    Vr = torch.where(use_exp, Vr_exp, Vr)
     Vr = Vr.sum() * 27.21138625  # eV
 
-    # gradients
-    dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
+    # ── spline gradient  dV/dR (Ha/Bohr) ─────────────────────────────
     dVr = torch.zeros((3, Nats * Nats), device=RX.device)
     ind_start = torch.arange(Nats, device=RX.device)
     # now, it's Ha/Bohr
@@ -117,6 +133,18 @@ def get_repulsion_energy(
         + 4 * rep_splines_tensor[IJ_pair_type, indices, 4] * dx**3
         + 5 * rep_splines_tensor[IJ_pair_type, indices, 5] * dx**4
     )
+
+    # ── exponential gradient  dV/dR (Ha/Bohr) ────────────────────────
+    dVr_exp_dR = -close_exp_tensor[IJ_pair_type, 0] * torch.exp(
+        -close_exp_tensor[IJ_pair_type, 0] * dR_mskd / 0.52917721
+        + close_exp_tensor[IJ_pair_type, 1]
+    )
+
+    # ── select per pair ───────────────────────────────────────────────
+    dVr_dR = torch.where(use_exp, dVr_exp_dR, dVr_dR)
+
+    # ── accumulate forces ───────────────────
+    dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
     dVr.index_add_(
         1, ind_start[neighbor_I] * Nats + ind_start[neighbor_J], dVr_dR * dR_dxyz
     )
@@ -131,6 +159,7 @@ def get_repulsion_energy(
 def get_repulsion_energy_batch(
     R_rep_tensor: torch.Tensor,
     rep_splines_tensor: torch.Tensor,
+    close_exp_tensor: torch.Tensor,
     TYPE: torch.Tensor,
     RX: torch.Tensor,
     RY: torch.Tensor,
@@ -178,13 +207,17 @@ def get_repulsion_energy_batch(
     dR_mskd = dR[nn_mask]
 
     safe_IJ = IJ_pair_type.clamp(min=0)
-
     R_rep_valid = R_rep_tensor[safe_IJ][valid_pairs]
 
+    # ── per-pair starting distance ────────────────────────────────────
+    R0 = R_rep_valid[:, 0]  # (P,) first spline knot
+    use_exp = dR_mskd < R0  # (P,) bool mask
+
+    K = R_rep_valid.size(1)
     indices = (
         torch.searchsorted(R_rep_valid, dR_mskd.unsqueeze(-1), right=True).squeeze(-1)
         - 1
-    )
+    ) % K  # ← wraps -1 → K-1 (last segment), same as non-batched behavior
     # Optionally clamp to keep indices in bounds
     # K = R_rep_tensor.size(1)
     # indices = indices.clamp(min=0, max=K-1)
@@ -201,6 +234,7 @@ def get_repulsion_energy_batch(
         .expand_as(safe_IJ)[valid_pairs]
     )
 
+    # ── spline energy (Horner) ────────────────────────────────────────
     coeffs = rep_splines_tensor[sel_IJ, indices]  # (P, 6)
     # pair_interactions = sum_{n=0..5} a_n * dx^n
     # Horner: ((((a5*dx + a4)*dx + a3)*dx + a2)*dx + a1)*dx + a0
@@ -209,20 +243,36 @@ def get_repulsion_energy_batch(
     poly = poly * dx + coeffs[:, 3]
     poly = poly * dx + coeffs[:, 2]
     poly = poly * dx + coeffs[:, 1]
-    pair_interactions = poly * dx + coeffs[:, 0]
+    Vr_spline = poly * dx + coeffs[:, 0]
+
+    # ── exponential energy ────────────────────────────────────────────
+    a = close_exp_tensor[sel_IJ]  # (P, 3)
+    exp_arg = -a[:, 0] * dR_mskd / 0.52917721 + a[:, 1]
+    Vr_exp = torch.exp(exp_arg) + a[:, 2]
+
+    # ── select per pair ───────────────────────────────────────────────
+    pair_interactions = torch.where(use_exp, Vr_exp, Vr_spline)
     Vr.index_add_(0, batch_ids, pair_interactions * 27.21138625)
 
-    # gradients
-    dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
-    dVr = torch.zeros((3, batch_size * Nats * Nats), device=RX.device)
-    ind_start = torch.arange(Nats, device=RX.device)
+    # ── spline gradient (Horner, Ha/Bohr) ────────────────────────────
     # now, it's Ha/Bohr
     a = coeffs
     dpoly = 5.0 * a[:, 5]
     dpoly = dpoly * dx + 4.0 * a[:, 4]
     dpoly = dpoly * dx + 3.0 * a[:, 3]
     dpoly = dpoly * dx + 2.0 * a[:, 2]
-    dVr_dR = dpoly * dx + a[:, 1]  # Ha/Bohr
+    dVr_spline = dpoly * dx + a[:, 1]  # Ha/Bohr
+
+    # ── exponential gradient (Ha/Bohr) ───────────────────────────────
+    dVr_exp = -a[:, 0] * torch.exp(exp_arg)
+
+    # ── select per pair ───────────────────────────────────────────────
+    dVr_dR = torch.where(use_exp, dVr_exp, dVr_spline)
+
+    # ── accumulate forces ─────────────────────────────────────────────
+    dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
+    dVr = torch.zeros((3, batch_size * Nats * Nats), device=RX.device)
+    ind_start = torch.arange(Nats, device=RX.device)
     dVr.index_add_(
         1,
         ind_start[neighbor_I[valid_pairs]] * Nats

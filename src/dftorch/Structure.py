@@ -257,6 +257,12 @@ class Structure(torch.nn.Module):
             self.H_INDEX_START, self.HDIM, self.TYPE, const, self.has_p, self.has_d
         )
         self.D0 = 0.5 * self.D0
+        self.q_spin_sr = None
+
+        if const.dftb3:
+            self.dU_dq = const.dU_dq[self.TYPE]  # (Nr_atoms,)
+        else:
+            self.dU_dq = None
 
 
 class StructureBatch(torch.nn.Module):
@@ -468,6 +474,11 @@ class StructureBatch(torch.nn.Module):
             self.has_d,
         )
         self.D0 = 0.5 * self.D0
+
+        if const.dftb3:
+            self.dU_dq = const.dU_dq[self.TYPE]  # (Nr_atoms,)
+        else:
+            self.dU_dq = None
 
 
 __all__ = ["Structure", "StructureBatch"]

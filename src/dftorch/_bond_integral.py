@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Final
 
@@ -305,7 +306,9 @@ def read_skf_table(
     US: torch.Tensor,
     UP: torch.Tensor,
     UD: torch.Tensor,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Read a DFTB+ `.skf` file and extract integral channels + repulsion spline data.
 
     Parameters
@@ -322,11 +325,12 @@ def read_skf_table(
     Returns
     -------
     tuple
-        `(R, channels, R_rep, rep_splines)` where:
+        `(R, channels, R_rep, rep_splines, close_exp)` where:
         - `R`: `(1001,)` padded orbital radial grid in Angstrom
         - `channels`: dict[str, Tensor] channel_name -> `(npts, )` values in eV
         - `R_rep`: repulsive radial grid in Angstrom
         - `rep_splines`: spline polynomial coefficients
+        - `close_exp`: close repulsion exponential parameters
     """
     lines = Path(path).read_text(errors="ignore").splitlines()
     data_lines = [
@@ -377,8 +381,8 @@ def read_skf_table(
         el_num = symbol_to_number[elemA]
 
         tmp = data_lines[40].split()[0]
-        N_ORB[el_num] = 1 if "9*" in tmp else (4 if "5*" in tmp else 9)
-        # N_ORB[el_num] = 1*(Es != 0) + 3*(Ep != 0) + 5*(Ed != 0)
+        # N_ORB[el_num] = 1 if "9*" in tmp else (4 if "5*" in tmp else 9)
+        N_ORB[el_num] = 1 * (Es != 0) + 3 * (Ep != 0) + 5 * (Ed != 0)
         MAX_ANG[el_num] = 1 if "9*" in tmp else (2 if "5*" in tmp else 3)
         # MAX_ANG[el_num] = 3 if Ed != 0 else (2 if Ep != 0 else 1)
         MAX_ANG_OCC[el_num] = 3 if fd != 0 else (2 if fp != 0 else 1)
@@ -415,7 +419,11 @@ def read_skf_table(
     ### Do repulsion splines
     first = data_lines[spline_start + 1].replace(",", " ").split()
     npts = int(first[0])
-    # close_exp = torch.tensor([float(x) for x in data_lines[spline_start+2].replace(',', ' ').split()])
+
+    close_exp = torch.tensor(
+        [float(x) for x in data_lines[spline_start + 2].replace(",", " ").split()]
+    )
+
     rows = []
     rows_R = []
     for ln in data_lines[spline_start + 3 : spline_start + 3 + npts - 1]:
@@ -440,7 +448,7 @@ def read_skf_table(
     rep_splines = torch.tensor(rows)  # *27.21138625
     R_rep = torch.tensor(rows_R) * 0.52917721  # Convert to Angstrom
 
-    return R, channels, R_rep, rep_splines
+    return R, channels, R_rep, rep_splines, close_exp
 
 
 def channels_to_matrix(
@@ -504,9 +512,106 @@ def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
     return coeffs
 
 
+def _extract_blocks(text: str, keyword: str) -> list[str]:
+    """
+    Extract all top-level blocks matching:
+        keyword = { ... }
+    Handles nested braces correctly by counting depth.
+    Returns list of inner content strings (without outer braces).
+    """
+    results = []
+    search_str = keyword
+    pos = 0
+    while True:
+        # find next occurrence of keyword followed by '='  and '{'
+        idx = text.find(search_str, pos)
+        if idx == -1:
+            break
+        # skip to the opening brace
+        brace_start = text.find("{", idx + len(search_str))
+        if brace_start == -1:
+            break
+        # walk forward counting depth
+        depth = 0
+        i = brace_start
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    results.append(text[brace_start + 1 : i])
+                    pos = i + 1
+                    break
+            i += 1
+        else:
+            break  # unterminated block
+    return results
+
+
+def read_wfc_hsd(
+    path: str,
+    N_ORB: torch.Tensor,
+    MAX_ANG: torch.Tensor,
+    MAX_ANG_OCC: torch.Tensor,
+) -> None:
+    """
+    Parse wfc.hsd and fill N_ORB, MAX_ANG, MAX_ANG_OCC in-place.
+
+    N_ORB[Z]      = sum of (2*l+1) over all orbitals
+    MAX_ANG[Z]    = max(l+1) over all orbitals
+    MAX_ANG_OCC[Z]= max(l+1) over orbitals with Occupation != 0
+    """
+    text = Path(path).read_text(errors="ignore")
+
+    ang_re = re.compile(r"AngularMomentum\s*=\s*(\d+)")
+    occ_re = re.compile(r"Occupation\s*=\s*([\d.eE+\-]+)")
+    sym_re = re.compile(r"([A-Za-z]{1,3})\s*=\s*\{")
+
+    # find all top-level element symbols
+    for sym_m in sym_re.finditer(text):
+        sym = sym_m.group(1).strip()
+        Z = symbol_to_number.get(sym)
+        if Z is None:
+            continue
+
+        # extract the element block using depth-aware parser
+        # brace_pos = text.find("{", sym_m.start())
+        elem_blocks = _extract_blocks(text[sym_m.start() :], sym + " =")
+        if not elem_blocks:
+            elem_blocks = _extract_blocks(text[sym_m.start() :], sym + "=")
+        if not elem_blocks:
+            continue
+        elem_body = elem_blocks[0]
+
+        n_orb_elem = 0
+        max_ang_elem = 0
+        max_ang_occ = 0
+
+        # extract each Orbital = { ... } block inside the element block
+        for orb_body in _extract_blocks(elem_body, "Orbital"):
+            am = ang_re.search(orb_body)
+            oc = occ_re.search(orb_body)
+            if am is None or oc is None:
+                continue
+
+            l = int(am.group(1))  # noqa: E741
+            occ = float(oc.group(1))
+
+            n_orb_elem += 2 * l + 1
+            max_ang_elem = max(max_ang_elem, l + 1)
+            if occ != 0.0:
+                max_ang_occ = max(max_ang_occ, l + 1)
+
+        N_ORB[Z] = n_orb_elem
+        MAX_ANG[Z] = max_ang_elem
+        MAX_ANG_OCC[Z] = max_ang_occ
+
+
 def get_skf_tensors(
     TYPE: torch.Tensor, skfpath: str
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -543,6 +648,8 @@ def get_skf_tensors(
     rep_splines_tensor = torch.zeros((n_pairs, 500, 6), device=TYPE.device)  # old 120
     R_rep_tensor = torch.zeros((n_pairs, 500), device=TYPE.device) + 1e8
 
+    close_exp_tensor = torch.zeros((n_pairs, 3), device=TYPE.device)
+
     N_ORB = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     MAX_ANG = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
     MAX_ANG_OCC = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
@@ -558,7 +665,7 @@ def get_skf_tensors(
     UD = torch.zeros(120, device=TYPE.device)
 
     for i in range(len(label_list)):
-        R_orb, channels, R_rep, rep_splines = read_skf_table(
+        R_orb, channels, R_rep, rep_splines, close_exp = read_skf_table(
             skfpath + "{}.skf".format(label_list[i]),
             N_ORB,
             MAX_ANG,
@@ -583,6 +690,15 @@ def get_skf_tensors(
         R_rep_tensor[i, : len(R_rep)] = R_rep
         rep_splines_tensor[i, : len(rep_splines)] = rep_splines
 
+        close_exp_tensor[i] = close_exp
+
+    # ── override N_ORB / MAX_ANG / MAX_ANG_OCC from wfc.hsd if present ──
+    import os
+
+    wfc_path = os.path.join(skfpath, "wfc.hsd")
+    if os.path.isfile(wfc_path):
+        read_wfc_hsd(wfc_path, N_ORB, MAX_ANG, MAX_ANG_OCC)
+
     R_orb = R_orb.to(device=TYPE.device)
 
     coeffs_tensor = torch.cat(
@@ -604,6 +720,7 @@ def get_skf_tensors(
         coeffs_tensor,
         R_rep_tensor,
         rep_splines_tensor,
+        close_exp_tensor,
         N_ORB,
         MAX_ANG,
         MAX_ANG_OCC,

@@ -315,38 +315,42 @@ def load_spinw_to_matrix(
     path: str, device: torch.device, max_Z: int = 120
 ) -> torch.Tensor:
     """
-    Parse spinw.txt and return per-element 3x3 symmetric matrices.
-    The matrix layout is:
-        [[ss, sp, sd],
-         [sp, pp, pd],
-         [sd, pd, dd]]
-    For elements with smaller blocks:
-      - 1x1: only ss set; others remain 0
-      - 2x2: ss, sp, pp set; sd, pd, dd remain 0
-      - 3x3: full matrix set
-    Missing entries are left as zeros.
+    Parse spinw.txt in either mio-1-1 or 3ob-3-1 format and return
+    per-element 3x3 symmetric spin-constant matrices.
+
+    Supported formats
+    -----------------
+    mio-1-1:  plain ``Element:`` headers, no wrapper block, no # comments
+    3ob-3-1:  ``SpinConstants { ... }`` wrapper, ``Element { ... }`` blocks,
+              ``#`` comment lines
 
     Returns
     -------
     W : torch.Tensor, shape (max_Z, 3, 3)
-        W[Z] is the 3x3 matrix for atomic number Z. Row 0 is dummy.
+        W[Z] is the 3x3 matrix for atomic number Z (row 0 is dummy).
+        Values are converted from Hartree to eV (* 27.21138625).
     """
     import re
 
     W = torch.zeros(max_Z, 3, 3, device=device, dtype=torch.float64)
 
     element = None
-    matrix_rows = []
+    matrix_rows: list = []
 
-    header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
+    # mio format:  "H:"  or  "Zn:"
+    header_plain = re.compile(r"^\s*([A-Za-z]{1,3})\s*:\s*$")
+    # 3ob format:  "H {"  or  "Zn {"  (but NOT "SpinConstants {")
+    header_block = re.compile(r"^\s*([A-Za-z]{1,3})\s*\{\s*$")
+    # numeric data row (may have trailing # comment)
+    data_re = re.compile(r"^\s*([-+]?\d[\d.eE+\-]*(?:\s+[-+]?\d[\d.eE+\-]*)*)")
 
-    def flush_current():
+    def flush():
         nonlocal element, matrix_rows
         if element is None or not matrix_rows:
+            element = None
+            matrix_rows = []
             return
-        sym = element
-        Z = symbol_to_number.get(sym)
-        # Skip unknown or out-of-range elements
+        Z = symbol_to_number.get(element)
         if Z is None or Z >= max_Z:
             element = None
             matrix_rows = []
@@ -354,54 +358,212 @@ def load_spinw_to_matrix(
 
         mat = torch.tensor(matrix_rows, dtype=torch.float64, device=device)
         if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
-            # Malformed block; skip
             element = None
             matrix_rows = []
             return
 
         n = mat.shape[0]
-        # Fill into a 3x3 accumulator
         acc = torch.zeros(3, 3, dtype=torch.float64, device=device)
-
         if n >= 1:
-            acc[0, 0] = mat[0, 0]  # ss
+            acc[0, 0] = mat[0, 0]
         if n >= 2:
-            acc[0, 1] = mat[0, 1]  # sp
+            acc[0, 1] = mat[0, 1]
             acc[1, 0] = mat[0, 1]
-            acc[1, 1] = mat[1, 1]  # pp
+            acc[1, 1] = mat[1, 1]
         if n >= 3:
-            acc[0, 2] = mat[0, 2]  # sd
+            acc[0, 2] = mat[0, 2]
             acc[2, 0] = mat[0, 2]
-            acc[1, 2] = mat[1, 2]  # pd
+            acc[1, 2] = mat[1, 2]
             acc[2, 1] = mat[1, 2]
-            acc[2, 2] = mat[2, 2]  # dd
+            acc[2, 2] = mat[2, 2]
 
         W[Z] = acc
-
-        # Reset
         element = None
         matrix_rows = []
 
     with open(path, "r") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            if not line.strip():
-                if matrix_rows:
-                    flush_current()
+        for raw in f:
+            line = raw.rstrip("\n")
+
+            # ── strip inline # comments ──────────────────────────────
+            hash_pos = line.find("#")
+            if hash_pos >= 0:
+                line = line[:hash_pos]
+            line_stripped = line.strip()
+
+            # skip empty lines and block delimiters
+            if not line_stripped or line_stripped in ("{", "}"):
+                # "}" can close an element block → flush
+                if line_stripped == "}":
+                    flush()
                 continue
 
-            m = header_re.match(line)
+            # skip wrapper keyword  "SpinConstants {"
+            if re.match(r"^\s*SpinConstants\s*\{", line):
+                continue
+
+            # ── element header (3ob style):  "H {"  ──────────────────
+            m = header_block.match(line)
             if m:
-                flush_current()
+                flush()
                 element = m.group(1)
                 matrix_rows = []
                 continue
 
-            if element is not None:
-                nums = line.split()
-                row = [float(x) for x in nums]
-                matrix_rows.append(row)
+            # ── element header (mio style):  "H:"  ───────────────────
+            m = header_plain.match(line)
+            if m:
+                flush()
+                element = m.group(1)
+                matrix_rows = []
+                continue
 
-    flush_current()
+            # ── numeric data row ──────────────────────────────────────
+            if element is not None:
+                m = data_re.match(line)
+                if m:
+                    row = [float(x) for x in m.group(1).split()]
+                    matrix_rows.append(row)
+
+    flush()  # last element in file
 
     return W * 27.21138625
+
+
+# def load_spinw_to_matrix(
+#     path: str, device: torch.device, max_Z: int = 120
+# ) -> torch.Tensor:
+#     """
+#     Parse spinw.txt and return per-element 3x3 symmetric matrices.
+#     The matrix layout is:
+#         [[ss, sp, sd],
+#          [sp, pp, pd],
+#          [sd, pd, dd]]
+#     For elements with smaller blocks:
+#       - 1x1: only ss set; others remain 0
+#       - 2x2: ss, sp, pp set; sd, pd, dd remain 0
+#       - 3x3: full matrix set
+#     Missing entries are left as zeros.
+
+#     Returns
+#     -------
+#     W : torch.Tensor, shape (max_Z, 3, 3)
+#         W[Z] is the 3x3 matrix for atomic number Z. Row 0 is dummy.
+#     """
+#     import re
+
+#     W = torch.zeros(max_Z, 3, 3, device=device, dtype=torch.float64)
+
+#     element = None
+#     matrix_rows = []
+
+#     header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
+
+#     def flush_current():
+#         nonlocal element, matrix_rows
+#         if element is None or not matrix_rows:
+#             return
+#         sym = element
+#         Z = symbol_to_number.get(sym)
+#         # Skip unknown or out-of-range elements
+#         if Z is None or Z >= max_Z:
+#             element = None
+#             matrix_rows = []
+#             return
+
+#         mat = torch.tensor(matrix_rows, dtype=torch.float64, device=device)
+#         if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
+#             # Malformed block; skip
+#             element = None
+#             matrix_rows = []
+#             return
+
+#         n = mat.shape[0]
+#         # Fill into a 3x3 accumulator
+#         acc = torch.zeros(3, 3, dtype=torch.float64, device=device)
+
+#         if n >= 1:
+#             acc[0, 0] = mat[0, 0]  # ss
+#         if n >= 2:
+#             acc[0, 1] = mat[0, 1]  # sp
+#             acc[1, 0] = mat[0, 1]
+#             acc[1, 1] = mat[1, 1]  # pp
+#         if n >= 3:
+#             acc[0, 2] = mat[0, 2]  # sd
+#             acc[2, 0] = mat[0, 2]
+#             acc[1, 2] = mat[1, 2]  # pd
+#             acc[2, 1] = mat[1, 2]
+#             acc[2, 2] = mat[2, 2]  # dd
+
+#         W[Z] = acc
+
+#         # Reset
+#         element = None
+#         matrix_rows = []
+
+#     with open(path, "r") as f:
+#         for line in f:
+#             line = line.rstrip("\n")
+#             if not line.strip():
+#                 if matrix_rows:
+#                     flush_current()
+#                 continue
+
+#             m = header_re.match(line)
+#             if m:
+#                 flush_current()
+#                 element = m.group(1)
+#                 matrix_rows = []
+#                 continue
+
+#             if element is not None:
+#                 nums = line.split()
+#                 row = [float(x) for x in nums]
+#                 matrix_rows.append(row)
+
+#     flush_current()
+
+#     return W * 27.21138625
+
+
+def load_hubbard_derivs(
+    path: str, device: torch.device, max_Z: int = 120
+) -> torch.Tensor:
+    """
+    Parse a hubbard_derivative.txt file and return per-element dU/dq tensor.
+
+    Format (3ob-3-1 style):
+        Br = -0.0573
+         C = -0.1492
+        ...
+
+    Values are in Hartree/e, converted to eV/e (* 27.21138625).
+
+    Returns
+    -------
+    dU_dq : torch.Tensor, shape (max_Z,)
+        dU_dq[Z] is the Hubbard derivative for atomic number Z.
+        Zero for elements not present in the file.
+    """
+    dU_dq = torch.zeros(max_Z, device=device, dtype=torch.float64)
+
+    entry_re = re.compile(r"^\s*([A-Za-z]{1,3})\s*=\s*([-+]?\d[\d.eE+\-]*)\s*$")
+
+    with open(path, "r") as f:
+        for raw in f:
+            line = raw.strip()
+            # strip inline comments
+            hash_pos = line.find("#")
+            if hash_pos >= 0:
+                line = line[:hash_pos].strip()
+            if not line:
+                continue
+            m = entry_re.match(line)
+            if m:
+                sym = m.group(1).strip()
+                val = float(m.group(2))
+                Z = symbol_to_number.get(sym)
+                if Z is not None and Z < max_Z:
+                    dU_dq[Z] = val
+
+    return dU_dq * 27.21138625

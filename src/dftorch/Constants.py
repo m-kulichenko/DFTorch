@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from ._elements import symbol_to_number, label, atomic_num, mass
 from ._io import read_xyz
-from ._tools import load_spinw_to_matrix
+from ._tools import load_spinw_to_matrix, load_hubbard_derivs
 
 
 class Constants(torch.nn.Module):
@@ -10,7 +10,9 @@ class Constants(torch.nn.Module):
     Constants used in DFTB
     """
 
-    def __init__(self, file, skfpath, magnetic_hubbard_ldep=False, param_grad=False):
+    def __init__(
+        self, file, skfpath, magnetic_hubbard_ldep=False, dftb3=False, param_grad=False
+    ):
         """
         Constructor
         """
@@ -42,6 +44,7 @@ class Constants(torch.nn.Module):
             coeffs_tensor,
             R_rep_tensor,
             rep_splines_tensor,
+            close_exp_tensor,
             N_ORB,
             MAX_ANG,
             MAX_ANG_OCC,
@@ -85,6 +88,9 @@ class Constants(torch.nn.Module):
         self.rep_splines_tensor = torch.nn.Parameter(
             rep_splines_tensor, requires_grad=False
         )
+        self.close_exp_tensor = torch.nn.Parameter(
+            close_exp_tensor, requires_grad=False
+        )
 
         self.n_orb = torch.nn.Parameter(N_ORB, requires_grad=False)
         self.max_ang = torch.nn.Parameter(
@@ -104,6 +110,26 @@ class Constants(torch.nn.Module):
         self.Es = torch.nn.Parameter(ES, requires_grad=param_grad)
         self.Ep = torch.nn.Parameter(EP, requires_grad=param_grad)
         self.Ed = torch.nn.Parameter(ED, requires_grad=param_grad)
+
+        # ── DFTB3: Hubbard derivatives dU/dq ─────────────────────────────
+        if dftb3:
+            import os
+
+            _hubbard_path = os.path.join(skfpath, "hubbard_derivative.txt")
+            try:
+                dU_dq = load_hubbard_derivs(_hubbard_path, device=TYPE.device)
+                self.dU_dq = torch.nn.Parameter(dU_dq, requires_grad=False)
+                self.dftb3 = True
+            except (FileNotFoundError, OSError):
+                # DFTB2 parameter set — no Hubbard derivatives available
+                self.dU_dq = None
+                self.dftb3 = False
+        else:
+            self.dU_dq = None
+            self.dftb3 = False
+        print(f"DFTB3: {self.dftb3}")
+
+        # ─────────────────────────────────────────────────────────────────
 
     def forward(self):
         pass

@@ -24,6 +24,108 @@ def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
+ATOMIC_NUMBER_TO_SYMBOL = {
+    1: "H",
+    2: "He",
+    3: "Li",
+    4: "Be",
+    5: "B",
+    6: "C",
+    7: "N",
+    8: "O",
+    9: "F",
+    10: "Ne",
+    11: "Na",
+    12: "Mg",
+    13: "Al",
+    14: "Si",
+    15: "P",
+    16: "S",
+    17: "Cl",
+    18: "Ar",
+    19: "K",
+    20: "Ca",
+    21: "Sc",
+    22: "Ti",
+    23: "V",
+    24: "Cr",
+    25: "Mn",
+    26: "Fe",
+    27: "Co",
+    28: "Ni",
+    29: "Cu",
+    30: "Zn",
+    35: "Br",
+    53: "I",
+}
+
+
+def write_pdb_frame(
+    filename, structure, LBox=None, step=0, etot=None, temp=None, mode="a"
+):
+    """
+    Append one MD frame to a PDB trajectory file.
+    Each frame is wrapped in MODEL/ENDMDL records — readable by PyMOL, VMD, Chimera.
+
+    Parameters
+    ----------
+    filename  : str            output .pdb path
+    structure : Structure      DFTorch structure object
+    LBox      : tensor|None    [Lx, Ly, Lz] in Angstrom — written as CRYST1 if given
+    step      : int            MD step number
+    etot      : float|None     total energy in eV — written as REMARK
+    temp      : float|None     temperature in K   — written as REMARK
+    mode      : str            'w' for first frame, 'a' to append
+    """
+    with open(filename, mode) as f:
+        # CRYST1 — unit cell (required for periodic systems in PyMOL)
+        if LBox is not None:
+            Lx = LBox[0].item()
+            Ly = LBox[1].item()
+            Lz = LBox[2].item()
+            # CRYST1 format: a b c alpha beta gamma space_group Z
+            f.write(
+                f"CRYST1{Lx:9.3f}{Ly:9.3f}{Lz:9.3f}"
+                f"  90.00  90.00  90.00 P 1           1\n"
+            )
+
+        # REMARK — metadata
+        remark = f"Step={step}"
+        if etot is not None:
+            remark += f"  Etot={etot:.6f} eV"
+        if temp is not None:
+            remark += f"  T={temp:.2f} K"
+        f.write(f"REMARK  {remark}\n")
+
+        # MODEL record
+        f.write(f"MODEL     {step:>8d}\n")
+
+        for i in range(structure.Nats):
+            serial = (i + 1) % 100000
+            x = structure.RX[i].item()
+            y = structure.RY[i].item()
+            z = structure.RZ[i].item()
+            raw = structure.TYPE[i].item()
+            symbol = ATOMIC_NUMBER_TO_SYMBOL.get(int(raw), "X")
+
+            # strict PDB ATOM fixed-format columns
+            f.write(
+                f"{'ATOM':<6}{serial:>5d}  "
+                f"{symbol:<4s}{'MOL':>3s} {'A':1s}{1:>4d}    "
+                f"{x:>8.3f}{y:>8.3f}{z:>8.3f}"
+                f"  1.00  0.00          "
+                f"{symbol:>2s}\n"
+            )
+
+        f.write("ENDMDL\n")
+
+
+def finalise_pdb(filename):
+    """Write terminal END record. Call once after all frames are written."""
+    with open(filename, "a") as f:
+        f.write("END\n")
+
+
 def write_XYZ(filename, structure, comment, step=0, Ftot=None):
     with open(filename, "a+") as f:
         num_atoms = structure.Nats
