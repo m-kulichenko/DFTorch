@@ -25,4 +25,8 @@ personal_github
 /tests/**/*.pt
 /tests/**/md_trj*.xyz
 *.pdb
-*.xyz
+*.xyzexperiments/md_trj.xyz.pdb
+experiments/md_trj.xyz.pdb
+experiments/md_trj.xyz.pdb
+*.pdb
+*.pdb
