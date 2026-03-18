@@ -206,6 +206,9 @@ def SCFx(
         Dorth, Q, e, f, mu0 = dm_fermi_x(
             Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
         )
+
+        print("  Initial mu = {:.4f}".format(mu0.item()))
+
         D = Z @ Dorth @ Z.T
         DS = 2 * torch.diag(D @ S)
         q = -1.0 * Znuc
@@ -251,6 +254,7 @@ def SCFx(
                         calculate_forces=0,
                         calculate_dq=1,
                     )
+
             else:
                 CoulPot = C @ q
             q_old = q.clone()

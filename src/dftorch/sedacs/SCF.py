@@ -66,7 +66,7 @@ def scf(
 
     if dist.get_rank() == 0:
         mu0 = get_mu(
-            -0.9,
+            -4.2,
             e_vals_all.cpu().numpy(),
             structure.Te,
             structure.Nocc,

@@ -2,7 +2,7 @@ import torch
 import torch.distributed as dist
 import time
 
-from dftorch._io import write_XYZ_trajectory
+from dftorch._io import write_XYZ_trajectory, write_pdb_frame
 from dftorch.MD import MDXL, initialize_velocities
 from dftorch.ewald_pme import (
     calculate_PME_ewald,
@@ -207,6 +207,17 @@ class MDXL_Graph(MDXL):
                 write_XYZ_trajectory(
                     traj_filename, structure, comm_string, step=md_step
                 )
+
+                write_pdb_frame(
+                    traj_filename + ".pdb",
+                    structure,
+                    structure.LBox,
+                    step=md_step,
+                    etot=Energ,
+                    temp=Temperature,
+                    mode="a",
+                )  # 'w' — create fresh file
+
             self.VX = (
                 self.VX
                 + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
@@ -222,6 +233,10 @@ class MDXL_Graph(MDXL):
                 + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
                 - self.fric * self.VZ
             )  # -c*V c>0 => Fricition
+
+            if self.langevin_enabled:
+                self._langevin_kick(structure, dt)
+
             if structure.LBox is not None:
                 structure.RX = (structure.RX + dt * self.VX) % structure.LBox[0]
                 structure.RY = (structure.RY + dt * self.VY) % structure.LBox[1]
@@ -526,6 +541,10 @@ class MDXL_Graph(MDXL):
                 + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
                 - self.fric * self.VZ
             )
+
+            if self.langevin_enabled:
+                self._langevin_kick(structure, dt)
+
             if self.cuda_sync:
                 torch.cuda.synchronize()
             print("F AND E: {:.3f} s".format(time.perf_counter() - tic2_1))

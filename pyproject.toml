@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy", "pre-commit"]
+sedacs = ["mpi4py", "numba", "toml", "scikit-learn"]
 
 [dependency-groups]
 dev = [

@@ -63,11 +63,11 @@ def prepare_structure(device):
         "PME_order": 4,  # Ignored for FULL coulomb method
         "SCF_MAX_ITER": 100,  # Maximum number of _scf iterations
         "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
-        "SCF_ALPHA": 0.5,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
+        "SCF_ALPHA": 0.06,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
         "KRYLOV_MAXRANK": 10,  # Maximum Krylov subspace rank
         "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in _scf
         "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD _scf
-        "KRYLOV_START": 3,  # Number of initial _scf iterations before starting Krylov acceleration
+        "KRYLOV_START": 10,  # Number of initial _scf iterations before starting Krylov acceleration
     }
 
     # filename = 'COORD_far.xyz'            # Solvated acetylacetone and glycine molecules in H20, Na, Cl
@@ -76,11 +76,12 @@ def prepare_structure(device):
     # filename = 'COORD_8WATER.xyz'            # Solvated acetylacetone and glycine molecules in H20, Na, Cl
     # LBox = torch.tensor([30.0, 30.0, 30.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
-    filename = (
-        "water_30.xyz"  # Solvated acetylacetone and glycine molecules in H20, Na, Cl
-    )
+    # filename = "water_30.xyz"  # Solvated acetylacetone and glycine molecules in H20, Na, Cl)
+    # LBox = torch.tensor([35.0, 35.0, 35.0], device=device)  # Simulation box size in Angstroms. Only cubic boxes supported for now.
+
+    filename = "RDX_1K.xyz"
     LBox = torch.tensor(
-        [35.0, 35.0, 35.0], device=device
+        [22.886, 21.222, 26.312], device=device
     )  # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
     const = Constants(
@@ -90,7 +91,17 @@ def prepare_structure(device):
         "/home/maxim/Projects/DFTB/DFTorch/experiments/sk_orig/mio-1-1/mio-1-1/",
         magnetic_hubbard_ldep=False,
     ).to(device)
-    structure = Structure(filename, LBox, const, charge=0, Te=5000.0, device=device)
+
+    structure = Structure(
+        filename,
+        LBox,
+        const,
+        charge=0,
+        spin_pol=0,
+        Te=2000.0,
+        device=device,
+    )
+
     structure.SpecClustNN = 20
     structure.interface = "dftorch"
     return structure, dftorch_params
@@ -109,7 +120,7 @@ def init_processes(backend):
     else:
         device = torch.device("cpu")
 
-    nparts = 8
+    nparts = 1
     structure, dftorch_params = prepare_structure(device)
     if dftorch_params["cutoff"] < dftorch_params["graph_cutoff"]:
         raise ValueError(
@@ -129,7 +140,7 @@ def init_processes(backend):
             None,
             dftorch_params["cutoff"],
             is_dense=True,
-            buffer=1.0,
+            buffer=0.0,
             use_triton=False,
         )
         disps, dists, nl = calculate_dist_dips(
@@ -244,6 +255,9 @@ def init_processes(backend):
     mdDriver = MDXL_Graph(
         structure.const, temperature_K, NJUMPS, GTHRESH, MAX_DEG, INT_DTYPE
     )
+
+    mdDriver.enable_langevin(gamma=0.01)  # 0.01 1/fs — moderate coupling
+
     # Set number of steps, time step (fs), dump interval and trajectory filename
     mdDriver.run(
         structure,
