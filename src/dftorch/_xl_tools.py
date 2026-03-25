@@ -7,9 +7,10 @@ from ._dm_fermi_x import (
     dm_fermi_x_os,  # noqa: F401
     dm_fermi_x_batch,
     dm_fermi_x_os_shared,
+    nonaufbau_constraints,
 )
 from ._spin import get_h_spin
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Dict
 
 
 @torch.compile(fullgraph=False, dynamic=False)
@@ -124,6 +125,8 @@ def calc_q_os(
     el_per_shell: torch.Tensor,
     dU_dq: Optional[torch.Tensor] = None,
     shared_mu: bool = False,
+    deltaSCF: bool = False,
+    dftorch_params: Optional[Dict[str, Any]] = None,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -154,6 +157,7 @@ def calc_q_os(
         * torch.tensor([[[1]], [[-1]]], device=H_spin.device)
     )
 
+
     if shared_mu:
         Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
@@ -162,7 +166,19 @@ def calc_q_os(
         Dorth, Q, e, f, mu0 = dm_fermi_x_os(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
         )
-    # print(mu0, mu0_)
+    #print(mu0)
+
+    if deltaSCF:
+        mu_0 = mu0
+        Dorth, Q, e, f, mu0 = nonaufbau_constraints(
+            Z.T @ H @ Z,
+            Te,
+            Nocc,
+            mu_0,
+            dftorch_params["DELTA_SCF_TARGET"],
+            dftorch_params["DELTA_SCF_SMEARING"],
+        )
+
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)

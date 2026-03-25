@@ -783,6 +783,7 @@ class MDXLOS(MDXL):
         self.n_1 = self.n_0
         self.n_0 = self.n
 
+
         n_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
         n_spin_atom.scatter_add_(
             1, self.shell_to_atom.unsqueeze(0).expand(2, -1), self.n
@@ -875,6 +876,8 @@ class MDXLOS(MDXL):
             structure.el_per_shell,
             self.dU_dq_gathered,
             dftorch_params.get("SHARED_MU", False),
+            dftorch_params["DELTA_SCF"],
+            dftorch_params, 
         )
 
         structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]

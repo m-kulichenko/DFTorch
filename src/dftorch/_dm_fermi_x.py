@@ -70,9 +70,9 @@ def dm_fermi_x(
       is enabled via `dynamo.config.capture_scalar_outputs = True`.
     """
 
+    h, v = torch.linalg.eigh(H0)
     if mu_0 is None:
         # h = torch.linalg.eigvalsh(H0)
-        h, v = torch.linalg.eigh(H0)
         # h,v = torch.linalg.eigh(H0.to(torch.float64))
         # h = h.to(H0.dtype)
         # v = v.to(H0.dtype)
@@ -137,9 +137,9 @@ def dm_fermi_x_os(
     Returns `mu0` as a tensor of shape `(B,)`.
     """
 
+    h, v = torch.linalg.eigh(H0)
     if mu_0 is None:
         # h = torch.linalg.eigvalsh(H0)
-        h, v = torch.linalg.eigh(H0)
         # h,v = torch.linalg.eigh(H0.to(torch.float64))
         # h = h.to(H0.dtype)
         # v = v.to(H0.dtype)
@@ -206,10 +206,10 @@ def dm_fermi_x_os_shared(
     by sorting/flattening all eigenvalues (i.e., distributing total `nocc.sum()`).
     """
 
+    h, v = torch.linalg.eigh(H0)
+    h_all = h.flatten().sort()[0]
     if mu_0 is None:
         # h = torch.linalg.eigvalsh(H0)
-        h, v = torch.linalg.eigh(H0)
-        h_all = h.flatten().sort()[0]
 
         lumo = nocc.sum()
         if broken_symmetry:
@@ -282,9 +282,9 @@ def dm_fermi_x_batch(
     Returns `mu0` as `(B,)`.
     """
 
+    h, v = torch.linalg.eigh(H0)
     if mu_0 is None:
         # h = torch.linalg.eigvalsh(H0)
-        h, v = torch.linalg.eigh(H0)
         # h,v = torch.linalg.eigh(H0.to(torch.float64))
         # h = h.to(H0.dtype)
         # v = v.to(H0.dtype)
@@ -329,3 +329,57 @@ def dm_fermi_x_batch(
     # Column-scale trick: V @ diag(f) == V * f[None, :]
     P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
     return P0, v, h, f, mu0
+
+
+
+def nonaufbau_constraints(
+    H0: torch.Tensor,
+    T: float,
+    nocc: int,
+    mu_0: float,
+    state: str,
+    smearing: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Open-shell variant of :func:`DM_Fermi_x` (batched eigenproblems).
+
+    Important
+    ---------
+    This function expects **batched** inputs:
+    - `H0`: `(B, n_orb, n_orb)`
+    - `nocc`: `(B,)` integer tensor
+
+    Returns `mu0` as a tensor of shape `(B,)`.
+    """
+    
+    mu0 = mu_0
+    h, v = torch.linalg.eigh(H0)
+    kB = torch.tensor(8.61739e-5, dtype=h.dtype, device=h.device)  # eV/K
+    beta = 1.0 / (kB * T)
+    f = 1.0 / (torch.exp(beta * (h - mu0.unsqueeze(-1))) + 1.0)  # occupations (N,)
+
+
+    if state == "SINGLET":
+        f[1,nocc-1] = 0
+        f[1,nocc] = 1
+        if smearing:
+            f[1,nocc-1] = 0.5
+            f[1,nocc] = 0.5
+    elif state == "TRIPLET":
+        f[1,nocc-1] = 0
+        f[0,nocc] = 1
+        if smearing:
+            f[1,nocc-1] = 0
+            f[0,nocc] = 1
+    else:
+        raise ValueError("target excited state required for deltaSCF (SINGLET OR TRIPLET currently supported)")
+        
+
+
+    # Final adjustment of occupation
+    # P0 = v@(torch.diag_embed(f)@v.T)
+    # Build density matrix P0 = V diag(f) V^T without forming diag explicitly
+    # Column-scale trick: V @ diag(f) == V * f[None, :]
+    P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
+
+    return P0, v, h, f, mu0
+
