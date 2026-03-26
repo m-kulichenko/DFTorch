@@ -340,15 +340,20 @@ def nonaufbau_constraints(
     state: str,
     smearing: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Open-shell variant of :func:`DM_Fermi_x` (batched eigenproblems).
+    """Enforces nonaufbau occupation constraints after aufbau calculation (dm_fermi_x).
+       Therefore, overwrites previous aufbau f and D. Required for deltaSCF.
 
-    Important
-    ---------
-    This function expects **batched** inputs:
-    - `H0`: `(B, n_orb, n_orb)`
-    - `nocc`: `(B,)` integer tensor
+       Parameters:
+       ----------
+       state: 
+            Target lowest energy excited state. Defined in dftparams{}.
+       smearing: 
+            Utilize half excitation by setting relevant orbital occupcations to 0.5. Defined in dftparams{}.
 
-    Returns `mu0` as a tensor of shape `(B,)`.
+
+       TODO:
+       ---- 
+            Provide option for user defined occupations to target higher energy excited states.
     """
     
     mu0 = mu_0
@@ -368,8 +373,8 @@ def nonaufbau_constraints(
         f[1,nocc-1] = 0
         f[0,nocc] = 1
         if smearing:
-            f[1,nocc-1] = 0
-            f[0,nocc] = 1
+            f[1,nocc-1] = 0.5
+            f[0,nocc] = 0.5
     else:
         raise ValueError("target excited state required for deltaSCF (SINGLET OR TRIPLET currently supported)")
         
@@ -382,4 +387,3 @@ def nonaufbau_constraints(
     P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
 
     return P0, v, h, f, mu0
-
