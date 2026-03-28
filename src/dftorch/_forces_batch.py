@@ -23,6 +23,7 @@ def forces_batch(
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
+    thirdorder_shift: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a DFTB-like total energy expression in gas phase
@@ -143,9 +144,11 @@ def forces_batch(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B, N)
+    if thirdorder_shift is not None:
+        CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)
     # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
-    if dU_dq is not None:
+    if dU_dq is not None and thirdorder_shift is None:
         factor = (U * q + CoulPot + 0.5 * dU_dq * q**2) * 2
     else:
         factor = (U * q + CoulPot) * 2
@@ -235,6 +238,7 @@ def forces_shadow_batch(
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
+    thirdorder_shift: torch.Tensor = None,
 ):
     """
     Computes atomic forces from a DFTB-like total energy expression.
@@ -364,10 +368,12 @@ def forces_shadow_batch(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = torch.bmm(C, n.unsqueeze(-1)).squeeze(-1)  # (B, N)
+    if thirdorder_shift is not None:
+        CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)
     factor = (U * n + CoulPot) * 2  # (B, N)
     # ── DFTB3 shadow ──────────────────────────────────────────────────
-    if dU_dq is not None:
+    if dU_dq is not None and thirdorder_shift is None:
         factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
     else:
         factor = (U * n + CoulPot) * 2  # (B, N)

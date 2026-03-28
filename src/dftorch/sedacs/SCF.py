@@ -107,7 +107,7 @@ def scf(
             ch_structure.ch[: ch_structure.core_size],
             ch_structure.hindex.cpu(),
             structure.coordinates.T.cpu().numpy(),
-            structure.lattice_vecs.cpu().numpy(),
+            structure.cell.cpu().numpy(),
             nl.cpu().numpy(),
             alpha=0.7,
         )
@@ -138,17 +138,17 @@ def scf(
             (structure.RX, structure.RY, structure.RZ),
         )
         CALPHA_global, grid_dimensions = calculate_alpha_and_num_grids(
-            structure.lattice_vecs.cpu().numpy(),
+            structure.cell.cpu().numpy(),
             dftorch_params["cutoff"],
             dftorch_params["Coulomb_acc"],
         )
         PME_data_global = init_PME_data(
             grid_dimensions,
-            structure.lattice_vecs,
+            structure.cell,
             CALPHA_global,
             dftorch_params["PME_order"],
         )
-        # nbr_state = NeighborState(positions_global, structure.lattice_vecs, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=False)
+        # nbr_state = NeighborState(positions_global, structure.cell, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=False)
         # disps_global, dists_global, nbr_inds_global = calculate_dist_dips(positions_global, nbr_state, dftorch_params['cutoff'])
     else:
         positions_global, CALPHA_global, PME_data_global = [None] * 3
@@ -222,7 +222,7 @@ def scf(
     # Final global calcs: nuclear repulsion, PME,
     if dist.get_rank() == 0:
         # nuclear repulsion
-        e_repulsion, dVr = get_repulsion_energy(
+        e_repulsion, dVr, stress_repulsion = get_repulsion_energy(
             structure.const.R_rep_tensor,
             structure.const.rep_splines_tensor,
             structure.const.close_exp_tensor,
@@ -230,7 +230,7 @@ def scf(
             structure.RX,
             structure.RY,
             structure.RZ,
-            structure.LBox,
+            structure.cell,
             6.0,
             structure.Nats,  # repulsive_rcut
             structure.const,
@@ -241,7 +241,7 @@ def scf(
         ewald_e1, f_coul, dq_p1 = calculate_PME_ewald(
             positions_global.detach().clone(),
             q_global,
-            structure.lattice_vecs,
+            structure.cell,
             nl,
             disps_global,
             dists_global,
@@ -327,7 +327,7 @@ def scf_step(
         ewald_e1, forces1, CoulPot = calculate_PME_ewald(
             positions_global.detach().clone(),
             q_global,
-            structure.lattice_vecs,
+            structure.cell,
             nl,
             disps_global,
             dists_global,
@@ -409,7 +409,7 @@ def scf_step(
             ch_structure.ch[: ch_structure.core_size],
             ch_structure.hindex.cpu(),
             structure.coordinates.T.cpu().numpy(),
-            structure.lattice_vecs.cpu().numpy(),
+            structure.cell.cpu().numpy(),
             nl.cpu().numpy(),
             alpha=0.7,
         )

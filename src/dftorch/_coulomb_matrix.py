@@ -2,9 +2,79 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional  # <-- add Optional
+from typing import Optional, Dict  # <-- add Optional, Dict
 
 import torch
+
+
+# ── Van der Waals radii (Bondi / Mantina) in Angstrom ───────────────────
+# Source: Bondi, J. Phys. Chem. 68:441 (1964);
+#         Mantina et al., J. Phys. Chem. A 113:5806 (2009).
+# -1 means unavailable.  Only elements needed for DFTB are listed;
+# the full table mirrors DFTB+ `vdwdata.F90`.
+_VDW_RADII_PM: Dict[int, int] = {
+    1: 120,
+    2: 140,
+    3: 182,
+    4: 153,
+    5: 192,
+    6: 170,
+    7: 155,
+    8: 152,
+    9: 147,
+    10: 154,
+    11: 227,
+    12: 173,
+    13: 184,
+    14: 210,
+    15: 180,
+    16: 180,
+    17: 175,
+    18: 188,
+    19: 275,
+    20: 231,
+    21: 211,
+    28: 163,
+    29: 140,
+    30: 139,
+    31: 187,
+    32: 211,
+    33: 185,
+    34: 190,
+    35: 185,
+    36: 202,
+    46: 163,
+    47: 172,
+    48: 158,
+    49: 193,
+    50: 217,
+    51: 206,
+    52: 206,
+    53: 198,
+    54: 216,
+    55: 343,
+    56: 268,
+    78: 175,
+    79: 166,
+    80: 155,
+    81: 196,
+    82: 202,
+    83: 207,
+    84: 197,
+    85: 202,
+    86: 220,
+    92: 186,
+}
+
+# Default H5 element-specific scaling factors k_XH (Řezáč, JCTC 13, 4804, 2017)
+_H5_DEFAULT_SCALING: Dict[int, float] = {
+    7: 0.18,  # N
+    8: 0.06,  # O
+    16: 0.21,  # S
+}
+
+# gaussianWidthFactor = 0.5 / sqrt(2 * ln(2))  ≈ 0.42466
+_GAUSS_WIDTH_FACTOR = 0.5 / math.sqrt(2.0 * math.log(2.0))
 
 
 def coulomb_matrix_vectorized(
@@ -13,8 +83,7 @@ def coulomb_matrix_vectorized(
     RX: torch.Tensor,
     RY: torch.Tensor,
     RZ: torch.Tensor,
-    LBox: Optional[torch.Tensor],  # <-- was: torch.Tensor | None
-    lattice_vecs: torch.Tensor,
+    cell: torch.Tensor,
     Nr_atoms: int,
     Coulomb_acc: float,
     nnRx: torch.Tensor,
@@ -25,6 +94,8 @@ def coulomb_matrix_vectorized(
     neighbor_J: torch.Tensor,
     CALPHA: float,
     verbose: bool = False,
+    h_damp_exp: Optional[float] = None,
+    h5_params: Optional[Dict] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the Ewald-summed Coulomb matrix and its Cartesian derivatives.
 
@@ -45,10 +116,7 @@ def coulomb_matrix_vectorized(
         Long tensor of shape `(Nr_atoms,)` with per-atom element/type ids.
     RX, RY, RZ:
         Float tensors of shape `(Nr_atoms,)` giving Cartesian coordinates in Å.
-    LBox:
-        Float tensor of shape `(3,)` (orthorhombic box lengths in Å). If `None`,
-        the k-space term is skipped.
-    lattice_vecs:
+    cell:
         Float tensor of shape `(3, 3)` with lattice vectors; used for cell volume.
     Nr_atoms:
         Number of atoms in the system.
@@ -91,11 +159,21 @@ def coulomb_matrix_vectorized(
     dR_dxyz = Rab / dR.unsqueeze(-1)
     # dist_mask = (dR <= COULCUT)*(dR > 1e-12)
 
-    use_ewald = LBox is not None
+    use_ewald = cell is not None
 
     ##################
     CC_real, dCC_dxyz_real = ewald_real_space_vectorized(
-        Hubbard_U, TYPE, dR, dR_dxyz, nnType, neighbor_I, neighbor_J, CALPHA, use_ewald
+        Hubbard_U,
+        TYPE,
+        dR,
+        dR_dxyz,
+        nnType,
+        neighbor_I,
+        neighbor_J,
+        CALPHA,
+        use_ewald,
+        h_damp_exp=h_damp_exp,
+        h5_params=h5_params,
     )
     ##################
 
@@ -104,13 +182,13 @@ def coulomb_matrix_vectorized(
 
     ## Second, k-space
     start_time1 = time.perf_counter()
-    if LBox is None:
+    if cell is None:
         CC_k, dCC_dR_k = 0.0, 0.0
     else:
         if verbose:
             print("  Doing Coulomb k")
         CC_k, dCC_dR_k = ewald_k_space_vectorized(
-            RX, RY, RZ, LBox, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
+            RX, RY, RZ, cell, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
         )
         print("  Coulomb_k t {:.1f} s\n".format(time.perf_counter() - start_time1))
 
@@ -130,15 +208,17 @@ def ewald_real_space_vectorized(
     neighbor_J: torch.Tensor,
     CALPHA: float,
     use_ewald: bool,
+    h_damp_exp: Optional[float] = None,
+    h5_params: Optional[Dict] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Real-space Ewald contribution using a neighbor list (vectorized).
 
     Parameters
     ----------
     Hubbard_U:
-        `(Nr_atoms,)` float tensor.
+        `(Nr_atoms,)` float tensor (eV).
     TYPE:
-        `(Nr_atoms,)` long tensor.
+        `(Nr_atoms,)` long tensor (atomic numbers, 1-based).
     dR:
         Distance tensor with same leading shape as `nnType` (typically `(Nr_atoms, MAXNN)`).
     dR_dxyz:
@@ -149,6 +229,18 @@ def ewald_real_space_vectorized(
         1D long tensors defining the flattened pair list (aligned with `nnType != -1`).
     CALPHA:
         Ewald splitting parameter α.
+    h_damp_exp:
+        Hydrogen damping exponent ζ for DFTB3.  When not None the short-range
+        gamma for every pair that involves at least one hydrogen atom is
+        multiplied by ``exp(−((U_A + U_B) / 2)^ζ · r²)`` (Hubbard U in Hartree,
+        r in Bohr).  Typical values: 4.0 (mio-1-1) or 4.05 (3ob-3-1).
+        See J. Phys. Chem. A 111, 10865 (2007).
+    h5_params:
+        H5 hydrogen bond correction parameters (Řezáč, JCTC 13, 4804, 2017).
+        Dict with optional keys ``r_scaling`` (default 0.714), ``w_scaling``
+        (default 0.25), and ``h5_scaling`` (dict mapping atomic number → k_XH,
+        defaults: {7: 0.18, 8: 0.06, 16: 0.21}).  Mutually exclusive with
+        *h_damp_exp* (DFTB+ convention).
 
     Returns
     -------
@@ -189,6 +281,66 @@ def ewald_real_space_vectorized(
         tmp1 = CA.clone()
         dtmp1 = dCA.clone()
 
+    # ── Hydrogen gamma damping (DFTB3) ──────────────────────────────────
+    # For pairs involving at least one H atom, the short-range gamma is
+    # multiplied by exp(rTmp · r²) where rTmp = −((U_A+U_B)/2)^ζ  (a.u.).
+    # The product rule gives:
+    #   γ_h  = γ · D         and     γ_h' = γ'·D + γ · D'
+    # with D = exp(rTmp·r²), D' = 2·rTmp·r·D.
+    if h_damp_exp is not None:
+        EV_TO_HA = 1.0 / 27.211386245988
+        ANG_TO_BOHR = 1.0 / 0.52917721067
+        is_H_I = TYPE[neighbor_I] == 1  # H has atomic number 1
+        is_H_J = TYPE[neighbor_J] == 1
+        h_mask = is_H_I | is_H_J  # pairs with at least one hydrogen
+    # ────────────────────────────────────────────────────────────────────
+
+    # ── H5 correction (Řezáč, JCTC 13, 4804, 2017) ─────────────────────
+    # For pairs where *exactly one* atom is H, the short-range gamma is
+    # scaled: γ_H5 = γ·(1+G) − G/r  and  γ'_H5 = γ·G' + γ'·(1+G) − (G'/r − G/r²)
+    # with G = k_XH · exp(−0.5·(r−r₀)²/c²), G' = −G·(r−r₀)/c²
+    # where r₀ = s_r·(rVdW_X + rVdW_H), c = s_w·(rVdW_X + rVdW_H)·gaussWidthFactor
+    # Mutually exclusive with h_damp_exp (DFTB+ convention).
+    _apply_h5 = False
+    print(h5_params, h_damp_exp)
+    if h5_params is not None and h_damp_exp is not None:
+        import warnings
+
+        warnings.warn(
+            "Both h_damp_exp and h5_params are set. These are mutually exclusive "
+            "(DFTB+ convention). h5_params will be ignored; only gamma damping is applied.",
+            stacklevel=2,
+        )
+    if h5_params is not None and h_damp_exp is None:
+        _h5_r_scaling = h5_params.get("r_scaling", 0.714)
+        _h5_w_scaling = h5_params.get("w_scaling", 0.25)
+        _h5_scaling = h5_params.get("h5_scaling", _H5_DEFAULT_SCALING)  # {Z: k}
+        # vdW radius of H in Angstrom
+        _vdw_H_ang = _VDW_RADII_PM.get(1, 120) * 0.01  # pm → Å = 1.20 Å
+        is_H_I_h5 = TYPE[neighbor_I] == 1
+        is_H_J_h5 = TYPE[neighbor_J] == 1
+        # exactly one H
+        h5_mask_all = is_H_I_h5 ^ is_H_J_h5  # XOR
+        if h5_mask_all.any():
+            _apply_h5 = True
+            # For each H-X pair, identify heavy-atom Z and look up k_XH
+            heavy_Z = torch.where(is_H_I_h5, TYPE[neighbor_J], TYPE[neighbor_I])
+            # Build per-pair k_XH and sumVdW (Å) tensors
+            k_XH_all = torch.zeros_like(dR_mskd)
+            sumVdW_all = torch.zeros_like(dR_mskd)
+            for z_heavy, k_val in _h5_scaling.items():
+                z_mask = h5_mask_all & (heavy_Z == z_heavy)
+                if z_mask.any():
+                    vdw_heavy_ang = _VDW_RADII_PM.get(z_heavy, -1) * 0.01
+                    if vdw_heavy_ang > 0:
+                        k_XH_all[z_mask] = k_val
+                        sumVdW_all[z_mask] = _vdw_H_ang + vdw_heavy_ang
+            # Redefine h5_mask to only include pairs with positive k and vdW
+            h5_mask_active = h5_mask_all & (k_XH_all > 0.0)
+            if not h5_mask_active.any():
+                _apply_h5 = False
+    # ────────────────────────────────────────────────────────────────────
+
     mask_same_elem = TYPE[neighbor_I] == TYPE[neighbor_J]
     if mask_same_elem.any():
         dR_mskd_same = dR_mskd[mask_same_elem]
@@ -200,10 +352,29 @@ def ewald_real_space_vectorized(
         SSD = 11 * Ti_same_el / 16.0
         EXPTI = torch.exp(-Ti_same_el * dR_mskd_same)
         tmp = SSB * dR_mskd_same**2 + SSC * dR_mskd_same + SSD + 1.0 / dR_mskd_same
-        tmp1[mask_same_elem] -= EXPTI * tmp
-        dtmp1[mask_same_elem] -= EXPTI * (
+        sr_val = EXPTI * tmp  # γ(r)
+        sr_deriv = EXPTI * (
             (-Ti_same_el) * tmp + (2 * SSB * dR_mskd_same + SSC - 1.0 / dR_mskd_same**2)
-        )
+        )  # γ'(r)
+
+        # Apply H-damping to same-element pairs (H-H only, since same elem)
+        if h_damp_exp is not None:
+            h_mask_same = h_mask[mask_same_elem]
+            if h_mask_same.any():
+                Ui_au = Hubbard_U[neighbor_I][mask_same_elem][h_mask_same] * EV_TO_HA
+                Uj_au = Hubbard_U[neighbor_J][mask_same_elem][h_mask_same] * EV_TO_HA
+                r_au = dR_mskd_same[h_mask_same] * ANG_TO_BOHR
+                rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
+                D = torch.exp(rTmp * r_au**2)
+                Dprime = 2.0 * rTmp * r_au * D * ANG_TO_BOHR  # d(D)/d(r_Ang)
+                sr_val_h = sr_val[h_mask_same]
+                sr_deriv_h = sr_deriv[h_mask_same]
+                sr_val[h_mask_same] = sr_val_h * D
+                sr_deriv[h_mask_same] = sr_deriv_h * D + sr_val_h * Dprime
+
+        tmp1[mask_same_elem] -= sr_val
+        dtmp1[mask_same_elem] -= sr_deriv
+
     if (~mask_same_elem).any():
         dR_mskd_diff = dR_mskd[~mask_same_elem]
         Ti_diff_el = Ti[~mask_same_elem]
@@ -224,10 +395,52 @@ def ewald_real_space_vectorized(
         SF = (TI6 - 3 * TI4 * TJ2) / (TJ2MTI2**3)
         COULOMBV_tmp1 = SB - SC / dR_mskd_diff
         COULOMBV_tmp2 = SE - SF / dR_mskd_diff
-        tmp1[~mask_same_elem] -= EXPTI * COULOMBV_tmp1 + EXPTJ * COULOMBV_tmp2
-        dtmp1[~mask_same_elem] -= EXPTI * (
+        sr_val = EXPTI * COULOMBV_tmp1 + EXPTJ * COULOMBV_tmp2  # γ(r)
+        sr_deriv = EXPTI * (
             (-Ti_diff_el) * COULOMBV_tmp1 + SC / dR_mskd_diff**2
-        ) + EXPTJ * ((-Tj_diff_el) * COULOMBV_tmp2 + SF / dR_mskd_diff**2)
+        ) + EXPTJ * ((-Tj_diff_el) * COULOMBV_tmp2 + SF / dR_mskd_diff**2)  # γ'(r)
+
+        # Apply H-damping to different-element pairs (H-X or X-H)
+        if h_damp_exp is not None:
+            h_mask_diff = h_mask[~mask_same_elem]
+            if h_mask_diff.any():
+                Ui_au = Hubbard_U[neighbor_I][~mask_same_elem][h_mask_diff] * EV_TO_HA
+                Uj_au = Hubbard_U[neighbor_J][~mask_same_elem][h_mask_diff] * EV_TO_HA
+                r_au = dR_mskd_diff[h_mask_diff] * ANG_TO_BOHR
+                rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
+                D = torch.exp(rTmp * r_au**2)
+                Dprime = 2.0 * rTmp * r_au * D * ANG_TO_BOHR  # d(D)/d(r_Ang)
+                sr_val_h = sr_val[h_mask_diff]
+                sr_deriv_h = sr_deriv[h_mask_diff]
+                sr_val[h_mask_diff] = sr_val_h * D
+                sr_deriv[h_mask_diff] = sr_deriv_h * D + sr_val_h * Dprime
+
+        # Apply H5 correction to different-element pairs (exactly one H)
+        # γ_H5 = γ·(1+G) − G/r ;  γ'_H5 = γ·G' + γ'·(1+G) − (G'/r − G/r²)
+        elif _apply_h5:
+            h5_mask_diff = h5_mask_active[~mask_same_elem]
+            if h5_mask_diff.any():
+                r_h5 = dR_mskd_diff[h5_mask_diff]  # in Å
+                k_h5 = k_XH_all[~mask_same_elem][h5_mask_diff]
+                svdw = sumVdW_all[~mask_same_elem][h5_mask_diff]  # in Å
+                r0 = _h5_r_scaling * svdw
+                cc = _h5_w_scaling * svdw * _GAUSS_WIDTH_FACTOR
+                gauss = k_h5 * torch.exp(-0.5 * (r_h5 - r0) ** 2 / cc**2)
+                dgauss = -gauss * (r_h5 - r0) / cc**2
+
+                sr_val_h5 = sr_val[h5_mask_diff]
+                sr_deriv_h5 = sr_deriv[h5_mask_diff]
+                # scaled value:  γ·(1+G) − G/r
+                sr_val[h5_mask_diff] = sr_val_h5 * (1.0 + gauss) - gauss / r_h5
+                # scaled derivative (product rule):
+                # deriv1 = γ·G' + γ'·(1+G)
+                # deriv2 = G'/r − G/r²
+                deriv1 = sr_val_h5 * dgauss + sr_deriv_h5 * (1.0 + gauss)
+                deriv2 = dgauss / r_h5 - gauss / r_h5**2
+                sr_deriv[h5_mask_diff] = deriv1 - deriv2
+
+        tmp1[~mask_same_elem] -= sr_val
+        dtmp1[~mask_same_elem] -= sr_deriv
 
     tmp1 *= KECONST
     dtmp1 *= KECONST
@@ -247,8 +460,7 @@ def ewald_k_space_vectorized(
     RX: torch.Tensor,
     RY: torch.Tensor,
     RZ: torch.Tensor,
-    LBox: torch.Tensor,
-    lattice_vecs: torch.Tensor,
+    cell: torch.Tensor,
     DELTAQ: torch.Tensor,
     Nr_atoms: int,
     COULACC: float,
@@ -262,9 +474,7 @@ def ewald_k_space_vectorized(
     ----------
     RX, RY, RZ:
         `(Nr_atoms,)` coordinate tensors in Å.
-    LBox:
-        `(3,)` box lengths in Å (orthorhombic).
-    lattice_vecs:
+    cell:
         `(3, 3)` lattice vectors (used for volume determinant).
     DELTAQ:
         Charge-difference tensor (not used; kept for API compatibility).
@@ -289,21 +499,27 @@ def ewald_k_space_vectorized(
 
     device = RX.device
 
-    COULVOL = torch.abs(torch.det(lattice_vecs))
+    COULVOL = torch.abs(torch.det(cell))
     SQRTX = math.sqrt(-math.log(COULACC))
 
     CALPHA2 = CALPHA * CALPHA
     KCUTOFF = 2 * CALPHA * SQRTX
     KCUTOFF2 = KCUTOFF * KCUTOFF
 
-    RECIPVECS = torch.zeros((3, 3), dtype=RX.dtype, device=device)
-    RECIPVECS[0, 0] = 2 * math.pi / LBox[0]
-    RECIPVECS[1, 1] = 2 * math.pi / LBox[1]
-    RECIPVECS[2, 2] = 2 * math.pi / LBox[2]
+    cell_inv = torch.linalg.inv(cell)
+    RECIPVECS = 2.0 * math.pi * cell_inv.T
 
-    LMAX = int(KCUTOFF / RECIPVECS[0, 0])
-    MMAX = int(KCUTOFF / RECIPVECS[1, 1])
-    NMAX = int(KCUTOFF / RECIPVECS[2, 2])
+    # LMAX = int(KCUTOFF / RECIPVECS[0, 0])
+    # MMAX = int(KCUTOFF / RECIPVECS[1, 1])
+    # NMAX = int(KCUTOFF / RECIPVECS[2, 2])
+
+    g1_norm = torch.norm(RECIPVECS[:, 0])
+    g2_norm = torch.norm(RECIPVECS[:, 1])
+    g3_norm = torch.norm(RECIPVECS[:, 2])
+
+    LMAX = int(torch.ceil(torch.tensor(KCUTOFF / g1_norm)).item())
+    MMAX = int(torch.ceil(torch.tensor(KCUTOFF / g2_norm)).item())
+    NMAX = int(torch.ceil(torch.tensor(KCUTOFF / g3_norm)).item())
 
     KECONST = 14.3996437701414  # in eV·Å/e²
     SQRTPI = math.sqrt(math.pi)
@@ -374,7 +590,8 @@ def ewald_k_space_vectorized(
                 NMIN = 1 if (L == 0 and M == 0) else -NMAX
                 for N in range(NMIN, NMAX + 1):
                     kvec = (
-                        L * RECIPVECS[:, 0] + M * RECIPVECS[:, 1] + N * RECIPVECS[:, 2]
+                        torch.tensor([L, M, N], dtype=RX.dtype, device=device)
+                        @ RECIPVECS
                     )
                     K2 = torch.dot(kvec, kvec)
                     if K2 > KCUTOFF2:
@@ -429,8 +646,6 @@ def ewald_real_space_vectorized_sr(
         Normalized displacement vectors (dR_x, dR_y, dR_z) between atoms and their neighbors (d_dR/dxyz).
     dist_mask : torch.BoolTensor of shape (Nr_atoms, MAXNN)
         Boolean mask indicating which neighbor distances fall within the real-space Ewald cutoff.
-    LBox : tuple of floats
-        Simulation box lengths (Lx, Ly, Lz) used to define periodic boundary conditions.
     Hubbard_U : torch.Tensor of shape (Nr_atoms,)
         Hubbard U parameters for the atoms, used in short-range corrections.
     TYPE : torch.Tensor of shape (Nr_atoms,)

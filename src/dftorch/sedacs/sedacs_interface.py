@@ -20,7 +20,7 @@ def get_nl(structure, dftorch_params):
     )
     nbr_state = NeighborState(
         positions,
-        structure.lattice_vecs,
+        structure.cell,
         None,
         dftorch_params["cutoff"],
         is_dense=True,
@@ -170,7 +170,7 @@ def get_subsy_on_rank(structure, dftorch_params, q, ch, core_size, CoulPot, devi
 
     ch_structure = Structure(
         None,
-        structure.LBox,
+        structure.cell,
         structure.const,
         charge=0,
         Te=structure.Te,
@@ -192,7 +192,7 @@ def get_subsy_on_rank(structure, dftorch_params, q, ch, core_size, CoulPot, devi
     )
     nbr_state = NeighborState(
         positions,
-        ch_structure.lattice_vecs,
+        ch_structure.cell,
         None,
         dftorch_params["h0_cutoff"],
         is_dense=True,
@@ -462,7 +462,7 @@ def kernel_global(
             _, _, d_CoulPot = calculate_PME_ewald(
                 positions_global.detach().clone(),
                 v,
-                structure.lattice_vecs,
+                structure.cell,
                 nbr_inds_global,
                 disps_global,
                 dists_global,

@@ -3,6 +3,7 @@ import torch
 from collections import deque
 
 from ._tools import fractional_matrix_power_symm
+
 from ._dm_fermi import dm_fermi
 from ._dm_fermi_x import (
     dm_fermi_x,
@@ -28,12 +29,85 @@ import time
 from typing import Optional, Dict, Any, Tuple
 
 
+# ---------------------------------------------------------------------------
+# Anderson / Pulay DIIS charge mixer
+# ---------------------------------------------------------------------------
+class _AndersonMixer:
+    """History-based Anderson (Pulay/DIIS) charge mixer.
+
+    Keeps the last *depth* (input, residual) pairs and solves the
+    least-squares problem
+
+        min_{c} ||Σ_i c_i R_i||²   s.t.  Σ c_i = 1
+
+    to return the extrapolated update:
+
+        q_new = Σ_i c_i (q_i + α R_i)
+
+    where α = ``alpha`` (damping / mixing parameter).
+
+    For the first step (no history) it falls back to simple linear mixing.
+    """
+
+    def __init__(self, alpha: float = 0.2, depth: int = 8):
+        self.alpha = alpha
+        self.depth = depth
+        self._q_hist: deque = deque(maxlen=depth)  # input charges
+        self._r_hist: deque = deque(maxlen=depth)  # residuals
+
+    def reset(self):
+        self._q_hist.clear()
+        self._r_hist.clear()
+
+    def mix(self, q_in: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        """Return next mixed charge vector."""
+        self._q_hist.append(q_in.clone())
+        self._r_hist.append(residual.clone())
+
+        m = len(self._r_hist)
+        if m == 1:
+            # Simple linear mixing on first step
+            return q_in + self.alpha * residual
+
+        # Build overlap matrix of residuals  A_{ij} = R_i · R_j
+        R = torch.stack(list(self._r_hist))  # (m, N)  or (m, 2, N) for OS
+        R_flat = R.reshape(m, -1)
+        A = R_flat @ R_flat.T  # (m, m)
+
+        # Tikhonov regularization to prevent ill-conditioned DIIS
+        reg = 1e-12 * torch.eye(m, device=q_in.device, dtype=q_in.dtype)
+        A = A + reg * A.diag().max().clamp(min=1e-30)
+
+        # Constrained least squares via bordered matrix:
+        #   [ A  1 ] [ c  ]   [ 0 ]
+        #   [ 1  0 ] [ λ  ] = [ 1 ]
+        B = torch.zeros(m + 1, m + 1, device=q_in.device, dtype=q_in.dtype)
+        B[:m, :m] = A
+        B[:m, m] = 1.0
+        B[m, :m] = 1.0
+        rhs = torch.zeros(m + 1, device=q_in.device, dtype=q_in.dtype)
+        rhs[m] = 1.0
+
+        try:
+            sol = torch.linalg.solve(B, rhs)
+        except torch.linalg.LinAlgError:
+            # Singular — fall back to simple mixing
+            return q_in + self.alpha * residual
+
+        c = sol[:m]  # coefficients that sum to 1
+
+        # Extrapolated update:  Σ c_i (q_i + α R_i)
+        Q = torch.stack(list(self._q_hist))  # (m, N) or (m, 2, N)
+        q_new = torch.einsum("i,i...->...", c, Q + self.alpha * R)
+        return q_new
+
+
 def SCFx(
     dftorch_params: Dict[str, Any],
     RX,
     RY,
     RZ,
-    lattice_vecs: torch.Tensor,
+    cell: torch.Tensor,
     Nats: int,
     Nocc: int,
     n_orbitals_per_atom: torch.Tensor,
@@ -49,6 +123,9 @@ def SCFx(
     Efield: torch.Tensor,
     C: torch.Tensor,
     req_grad_xyz: bool,
+    q_init: Optional[torch.Tensor] = None,
+    gbsa=None,
+    thirdorder=None,
 ) -> Tuple[
     torch.Tensor,  # H
     torch.Tensor,  # Hcoul
@@ -79,7 +156,7 @@ def SCFx(
     structure : object
         Container providing required system data/attributes:
         - RX, RY, RZ: (Nats,) atomic coordinates (torch.Tensor)
-        - lattice_vecs: (3,3) lattice vectors (torch.Tensor), for PME
+        - cell: (3,3) lattice vectors (torch.Tensor), for PME
         - n_orbitals_per_atom: (Nats,) number of AOs per atom (torch.Tensor)
         - Znuc: (Nats,) nuclear charges (torch.Tensor)
         - Hubbard_U: (Nats,) onsite U (torch.Tensor)
@@ -164,16 +241,16 @@ def SCFx(
             (RX, RY, RZ),
         )
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
-            lattice_vecs.cpu().numpy(),
+            cell.cpu().numpy(),
             dftorch_params["cutoff"],
             dftorch_params["Coulomb_acc"],
         )
         PME_data = init_PME_data(
-            grid_dimensions, lattice_vecs, CALPHA, dftorch_params["PME_order"]
+            grid_dimensions, cell, CALPHA, dftorch_params["PME_order"]
         )
         nbr_state = NeighborState(
             positions,
-            lattice_vecs,
+            cell,
             None,
             dftorch_params["cutoff"],
             is_dense=True,
@@ -203,23 +280,40 @@ def SCFx(
         )
         Hdipole = 0.5 * Hdipole @ S + 0.5 * S @ Hdipole
         H0 = H0 + Hdipole
-        Dorth, Q, e, f, mu0 = dm_fermi_x(
-            Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
-        )
 
-        print("  Initial mu = {:.4f}".format(mu0.item()))
+        if q_init is None:
+            Dorth, Q, e, f, mu0 = dm_fermi_x(
+                Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
+            )
 
-        D = Z @ Dorth @ Z.T
-        DS = 2 * torch.diag(D @ S)
-        q = -1.0 * Znuc
-        q.scatter_add_(
-            0, atom_ids, DS
-        )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+            print("  Initial mu = {:.4f}".format(mu0.item()))
+
+            D = Z @ Dorth @ Z.T
+            DS = 2 * torch.diag(D @ S)
+            q = -1.0 * Znuc
+            q.scatter_add_(
+                0, atom_ids, DS
+            )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        else:
+            q = q_init.clone()
 
         KK = -dftorch_params["SCF_ALPHA"] * torch.eye(
             Nats, device=H0.device
         )  # Initial mixing coefficient for linear mixing
         # KK0 = KK*torch.eye(Nats, device=H0.device)
+
+        # Anderson / Pulay DIIS mixer for pre-Krylov phase
+        anderson_depth = dftorch_params.get("ANDERSON_DEPTH", 8)
+        if anderson_depth > 0:
+            anderson_alpha = dftorch_params.get(
+                "ANDERSON_ALPHA", max(dftorch_params["SCF_ALPHA"], 0.2)
+            )
+            _mixer = _AndersonMixer(
+                alpha=anderson_alpha,
+                depth=anderson_depth,
+            )
+        else:
+            _mixer = None
 
         ResNorm = torch.tensor([2.0], device=device)
         dEc = torch.tensor([1000.0], device=device)
@@ -241,7 +335,7 @@ def SCFx(
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
                         positions.detach().clone(),
                         q,
-                        lattice_vecs,
+                        cell,
                         nbr_inds,
                         disps,
                         dists,
@@ -257,6 +351,16 @@ def SCFx(
 
             else:
                 CoulPot = C @ q
+
+            # Add GBSA Born shift to Coulomb potential
+            if gbsa is not None:
+                CoulPot = CoulPot + gbsa.get_shifts(q)
+
+            # Add full off-diagonal DFTB3 shift to Coulomb potential
+            # (replaces the diagonal-only dU_dq term inside calc_q)
+            if thirdorder is not None:
+                CoulPot = CoulPot + thirdorder.get_shifts(q)
+
             q_old = q.clone()
 
             q, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q(
@@ -270,27 +374,22 @@ def SCFx(
                 Nocc,
                 Znuc,
                 atom_ids,
-                dU_dq_gathered,
+                dU_dq_gathered if thirdorder is None else None,
             )
             Res = q - q_old
             ResNorm = torch.norm(Res)
-            K0Res = KK @ Res
 
-            if (
-                it == dftorch_params["KRYLOV_START"]
-            ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
-                # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
-                # KK0 = KK.clone()  # To be kept as preconditioner
-                1
-            # Preconditioned Low-Rank Krylov _scf acceleration
-            if it > dftorch_params["KRYLOV_START"]:
-                # Preconditioned residual
+            # --- Charge mixing ---
+            use_krylov = it > dftorch_params["KRYLOV_START"]
+
+            if use_krylov:
+                K0Res = KK @ Res
+                # Preconditioned Low-Rank Krylov _scf acceleration
                 K0Res = kernel_update_lr(
                     RX,
                     RY,
                     RZ,
-                    lattice_vecs,
+                    cell,
                     TYPE,
                     Nats,
                     Hubbard_U,
@@ -312,11 +411,18 @@ def SCFx(
                     disps,
                     dists,
                     CALPHA,
-                    dU_dq,
+                    dU_dq if thirdorder is None else None,
+                    gbsa,
+                    thirdorder=thirdorder,
                 )
-
-            # Mixing update (vector-form)
-            q = q_old - K0Res
+                q = q_old - K0Res
+            elif _mixer is not None:
+                # Anderson / DIIS mixing (pre-Krylov)
+                q = _mixer.mix(q_old, Res)
+            else:
+                # Simple linear mixing fallback
+                K0Res = KK @ Res
+                q = q_old - K0Res
 
             Ecoul_old = Ecoul.clone()
             if dftorch_params["coul_method"] == "PME":
@@ -324,8 +430,11 @@ def SCFx(
             else:
                 Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * Hubbard_U)
 
-            if dU_dq is not None:
-                Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3)  # ← ADD
+            # Third-order energy contribution
+            if thirdorder is not None:
+                Ecoul = Ecoul + thirdorder.get_energy(q)
+            elif dU_dq is not None:
+                Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3)
 
             # dEb = torch.abs(Eband0_old - Eband0)
             dEc = torch.abs(Ecoul_old - Ecoul)
@@ -347,10 +456,10 @@ def SCFx(
     q.scatter_add_(0, atom_ids, DS)
 
     if dftorch_params["coul_method"] == "PME":
-        ewald_e1, forces1, dq_p1 = calculate_PME_ewald(
+        ewald_e1, forces1, dq_p1, stress_coul = calculate_PME_ewald(
             positions,  # .detach().clone(),
             q,
-            lattice_vecs,
+            cell,
             nbr_inds,
             disps,
             dists,
@@ -362,12 +471,13 @@ def SCFx(
             screening=1,
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
+            calculate_stress=0 if req_grad_xyz else 1,
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
     else:
-        Ecoul, forces1, dq_p1 = None, None, None
+        Ecoul, forces1, dq_p1, stress_coul = None, None, None, None
 
-    return H, Hcoul, Hdipole, KK, D, Q, q, f, mu0, Ecoul, forces1, dq_p1
+    return H, Hcoul, Hdipole, KK, D, Q, q, f, mu0, Ecoul, forces1, dq_p1, stress_coul
 
 
 def scf_x_os(
@@ -380,7 +490,7 @@ def scf_x_os(
     RX,
     RY,
     RZ,
-    lattice_vecs: torch.Tensor,
+    cell: torch.Tensor,
     Nats: int,
     Nocc: int,
     n_orbitals_per_atom: torch.Tensor,
@@ -397,6 +507,8 @@ def scf_x_os(
     C: torch.Tensor,
     req_grad_xyz: bool,
     q_spin_sr_init: Optional[torch.Tensor] = None,
+    gbsa=None,
+    thirdorder=None,
 ) -> Tuple[
     torch.Tensor,  # H
     torch.Tensor,  # Hcoul
@@ -443,16 +555,16 @@ def scf_x_os(
             (RX, RY, RZ),
         )
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
-            lattice_vecs.cpu().numpy(),
+            cell.cpu().numpy(),
             dftorch_params["cutoff"],
             dftorch_params["Coulomb_acc"],
         )
         PME_data = init_PME_data(
-            grid_dimensions, lattice_vecs, CALPHA, dftorch_params["PME_order"]
+            grid_dimensions, cell, CALPHA, dftorch_params["PME_order"]
         )
         nbr_state = NeighborState(
             positions,
-            lattice_vecs,
+            cell,
             None,
             dftorch_params["cutoff"],
             is_dense=True,
@@ -547,6 +659,19 @@ def scf_x_os(
         )  # shell-resolved. Initial mixing coefficient for linear mixing
         # KK0 = KK*torch.eye(Nats, device=H0.device)
 
+        # Anderson / Pulay DIIS mixer for pre-Krylov phase (open-shell)
+        anderson_depth = dftorch_params.get("ANDERSON_DEPTH", 8)
+        if anderson_depth > 0:
+            anderson_alpha = dftorch_params.get(
+                "ANDERSON_ALPHA", max(dftorch_params["SCF_ALPHA"], 0.2)
+            )
+            _mixer = _AndersonMixer(
+                alpha=anderson_alpha,
+                depth=anderson_depth,
+            )
+        else:
+            _mixer = None
+
         ResNorm = torch.tensor(2.0, device=device)
         dEc = torch.tensor(1000.0, device=device)
         it = 0
@@ -567,7 +692,7 @@ def scf_x_os(
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
                         positions.detach().clone(),
                         q_tot_atom,
-                        lattice_vecs,
+                        cell,
                         nbr_inds,
                         disps,
                         dists,
@@ -582,6 +707,15 @@ def scf_x_os(
                     )
             else:
                 CoulPot = C @ q_tot_atom
+
+            # Add GBSA Born shift to Coulomb potential
+            if gbsa is not None:
+                CoulPot = CoulPot + gbsa.get_shifts(q_tot_atom)
+
+            # Add full off-diagonal DFTB3 shift
+            if thirdorder is not None:
+                CoulPot = CoulPot + thirdorder.get_shifts(q_tot_atom)
+
             q_spin_sr_old = q_spin_sr.clone()
 
             H_spin = get_h_spin(TYPE, net_spin_sr, w, n_shells_per_atom, shell_types)
@@ -599,7 +733,7 @@ def scf_x_os(
                 atom_ids,
                 atom_ids_sr,
                 el_per_shell,
-                dU_dq_gathered,
+                dU_dq_gathered if thirdorder is None else None,
                 dftorch_params.get("SHARED_MU", False),
             )
 
@@ -610,23 +744,18 @@ def scf_x_os(
 
             Res = q_spin_sr - q_spin_sr_old
             ResNorm = torch.norm(Res)
-            K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
 
-            if (
-                it == dftorch_params["KRYLOV_START"]
-            ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
-                # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
-                # KK0 = KK.clone()  # To be kept as preconditioner
-                1
-            # Preconditioned Low-Rank Krylov _scf acceleration
-            if it > dftorch_params["KRYLOV_START"]:
-                # Preconditioned residual
+            # --- Charge mixing ---
+            use_krylov = it > dftorch_params["KRYLOV_START"]
+
+            if use_krylov:
+                K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
+                # Preconditioned Low-Rank Krylov _scf acceleration
                 K0Res = kernel_update_lr_os(
                     RX,
                     RY,
                     RZ,
-                    lattice_vecs,
+                    cell,
                     TYPE,
                     Nats,
                     Hubbard_U,
@@ -652,11 +781,19 @@ def scf_x_os(
                     disps,
                     dists,
                     CALPHA,
-                    dU_dq,
+                    dU_dq if thirdorder is None else None,
+                    gbsa,
+                    thirdorder=thirdorder,
                 )
+                q_spin_sr = q_spin_sr_old - K0Res
+            elif _mixer is not None:
+                # Anderson / DIIS mixing (pre-Krylov)
+                q_spin_sr = _mixer.mix(q_spin_sr_old, Res)
+            else:
+                # Simple linear mixing fallback
+                K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
+                q_spin_sr = q_spin_sr_old - K0Res
 
-            # Mixing update (vector-form)
-            q_spin_sr = q_spin_sr_old - K0Res
             # q_tot_sr = q_spin_sr.sum(dim=0)
             q_tot_atom = torch.zeros_like(RX)
             q_tot_atom.scatter_add_(
@@ -702,10 +839,10 @@ def scf_x_os(
     q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0))  # atom-resolved
 
     if dftorch_params["coul_method"] == "PME":
-        ewald_e1, forces1, dq_p1 = calculate_PME_ewald(
+        ewald_e1, forces1, dq_p1, stress_coul = calculate_PME_ewald(
             positions,  # .detach().clone(),
             q_tot_atom,
-            lattice_vecs,
+            cell,
             nbr_inds,
             disps,
             dists,
@@ -717,10 +854,11 @@ def scf_x_os(
             screening=1,
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
+            calculate_stress=0 if req_grad_xyz else 1,
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
     else:
-        Ecoul, forces1, dq_p1 = None, None, None
+        Ecoul, forces1, dq_p1, stress_coul = None, None, None, None
 
     return (
         H,
@@ -738,6 +876,7 @@ def scf_x_os(
         Ecoul,
         forces1,
         dq_p1,
+        stress_coul,
     )
 
 
@@ -832,6 +971,19 @@ def SCFx_batch(
         )  # Initial mixing coefficient for linear mixing
         # KK0 = KK*torch.eye(Nats, device=H0.device)
 
+        # Anderson / Pulay DIIS mixer for pre-Krylov phase (batch)
+        anderson_depth = dftorch_params.get("ANDERSON_DEPTH", 8)
+        if anderson_depth > 0:
+            anderson_alpha = dftorch_params.get(
+                "ANDERSON_ALPHA", max(dftorch_params["SCF_ALPHA"], 0.2)
+            )
+            _mixer = _AndersonMixer(
+                alpha=anderson_alpha,
+                depth=anderson_depth,
+            )
+        else:
+            _mixer = None
+
         ResNorm = torch.zeros(batch_size, device=device) + 10.0  # float("inf")
         dEc = torch.zeros(batch_size, device=device) + 1000.0  # float("inf")
         it = 0
@@ -862,18 +1014,13 @@ def SCFx_batch(
             )
             Res = q - q_old
             ResNorm = torch.norm(Res, dim=1)
-            K0Res = torch.matmul(KK, Res.unsqueeze(-1)).squeeze(-1)
 
-            if (
-                it == dftorch_params["KRYLOV_START"]
-            ):  # Calculate full kernel after KRYLOV_START steps
-                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
-                # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
-                # KK0 = KK.clone()  # To be kept as preconditioner
-                1
-            # Preconditioned Low-Rank Krylov _scf acceleration
-            if it > dftorch_params["KRYLOV_START"]:
-                # Preconditioned residual
+            # --- Charge mixing ---
+            use_krylov = it > dftorch_params["KRYLOV_START"]
+
+            if use_krylov:
+                K0Res = torch.matmul(KK, Res.unsqueeze(-1)).squeeze(-1)
+                # Preconditioned Low-Rank Krylov _scf acceleration
                 K0Res = kernel_update_lr_batch(
                     Nats,
                     Hubbard_U_gathered,
@@ -897,9 +1044,14 @@ def SCFx_batch(
                     CALPHA,
                     dU_dq_gathered,
                 )
-
-            # Mixing update (vector-form)
-            q = q_old - K0Res
+                q = q_old - K0Res
+            elif _mixer is not None:
+                # Anderson / DIIS mixing (pre-Krylov)
+                q = _mixer.mix(q_old, Res)
+            else:
+                # Simple linear mixing fallback
+                K0Res = torch.matmul(KK, Res.unsqueeze(-1)).squeeze(-1)
+                q = q_old - K0Res
 
             Ecoul_old = Ecoul.clone()
 

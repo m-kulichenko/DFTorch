@@ -16,6 +16,7 @@ def energy(
     f: torch.Tensor,
     Te: float,
     dU_dq: torch.Tensor = None,
+    thirdorder=None,
 ):
     """
     Compute the total DFTB energy in the standard SCC formulation.
@@ -32,8 +33,7 @@ def energy(
     Efield : torch.Tensor
         External electric field vector, shape (3,).
     D0 : torch.Tensor
-        Reference (atomic) density. If a matrix, shape (n_orb, n_orb); if a
-        vector, shape (n_orb,). Used only to build a diagonal reference.
+        Reference (atomic) density as a vector, shape (n_orb,). Used only to build a diagonal reference.
     C : torch.Tensor
         Coulomb interaction. Either:
         - full matrix of shape (Nats, Nats), or
@@ -81,17 +81,31 @@ def energy(
         eps = 1e-10
 
     # Ensure D0 is diagonal for consistent subtraction
-    if D0.ndim == 2:
-        D0_diag = torch.diag(D0)
-    else:
-        D0_diag = torch.diag(D0)
+    # if D.ndim == 2:
+    #     D0_diag = torch.diag(D0)
+    # else:
+    #     D0_diag = torch.diag(D0)
+
+    if Rx.dim() == 1:  # non-batched
+        D0_mat = torch.diag(D0)
+        if D.dim() == 2:  # closed-shell
+            factor = 2
+        else:  # open-shell
+            factor = 1
+    else:  # batched
+        D0_mat = torch.diag_embed(D0)
+        if D.dim() == 3:  # closed-shell
+            factor = 2
+        else:
+            raise ValueError("Batched open-shell calculations are not supported yet.")
 
     # Band energy
     if Rx.dim() == 1:  # non-batched. both cs and os.
-        D = D - D0_diag.expand(2, -1, -1)
-        Eband0 = 1 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum()
+        Eband0 = factor * (H0 @ (D - D0_mat)).diagonal(offset=0, dim1=-2, dim2=-1).sum()
     else:  # batched
-        Eband0 = 2 * (H0 @ D).diagonal(offset=0, dim1=-2, dim2=-1).sum(-1)
+        Eband0 = factor * (H0 @ (D - D0_mat)).diagonal(offset=0, dim1=-2, dim2=-1).sum(
+            -1
+        )
 
     # Coulomb energy
     if Rx.dim() == 1:  # non-batched
@@ -105,8 +119,10 @@ def energy(
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
 
         # ── DFTB3 third-order correction ─────────────────────────────────
-        # E3 = (1/3) * sum_alpha (dU_alpha/dq_alpha) * q_alpha^3
-        if dU_dq is not None:
+        if thirdorder is not None:
+            Ecoul = Ecoul + thirdorder.get_energy(q)
+        elif dU_dq is not None:
+            # Diagonal-only fallback: E3 = (1/3) * sum_alpha (dU/dq)_alpha * q^3
             Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3)
         # ─────────────────────────────────────────────────────────────────
 
@@ -138,7 +154,17 @@ def energy(
     else:
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
-    factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
+    if Rx.dim() == 1:  # non-batched
+        if f.dim() == 1:  # closed-shell
+            factor = -2
+        else:  # open-shell
+            factor = -1
+    else:  # batched
+        if f.dim() == 2:  # closed-shell
+            factor = -2
+        else:
+            raise ValueError("Batched open-shell calculations are not supported yet.")
+
     E_entropy = factor * Te * S_ent
 
     # Total energy
@@ -163,6 +189,7 @@ def energy_shadow(
     f: torch.Tensor,
     Te: float,
     dU_dq: torch.Tensor = None,
+    thirdorder=None,
 ):
     """
     Compute the total “shadow” DFTB energy.
@@ -264,7 +291,10 @@ def energy_shadow(
             raise ValueError("Both C and dq_p1 are provided; only one expected.")
 
         # ── DFTB3 shadow third-order correction ──────────────────────────
-        if dU_dq is not None:
+        if thirdorder is not None:
+            # Full off-diagonal: shifts from n (shadow charges), energy with q (SCF)
+            Ecoul = Ecoul + thirdorder.get_energy_xlbomd(n, q)
+        elif dU_dq is not None:
             Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * (2.0 * q - n) * n**2)
         # ─────────────────────────────────────────────────────────────────
 
@@ -300,7 +330,17 @@ def energy_shadow(
     else:
         S_ent = -kB * term.sum(dim=-1)  # (B,)
 
-    factor = -2 if f.dim() == 1 else -1  # closed-shell or open-shell
+    if Rx.dim() == 1:  # non-batched
+        if f.dim() == 1:  # closed-shell
+            factor = -2
+        else:  # open-shell
+            factor = -1
+    else:  # batched
+        if f.dim() == 2:  # closed-shell
+            factor = -2
+        else:
+            raise ValueError("Batched open-shell calculations are not supported yet.")
+
     E_entropy = factor * Te * S_ent
 
     # Total energy

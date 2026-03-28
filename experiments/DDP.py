@@ -89,7 +89,7 @@ def run(rank, partsCoreHalo, structure1):
         structure1.RX[cur_ch],
         structure1.RY[cur_ch],
         structure1.RZ[cur_ch],
-        structure1.LBox,
+        structure1.cell,
         8.0,
         len(cur_ch),
         structure1.const,

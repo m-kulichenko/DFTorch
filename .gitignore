@@ -8,6 +8,8 @@ __pycache__/
 *.pyo
 *.pyd
 experiments/*.ipynb
+experiments/*.xyz
+experiments/*.pqr
 !experiments/1_tutorial.ipynb
 **/.ipynb_checkpoints/
 personal_github

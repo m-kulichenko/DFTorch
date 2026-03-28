@@ -2,6 +2,8 @@
 import numpy as np
 import re
 
+from dftorch._cell import _cell_to_pdb_cryst1
+
 
 def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
     with open(filename, "a+") as f:
@@ -61,7 +63,7 @@ ATOMIC_NUMBER_TO_SYMBOL = {
 
 
 def write_pdb_frame(
-    filename, structure, LBox=None, step=0, etot=None, temp=None, mode="a"
+    filename, structure, cell=None, step=0, etot=None, temp=None, mode="a"
 ):
     """
     Append one MD frame to a PDB trajectory file.
@@ -71,7 +73,11 @@ def write_pdb_frame(
     ----------
     filename  : str            output .pdb path
     structure : Structure      DFTorch structure object
-    LBox      : tensor|None    [Lx, Ly, Lz] in Angstrom — written as CRYST1 if given
+    cell      : tensor|None
+        Periodic cell specification in Angstrom:
+        - shape (3,)   for orthorhombic box lengths [Lx, Ly, Lz]
+        - shape (3,3)  for triclinic lattice vectors
+        Written as CRYST1 if given.
     step      : int            MD step number
     etot      : float|None     total energy in eV — written as REMARK
     temp      : float|None     temperature in K   — written as REMARK
@@ -79,14 +85,12 @@ def write_pdb_frame(
     """
     with open(filename, mode) as f:
         # CRYST1 — unit cell (required for periodic systems in PyMOL)
-        if LBox is not None:
-            Lx = LBox[0].item()
-            Ly = LBox[1].item()
-            Lz = LBox[2].item()
-            # CRYST1 format: a b c alpha beta gamma space_group Z
+        if cell is not None:
+            a, b, c, alpha, beta, gamma = _cell_to_pdb_cryst1(cell)
+
             f.write(
-                f"CRYST1{Lx:9.3f}{Ly:9.3f}{Lz:9.3f}"
-                f"  90.00  90.00  90.00 P 1           1\n"
+                f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
+                f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1\n"
             )
 
         # REMARK — metadata
@@ -270,6 +274,185 @@ def read_xyz(files, sort=True):
     COORDINATES = COORDINATES[:, :, 1:4]
 
     return SPECIES, COORDINATES
+
+
+# ── Element-symbol → atomic-number lookup (covers Z = 1–54) ──────────
+_SYMBOL_TO_Z = {
+    "H": 1,
+    "He": 2,
+    "Li": 3,
+    "Be": 4,
+    "B": 5,
+    "C": 6,
+    "N": 7,
+    "O": 8,
+    "F": 9,
+    "Ne": 10,
+    "Na": 11,
+    "Mg": 12,
+    "Al": 13,
+    "Si": 14,
+    "P": 15,
+    "S": 16,
+    "Cl": 17,
+    "Ar": 18,
+    "K": 19,
+    "Ca": 20,
+    "Sc": 21,
+    "Ti": 22,
+    "V": 23,
+    "Cr": 24,
+    "Mn": 25,
+    "Fe": 26,
+    "Co": 27,
+    "Ni": 28,
+    "Cu": 29,
+    "Zn": 30,
+    "Ga": 31,
+    "Ge": 32,
+    "As": 33,
+    "Se": 34,
+    "Br": 35,
+    "Kr": 36,
+    "Rb": 37,
+    "Sr": 38,
+    "Y": 39,
+    "Zr": 40,
+    "Nb": 41,
+    "Mo": 42,
+    "Tc": 43,
+    "Ru": 44,
+    "Rh": 45,
+    "Pd": 46,
+    "Ag": 47,
+    "Cd": 48,
+    "In": 49,
+    "Sn": 50,
+    "Sb": 51,
+    "Te": 52,
+    "I": 53,
+    "Xe": 54,
+}
+
+
+def read_pdb(files, sort=True):
+    """
+    Read geometry from PDB files.
+
+    Parses ATOM / HETATM records for coordinates and element symbols.
+    Returns arrays in the same format as :func:`read_xyz` so that
+    ``Structure`` can consume them interchangeably::
+
+        species, coordinates = read_pdb(["system.pdb"])
+
+    Parameters
+    ----------
+    files : list[str]
+        List of PDB file paths (one frame per file).
+    sort : bool, optional
+        If *True* (default), atoms are sorted by descending atomic number
+        (same convention as ``read_xyz``).
+
+    Returns
+    -------
+    SPECIES : ndarray, shape (nfiles, natoms), int
+        Atomic numbers.
+    COORDINATES : ndarray, shape (nfiles, natoms, 3), float64
+        Cartesian coordinates in **Angstrom**.
+
+    Notes
+    -----
+    *   Element is read from **columns 77-78** (standard PDB).  If that
+        field is blank the element is inferred from the atom-name field
+        (columns 13-16) by stripping digits and whitespace.
+    *   REMARK lines are silently skipped.  To extract charge or
+        selection metadata from REMARK headers use :func:`read_pdb_remarks`.
+    """
+    COORDINATES = []
+    for file in files:
+        with open(file) as f:
+            lines = f.readlines()
+
+        coords = []
+        for line in lines:
+            record = line[:6].strip()
+            if record not in ("ATOM", "HETATM"):
+                continue
+
+            # --- coordinates (columns 31-54, 8.3f each) ---
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+
+            # --- element symbol ---
+            # Prefer columns 77-78 (right-justified element)
+            elem = line[76:78].strip() if len(line) >= 78 else ""
+            if not elem:
+                # Fallback: infer from atom name (columns 13-16)
+                atom_name = line[12:16].strip()
+                elem = re.sub(r"[0-9]", "", atom_name).strip()
+                # atom names like "CA", "CB" are carbon, not calcium —
+                # use only the first character if len > 1 and second char is lowercase
+                if len(elem) > 1 and elem[1].islower():
+                    pass  # e.g. "Fe", "Cl", "Br" — keep as-is
+                elif len(elem) > 1:
+                    elem = elem[0]
+
+            # Capitalize properly: first upper, rest lower
+            elem = elem[0].upper() + elem[1:].lower() if len(elem) > 1 else elem.upper()
+
+            z_num = _SYMBOL_TO_Z.get(elem)
+            if z_num is None:
+                raise ValueError(
+                    f"Unknown element '{elem}' in {file}, line: {line.rstrip()}"
+                )
+
+            coords.append([z_num, x, y, z])
+
+        if not coords:
+            raise ValueError(f"No ATOM/HETATM records found in {file}")
+
+        COORDINATES.append(coords)
+
+    COORDINATES = np.array(COORDINATES, dtype=np.float64)
+    if sort:
+        COORDINATES = np.array([x[(-1 * x[:, 0]).argsort()] for x in COORDINATES])
+
+    SPECIES = COORDINATES[:, :, 0].astype(int)
+    COORDINATES = COORDINATES[:, :, 1:4]
+
+    return SPECIES, COORDINATES
+
+
+def read_pdb_remarks(file):
+    """
+    Extract REMARK metadata from a PDB file.
+
+    Returns a dict of ``{key: value}`` for REMARK lines of the form
+    ``REMARK key value``, e.g.::
+
+        REMARK charge -1
+        REMARK selection_a %not(:unk)
+
+    Parameters
+    ----------
+    file : str
+        Path to PDB file.
+
+    Returns
+    -------
+    dict[str, str]
+        Keys and values (as strings).
+    """
+    remarks = {}
+    with open(file) as f:
+        for line in f:
+            if not line.startswith("REMARK"):
+                continue
+            parts = line.split(maxsplit=2)
+            if len(parts) >= 3:
+                remarks[parts[1]] = parts[2].strip()
+    return remarks
 
 
 def read_xyz_traj_data(file):

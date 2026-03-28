@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
@@ -13,12 +14,15 @@ def get_repulsion_energy(
     RX: torch.Tensor,
     RY: torch.Tensor,
     RZ: torch.Tensor,
-    LBox,
+    cell,
     Rcut: float,
     Nats: int,
     const,
     verbose: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    compute_stress: bool = True,
+) -> (
+    tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """
     Compute the total repulsive energy and its Cartesian derivatives.
 
@@ -34,8 +38,10 @@ def get_repulsion_energy(
         Atom type indices (compatible with const.label).
     RX, RY, RZ : (Nats,) torch.Tensor
         Atomic Cartesian coordinates in Å.
-    LBox : sequence or tensor length 3
-        Box lengths (Å) for periodic boundaries.
+    cell : sequence or tensor
+        Periodic cell specification:
+        - shape (3,) for orthorhombic box lengths
+        - shape (3,3) for a triclinic cell matrix
     Rcut : float
         Cutoff (Å) used to build the neighbor list.
     Nats : int
@@ -44,6 +50,9 @@ def get_repulsion_energy(
         Contains chemical label mapping for pair typing.
     verbose : bool
         If True, neighbor list routine may emit timing info.
+    compute_stress : bool
+        If True, also compute and return the analytical pair-virial
+        stress tensor (requires ``cell`` to be a (3,3) matrix).
 
     Returns
     -------
@@ -52,6 +61,9 @@ def get_repulsion_energy(
     dVr : torch.Tensor, shape (3, Nats, Nats), eV/Å
         Antisymmetric matrix of pairwise force contributions:
         dVr[:, i, j] = +∂E/∂r_i from pair (i,j); dVr[:, j, i] = −dVr[:, i, j].
+    sigma_rep : torch.Tensor, shape (3, 3), eV/ų (only when ``compute_stress=True``)
+        Symmetrised repulsive virial stress tensor:
+        σ_{αβ} = (1/V) Σ_{ij} (dV/dR) R_{ij,α} R_{ij,β} / R_{ij}.
 
     Notes
     -----
@@ -65,7 +77,7 @@ def get_repulsion_energy(
             RX,
             RY,
             RZ,
-            LBox,
+            cell,
             Rcut,
             Nats,
             const,
@@ -143,6 +155,19 @@ def get_repulsion_energy(
     # ── select per pair ───────────────────────────────────────────────
     dVr_dR = torch.where(use_exp, dVr_exp_dR, dVr_dR)
 
+    # ── stress tensor (pair virial) ──────────────────────────────────
+    sigma_rep = None
+    if compute_stress and cell is not None:
+        Rab = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=-1)[nn_mask]  # (P, 3)
+        dVr_dR_eV = dVr_dR * 27.21138625 / 0.52917721  # eV/Å
+        Vcell = torch.abs(torch.det(cell))
+        sigma_rep = (
+            dVr_dR_eV[:, None, None]
+            * (Rab.unsqueeze(-1) * Rab.unsqueeze(-2))
+            / dR_mskd[:, None, None]
+        ).sum(dim=0) / Vcell
+        sigma_rep = 0.5 * (sigma_rep + sigma_rep.T)
+
     # ── accumulate forces ───────────────────
     dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
     dVr.index_add_(
@@ -153,7 +178,9 @@ def get_repulsion_energy(
     dVr = dVr - torch.transpose(dVr, 1, 2)
     del nnRx, nnRy, nnRz, nnType, neighbor_I, neighbor_J, IJ_pair_type, _
 
-    return Vr, dVr
+    if sigma_rep is not None:
+        return Vr, dVr, sigma_rep
+    return Vr, dVr, None
 
 
 def get_repulsion_energy_batch(
@@ -164,7 +191,7 @@ def get_repulsion_energy_batch(
     RX: torch.Tensor,
     RY: torch.Tensor,
     RZ: torch.Tensor,
-    LBox,
+    cell: torch.Tensor,
     Rcut: float,
     Nats: int,
     const,
@@ -185,7 +212,7 @@ def get_repulsion_energy_batch(
             RX,
             RY,
             RZ,
-            LBox,
+            cell,
             Rcut,
             Nats,
             const,

@@ -12,6 +12,14 @@ from .Constants import Constants
 from .Structure import Structure, StructureBatch
 from .ESDriver import ESDriver, ESDriverBatch
 from .MD import MDXL, MDXLBatch, MDXLOS
+from ._stress import (
+    get_electronic_stress_analytical,
+    get_total_stress_analytical,
+    get_coulomb_stress,
+    get_coulomb_stress_real,
+    get_coulomb_stress_kspace,
+)
+from ._gbsa import GBSA, create_gbsa
 
 __all__ = [
     "Constants",
@@ -22,4 +30,11 @@ __all__ = [
     "MDXL",
     "MDXLBatch",
     "MDXLOS",
+    "GBSA",
+    "create_gbsa",
+    "get_electronic_stress_analytical",
+    "get_total_stress_analytical",
+    "get_coulomb_stress",
+    "get_coulomb_stress_real",
+    "get_coulomb_stress_kspace",
 ]

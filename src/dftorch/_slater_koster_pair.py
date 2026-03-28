@@ -1,3 +1,4 @@
+from __future__ import annotations
 import torch
 
 
@@ -29,7 +30,12 @@ def Slater_Koster_Pair_SKF_vectorized(
     neighbor_J: torch.Tensor,
     H_INDEX_START: torch.Tensor,
     SH_shift: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    stress_weight: torch.Tensor | None = None,
+    i0_stress: torch.Tensor | None = None,
+    j0_stress: torch.Tensor | None = None,
+) -> (
+    tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
     """
     Build the Slater–Koster pair block (flattened) and its Cartesian derivatives
     using vectorized cubic-spline SKF coefficients (s, p, d orbitals).
@@ -113,6 +119,18 @@ def Slater_Koster_Pair_SKF_vectorized(
         For example, SH_shift=0 may correspond to Hamiltonian (H), SH_shift=1
         to overlap (S), depending on how the SKF data were packed.
 
+    stress_weight : torch.Tensor or None
+        If not None, a density-weight matrix of shape ``(HDIM, HDIM)`` used
+        to accumulate the on-the-fly stress pair gradient.  For each derivative
+        site ``dH[i0+a, j0+b]/d(x,y,z)`` the function computes
+        ``stress_weight[i0+a, j0+b] * derivative`` and accumulates it into
+        ``pair_grad (P, 3)``.  When None (the default), no stress accumulation
+        happens and the function returns only ``(H0, dH0)``.
+
+    i0_stress, j0_stress : torch.LongTensor or None
+        Per-pair AO offsets for stress accumulation, shape ``(num_pairs,)``.
+        Required when ``stress_weight`` is provided.
+
     Returns
     -------
     H0 : torch.Tensor
@@ -121,6 +139,10 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0 : torch.Tensor
         Derivatives of the Hamiltonian matrix elements with respect to Cartesian coordinates.
         Shape: (3, HDIM * HDIM)
+
+    pair_grad : torch.Tensor (only when stress_weight is not None)
+        Per-pair weighted gradient, shape ``(num_pairs, 3)``.  The stress
+        tensor is then ``extra_scale * einsum("pc,pd->cd", pair_grad, Rab) / V``.
 
     Notes
     -----
@@ -132,10 +154,34 @@ def Slater_Koster_Pair_SKF_vectorized(
     # %%% Standard Slater-Koster sp-parameterization for an atomic block between a pair of atoms
     # %%% IDim, JDim: dimensions of the output block, e.g. 1 x 4 for H-O or 4 x 4 for O-O, or 4 x 1 for O-H
     # %%% Ra, Rb: are the vectors of the positions of the two atoms
-    # %%% LBox: Periodic boundary conditions, i.e. length of box in x, y, z (cubic box only)
     # %%% Type_pair(1 or 2): Character of the type of each atom in the pair, e.g. 'H' for hydrogen of 'O' for oxygen
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1
+
+    # Helper: optionally accumulate weighted per-pair gradient for stress.
+    # dxyz has shape (3, P_masked). W is the (HDIM,HDIM) density-weight matrix.
+    # _sg(mask, row_offset, col_offset, dxyz_3P) does:
+    #   pair_grad[mask, :] += W[i0+row, j0+col] * dxyz_3P^T
+    _W = stress_weight
+    if _W is not None:
+        pair_grad = torch.zeros(
+            (dR_dxyz.shape[1], 3), dtype=dR_dxyz.dtype, device=dR_dxyz.device
+        )
+        _i0 = i0_stress
+        _j0 = j0_stress
+    else:
+        pair_grad = None
+
+    def _sg(mask, row_off, col_off, dxyz):
+        """Accumulate W[i0+row_off, j0+col_off] * dxyz into pair_grad."""
+        if pair_grad is None:
+            return
+        if mask is None:
+            w = _W[_i0 + row_off, _j0 + col_off]  # (P,)
+            pair_grad[:] += w.unsqueeze(-1) * dxyz.T
+        else:
+            w = _W[_i0[mask] + row_off, _j0[mask] + col_off]  # (P_mask,)
+            pair_grad[mask] += w.unsqueeze(-1) * dxyz.T
 
     H0 = torch.zeros((HDIM * HDIM), dtype=dR_dxyz.dtype, device=dR_dxyz.device)
     dH0 = torch.zeros(3, HDIM * HDIM, dtype=H0.dtype, device=H0.device)
@@ -164,6 +210,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(
         1, H_INDEX_START[neighbor_I] * HDIM + H_INDEX_START[neighbor_J], HSSS_dxyz
     )
+    _sg(None, 0, 0, HSSS_dxyz)
     #########
 
     # H-X
@@ -200,21 +247,15 @@ def Slater_Koster_Pair_SKF_vectorized(
     )
     HSPS_dxyz = HSPS_dR * dR_dxyz[:, tmp_mask]
 
-    dH0.index_add_(
-        1,
-        idx_row * HDIM + idx_col + 1,
-        L[tmp_mask] * HSPS_dxyz + L_dxyz[:, tmp_mask] * HSPS_all,
-    )
-    dH0.index_add_(
-        1,
-        idx_row * HDIM + idx_col + 2,
-        M[tmp_mask] * HSPS_dxyz + M_dxyz[:, tmp_mask] * HSPS_all,
-    )
-    dH0.index_add_(
-        1,
-        idx_row * HDIM + idx_col + 3,
-        N[tmp_mask] * HSPS_dxyz + N_dxyz[:, tmp_mask] * HSPS_all,
-    )
+    HSPS_sp_L_dxyz = L[tmp_mask] * HSPS_dxyz + L_dxyz[:, tmp_mask] * HSPS_all
+    HSPS_sp_M_dxyz = M[tmp_mask] * HSPS_dxyz + M_dxyz[:, tmp_mask] * HSPS_all
+    HSPS_sp_N_dxyz = N[tmp_mask] * HSPS_dxyz + N_dxyz[:, tmp_mask] * HSPS_all
+    dH0.index_add_(1, idx_row * HDIM + idx_col + 1, HSPS_sp_L_dxyz)
+    dH0.index_add_(1, idx_row * HDIM + idx_col + 2, HSPS_sp_M_dxyz)
+    dH0.index_add_(1, idx_row * HDIM + idx_col + 3, HSPS_sp_N_dxyz)
+    _sg(tmp_mask, 0, 1, HSPS_sp_L_dxyz)
+    _sg(tmp_mask, 0, 2, HSPS_sp_M_dxyz)
+    _sg(tmp_mask, 0, 3, HSPS_sp_N_dxyz)
     #########
 
     ### HPSS_all ###
@@ -251,21 +292,15 @@ def Slater_Koster_Pair_SKF_vectorized(
     )
     HPSS_dxyz = HPSS_dR * dR_dxyz[:, tmp_mask]
 
-    dH0.index_add_(
-        1,
-        (idx_row + 1) * HDIM + idx_col,
-        -L[tmp_mask] * HPSS_dxyz - L_dxyz[:, tmp_mask] * HPSS_all,
-    )
-    dH0.index_add_(
-        1,
-        (idx_row + 2) * HDIM + idx_col,
-        -M[tmp_mask] * HPSS_dxyz - M_dxyz[:, tmp_mask] * HPSS_all,
-    )
-    dH0.index_add_(
-        1,
-        (idx_row + 3) * HDIM + idx_col,
-        -N[tmp_mask] * HPSS_dxyz - N_dxyz[:, tmp_mask] * HPSS_all,
-    )
+    HPSS_ps_L_dxyz = -L[tmp_mask] * HPSS_dxyz - L_dxyz[:, tmp_mask] * HPSS_all
+    HPSS_ps_M_dxyz = -M[tmp_mask] * HPSS_dxyz - M_dxyz[:, tmp_mask] * HPSS_all
+    HPSS_ps_N_dxyz = -N[tmp_mask] * HPSS_dxyz - N_dxyz[:, tmp_mask] * HPSS_all
+    dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col, HPSS_ps_L_dxyz)
+    dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col, HPSS_ps_M_dxyz)
+    dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col, HPSS_ps_N_dxyz)
+    _sg(tmp_mask, 1, 0, HPSS_ps_L_dxyz)
+    _sg(tmp_mask, 2, 0, HPSS_ps_M_dxyz)
+    _sg(tmp_mask, 3, 0, HPSS_ps_N_dxyz)
     #########
 
     # X-X
@@ -378,18 +413,27 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 1, PXPX_dxyz)
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 2, PXPY_dxyz)
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 3, PXPZ_dxyz)
+    _sg(tmp_mask, 1, 1, PXPX_dxyz)
+    _sg(tmp_mask, 1, 2, PXPY_dxyz)
+    _sg(tmp_mask, 1, 3, PXPZ_dxyz)
 
     ####
 
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 1, PYPX_dxyz)
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 2, PYPY_dxyz)
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 3, PYPZ_dxyz)
+    _sg(tmp_mask, 2, 1, PYPX_dxyz)
+    _sg(tmp_mask, 2, 2, PYPY_dxyz)
+    _sg(tmp_mask, 2, 3, PYPZ_dxyz)
 
     ####
 
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 1, PZPX_dxyz)
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 2, PZPY_dxyz)
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 3, PZPZ_dxyz)
+    _sg(tmp_mask, 3, 1, PZPX_dxyz)
+    _sg(tmp_mask, 3, 2, PZPY_dxyz)
+    _sg(tmp_mask, 3, 3, PZPZ_dxyz)
     #########
 
     ### s-d
@@ -461,6 +505,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row) * HDIM + idx_col + 6, H_S_ZX_dxyz)
     dH0.index_add_(1, (idx_row) * HDIM + idx_col + 7, H_S_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row) * HDIM + idx_col + 8, H_S_Z2_dxyz)
+    _sg(tmp_mask, 0, 4, H_S_XY_dxyz)
+    _sg(tmp_mask, 0, 5, H_S_YZ_dxyz)
+    _sg(tmp_mask, 0, 6, H_S_ZX_dxyz)
+    _sg(tmp_mask, 0, 7, H_S_X2Y2_dxyz)
+    _sg(tmp_mask, 0, 8, H_S_Z2_dxyz)
 
     ### p-d
     tmp_mask = pair_mask_XY | pair_mask_YY
@@ -640,6 +689,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 6, H_X_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 7, H_X_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 1) * HDIM + idx_col + 8, H_X_Z2_dxyz)
+    _sg(tmp_mask, 1, 4, H_X_XY_dxyz)
+    _sg(tmp_mask, 1, 5, H_X_YZ_dxyz)
+    _sg(tmp_mask, 1, 6, H_X_ZX_dxyz)
+    _sg(tmp_mask, 1, 7, H_X_X2Y2_dxyz)
+    _sg(tmp_mask, 1, 8, H_X_Z2_dxyz)
     H_Y_XY_dxyz = (
         (3**0.5)
         * (
@@ -710,6 +764,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 6, H_Y_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 7, H_Y_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 2) * HDIM + idx_col + 8, H_Y_Z2_dxyz)
+    _sg(tmp_mask, 2, 4, H_Y_XY_dxyz)
+    _sg(tmp_mask, 2, 5, H_Y_YZ_dxyz)
+    _sg(tmp_mask, 2, 6, H_Y_ZX_dxyz)
+    _sg(tmp_mask, 2, 7, H_Y_X2Y2_dxyz)
+    _sg(tmp_mask, 2, 8, H_Y_Z2_dxyz)
     H_Z_XY_dxyz = (
         (3**0.5)
         * (
@@ -785,6 +844,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 6, H_Z_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 7, H_Z_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 3) * HDIM + idx_col + 8, H_Z_Z2_dxyz)
+    _sg(tmp_mask, 3, 4, H_Z_XY_dxyz)
+    _sg(tmp_mask, 3, 5, H_Z_YZ_dxyz)
+    _sg(tmp_mask, 3, 6, H_Z_ZX_dxyz)
+    _sg(tmp_mask, 3, 7, H_Z_X2Y2_dxyz)
+    _sg(tmp_mask, 3, 8, H_Z_Z2_dxyz)
 
     ### d-s
     tmp_mask = pair_mask_YH | pair_mask_YX | pair_mask_YY
@@ -855,6 +919,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col, H_ZX_S_dxyz)
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col, H_X2Y2_S_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col, H_Z2_S_dxyz)
+    _sg(tmp_mask, 4, 0, H_XY_S_dxyz)
+    _sg(tmp_mask, 5, 0, H_YZ_S_dxyz)
+    _sg(tmp_mask, 6, 0, H_ZX_S_dxyz)
+    _sg(tmp_mask, 7, 0, H_X2Y2_S_dxyz)
+    _sg(tmp_mask, 8, 0, H_Z2_S_dxyz)
 
     ### d-p
     tmp_mask = pair_mask_YX | pair_mask_YY
@@ -1006,6 +1075,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 1, H_XY_X_dxyz)
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 2, H_XY_Y_dxyz)
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 3, H_XY_Z_dxyz)
+    _sg(tmp_mask, 4, 1, H_XY_X_dxyz)
+    _sg(tmp_mask, 4, 2, H_XY_Y_dxyz)
+    _sg(tmp_mask, 4, 3, H_XY_Z_dxyz)
     H_YZ_X_dxyz = -(
         (3**0.5)
         * (
@@ -1046,6 +1118,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 1, H_YZ_X_dxyz)
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 2, H_YZ_Y_dxyz)
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 3, H_YZ_Z_dxyz)
+    _sg(tmp_mask, 5, 1, H_YZ_X_dxyz)
+    _sg(tmp_mask, 5, 2, H_YZ_Y_dxyz)
+    _sg(tmp_mask, 5, 3, H_YZ_Z_dxyz)
     H_ZX_X_dxyz = -(
         (3**0.5)
         * (
@@ -1086,6 +1161,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 1, H_ZX_X_dxyz)
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 2, H_ZX_Y_dxyz)
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 3, H_ZX_Z_dxyz)
+    _sg(tmp_mask, 6, 1, H_ZX_X_dxyz)
+    _sg(tmp_mask, 6, 2, H_ZX_Y_dxyz)
+    _sg(tmp_mask, 6, 3, H_ZX_Z_dxyz)
     H_X2Y2_X_dxyz = -(
         0.5
         * (3**0.5)
@@ -1143,6 +1221,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 1, H_X2Y2_X_dxyz)
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 2, H_X2Y2_Y_dxyz)
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 3, H_X2Y2_Z_dxyz)
+    _sg(tmp_mask, 7, 1, H_X2Y2_X_dxyz)
+    _sg(tmp_mask, 7, 2, H_X2Y2_Y_dxyz)
+    _sg(tmp_mask, 7, 3, H_X2Y2_Z_dxyz)
     H_Z2_X_dxyz = -(
         (
             tmp_L_dxyz * (tmp_N**2 - 0.5 * (tmp_L**2 + tmp_M**2))
@@ -1181,6 +1262,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 1, H_Z2_X_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 2, H_Z2_Y_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 3, H_Z2_Z_dxyz)
+    _sg(tmp_mask, 8, 1, H_Z2_X_dxyz)
+    _sg(tmp_mask, 8, 2, H_Z2_Y_dxyz)
+    _sg(tmp_mask, 8, 3, H_Z2_Z_dxyz)
 
     ### d-d
     tmp_mask = pair_mask_YY
@@ -1490,6 +1574,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 6, H_XY_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 7, H_XY_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 4) * HDIM + idx_col + 8, H_XY_Z2_dxyz)
+    _sg(tmp_mask, 4, 4, H_XY_XY_dxyz)
+    _sg(tmp_mask, 4, 5, H_XY_YZ_dxyz)
+    _sg(tmp_mask, 4, 6, H_XY_ZX_dxyz)
+    _sg(tmp_mask, 4, 7, H_XY_X2Y2_dxyz)
+    _sg(tmp_mask, 4, 8, H_XY_Z2_dxyz)
     H_YZ_XY_dxyz = (
         3
         * (2 * M_t_Mdx * N_t_L + M2 * tmp_N_dxyz * tmp_L + M2 * tmp_N * tmp_L_dxyz)
@@ -1576,6 +1665,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 6, H_YZ_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 7, H_YZ_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 5) * HDIM + idx_col + 8, H_YZ_Z2_dxyz)
+    _sg(tmp_mask, 5, 4, H_YZ_XY_dxyz)
+    _sg(tmp_mask, 5, 5, H_YZ_YZ_dxyz)
+    _sg(tmp_mask, 5, 6, H_YZ_ZX_dxyz)
+    _sg(tmp_mask, 5, 7, H_YZ_X2Y2_dxyz)
+    _sg(tmp_mask, 5, 8, H_YZ_Z2_dxyz)
     H_ZX_XY_dxyz = (
         3
         * (2 * L_t_Ldx * M_t_N + L2 * tmp_M_dxyz * tmp_N + L2 * tmp_M * tmp_N_dxyz)
@@ -1662,6 +1756,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 6, H_ZX_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 7, H_ZX_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 6) * HDIM + idx_col + 8, H_ZX_Z2_dxyz)
+    _sg(tmp_mask, 6, 4, H_ZX_XY_dxyz)
+    _sg(tmp_mask, 6, 5, H_ZX_YZ_dxyz)
+    _sg(tmp_mask, 6, 6, H_ZX_ZX_dxyz)
+    _sg(tmp_mask, 6, 7, H_ZX_X2Y2_dxyz)
+    _sg(tmp_mask, 6, 8, H_ZX_Z2_dxyz)
     H_X2Y2_XY_dxyz = (
         1.5
         * (
@@ -1757,6 +1856,11 @@ def Slater_Koster_Pair_SKF_vectorized(
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 6, H_X2Y2_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 7, H_X2Y2_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 7) * HDIM + idx_col + 8, H_X2Y2_Z2_dxyz)
+    _sg(tmp_mask, 7, 4, H_X2Y2_XY_dxyz)
+    _sg(tmp_mask, 7, 5, H_X2Y2_YZ_dxyz)
+    _sg(tmp_mask, 7, 6, H_X2Y2_ZX_dxyz)
+    _sg(tmp_mask, 7, 7, H_X2Y2_X2Y2_dxyz)
+    _sg(tmp_mask, 7, 8, H_X2Y2_Z2_dxyz)
     H_Z2_XY_dxyz = (
         (3**0.5)
         * (
@@ -1850,10 +1954,15 @@ def Slater_Koster_Pair_SKF_vectorized(
         + 0.75 * (L2 + M2) ** 2 * V_dd_delta_dxyz
     )
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 4, H_Z2_XY_dxyz)
+    _sg(tmp_mask, 8, 4, H_Z2_XY_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 5, H_Z2_YZ_dxyz)
+    _sg(tmp_mask, 8, 5, H_Z2_YZ_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 6, H_Z2_ZX_dxyz)
+    _sg(tmp_mask, 8, 6, H_Z2_ZX_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 7, H_Z2_X2Y2_dxyz)
+    _sg(tmp_mask, 8, 7, H_Z2_X2Y2_dxyz)
     dH0.index_add_(1, (idx_row + 8) * HDIM + idx_col + 8, H_Z2_Z2_dxyz)
+    _sg(tmp_mask, 8, 8, H_Z2_Z2_dxyz)
 
     """ 
     $ - from table
@@ -1942,6 +2051,8 @@ def Slater_Koster_Pair_SKF_vectorized(
 
 
     """
+    if pair_grad is not None:
+        return H0, dH0, pair_grad
     return H0, dH0
 
 
@@ -2060,6 +2171,20 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         For example, SH_shift=0 may correspond to Hamiltonian (H), SH_shift=1
         to overlap (S), depending on how the SKF data were packed.
 
+    stress_weight : torch.Tensor or None
+        If not None, a ``(HDIM, HDIM)`` density-weight matrix (e.g. band weight
+        or Pulay+SCC weight).  When provided, an additional per-pair weighted
+        gradient ``pair_grad (P, 3)`` is accumulated on-the-fly:
+        ``pair_grad[p, c] += W[i0+a, j0+b] * d(H_ab^p)/dR_c`` for every AO
+        pair (a,b) of pair p.  This avoids the need to store a large per-pair
+        derivative tensor and eliminates redundant spline re-evaluation in
+        the stress computation.  Requires ``i0_stress`` and ``j0_stress``.
+
+    i0_stress, j0_stress : torch.LongTensor or None
+        Pre-computed AO offsets ``H_INDEX_START[neighbor_I]`` and
+        ``H_INDEX_START[neighbor_J]`` for each pair. Required when
+        ``stress_weight`` is not None.
+
     Returns
     -------
     H0 : torch.Tensor
@@ -2068,6 +2193,10 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     dH0 : torch.Tensor
         Derivatives of the Hamiltonian matrix elements with respect to Cartesian coordinates.
         Shape: (3, HDIM * HDIM)
+
+    pair_grad : torch.Tensor  *(only when stress_weight is not None)*
+        Per-pair weighted gradient, shape ``(P, 3)``.  Returned as the third
+        element of the tuple.
 
     Notes
     -----
@@ -2079,7 +2208,6 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     # %%% Standard Slater-Koster sp-parameterization for an atomic block between a pair of atoms
     # %%% IDim, JDim: dimensions of the output block, e.g. 1 x 4 for H-O or 4 x 4 for O-O, or 4 x 1 for O-H
     # %%% Ra, Rb: are the vectors of the positions of the two atoms
-    # %%% LBox: Periodic boundary conditions, i.e. length of box in x, y, z (cubic box only)
     # %%% Type_pair(1 or 2): Character of the type of each atom in the pair, e.g. 'H' for hydrogen of 'O' for oxygen
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1
@@ -4235,7 +4363,6 @@ def Slater_Koster_Pair_vectorized(
     # %%% Standard Slater-Koster sp-parameterization for an atomic block between a pair of atoms
     # %%% IDim, JDim: dimensions of the output block, e.g. 1 x 4 for H-O or 4 x 4 for O-O, or 4 x 1 for O-H
     # %%% Ra, Rb: are the vectors of the positions of the two atoms
-    # %%% LBox: Periodic boundary conditions, i.e. length of box in x, y, z (cubic box only)
     # %%% Type_pair(1 or 2): Character of the type of each atom in the pair, e.g. 'H' for hydrogen of 'O' for oxygen
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1

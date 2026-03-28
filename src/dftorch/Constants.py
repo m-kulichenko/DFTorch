@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from ._elements import symbol_to_number, label, atomic_num, mass
-from ._io import read_xyz
+from ._io import read_xyz, read_pdb
 from ._tools import load_spinw_to_matrix, load_hubbard_derivs
 
 
@@ -31,7 +31,8 @@ class Constants(torch.nn.Module):
         self.mass = torch.nn.Parameter(mass, requires_grad=False)
 
         if isinstance(file, str):
-            species, _ = read_xyz([file], sort=False)  # Input coordinate file
+            _reader = read_pdb if file.lower().endswith(".pdb") else read_xyz
+            species, _ = _reader([file], sort=False)  # Input coordinate file
         else:
             species, _ = read_xyz(file, sort=False)  # Input coordinate file
         TYPE = torch.tensor(species.flatten())

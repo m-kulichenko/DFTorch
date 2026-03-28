@@ -342,7 +342,7 @@ def read_skf_table(
     # First line: step and number of points
     first = data_lines[0].replace(",", " ").split()
     step, npts_read = float(first[0]), int(first[1])
-    npts_pad = 1001
+    npts_pad = npts_read + 50
     if "mio" in path:
         npts_read = 519
 
@@ -566,7 +566,7 @@ def read_wfc_hsd(
 
     ang_re = re.compile(r"AngularMomentum\s*=\s*(\d+)")
     occ_re = re.compile(r"Occupation\s*=\s*([\d.eE+\-]+)")
-    sym_re = re.compile(r"([A-Za-z]{1,3})\s*=\s*\{")
+    sym_re = re.compile(r"^([A-Z][a-z]{0,2})\s*=?\s*\{", re.MULTILINE)
 
     # find all top-level element symbols
     for sym_m in sym_re.finditer(text):
@@ -575,14 +575,25 @@ def read_wfc_hsd(
         if Z is None:
             continue
 
-        # extract the element block using depth-aware parser
-        # brace_pos = text.find("{", sym_m.start())
-        elem_blocks = _extract_blocks(text[sym_m.start() :], sym + " =")
-        if not elem_blocks:
-            elem_blocks = _extract_blocks(text[sym_m.start() :], sym + "=")
-        if not elem_blocks:
+        # extract the element block using depth-aware brace matching
+        # Start from the opening brace found by sym_re
+        brace_start = text.find("{", sym_m.start())
+        if brace_start == -1:
             continue
-        elem_body = elem_blocks[0]
+        depth = 0
+        i = brace_start
+        elem_body = None
+        while i < len(text):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    elem_body = text[brace_start + 1 : i]
+                    break
+            i += 1
+        if elem_body is None:
+            continue
 
         n_orb_elem = 0
         max_ang_elem = 0
@@ -639,7 +650,7 @@ def get_skf_tensors(
 
     # Allocate padded tensors
     n_pairs = len(label_list)
-    npts = 1000  # padded # old 518
+    npts = 1300  # padded # old 518
     coeffs_tensor = torch.zeros((n_pairs, npts, 20, 4), device=TYPE.device)
     R_tensor = torch.zeros(
         (n_pairs, npts + 1), device=TYPE.device

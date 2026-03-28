@@ -162,7 +162,6 @@ def calc_q_os(
         Dorth, Q, e, f, mu0 = dm_fermi_x_os(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
         )
-    # print(mu0, mu0_)
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
@@ -374,6 +373,8 @@ def kernel_update_lr(
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
     dU_dq: Optional[torch.Tensor] = None,
+    gbsa=None,
+    thirdorder=None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -470,6 +471,14 @@ def kernel_update_lr(
         else:  # Direct Coulomb case
             d_CoulPot = C @ v
 
+        # Add GBSA Born shift response (linear in v)
+        if gbsa is not None:
+            d_CoulPot = d_CoulPot + gbsa.get_shifts(v)
+
+        # Add full DFTB3 off-diagonal linearized shift response
+        if thirdorder is not None:
+            d_CoulPot = d_CoulPot + thirdorder.get_dshifts_dq(q, v)
+
         dq = calc_dq(
             Hubbard_U_gathered,
             v[atom_ids],
@@ -555,6 +564,8 @@ def kernel_update_lr_os(
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
     dU_dq: Optional[torch.Tensor] = None,
+    gbsa=None,
+    thirdorder=None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -583,6 +594,8 @@ def kernel_update_lr_os(
         Map from AO index to atom index.
     Q, e, mu0 : torch.Tensor
         Electronic structure data in orthogonal basis for first-order response.
+    gbsa : optional GBSA object
+        If not None, adds solvation Born shift response to d_CoulPot.
 
     Returns
     -------
@@ -664,12 +677,22 @@ def kernel_update_lr_os(
         else:  # Direct Coulomb case
             d_CoulPot = C @ v_atomic
 
+        # Add GBSA Born shift response (linear in v)
+        if gbsa is not None:
+            d_CoulPot = d_CoulPot + gbsa.get_shifts(v_atomic)
+
+        # ── Full DFTB3: linearized response of off-diagonal third-order term ──
+        if thirdorder is not None:
+            d_CoulPot = d_CoulPot + thirdorder.get_dshifts_dq(q_atomic, v_atomic)
+        # ─────────────────────────────────────────────────────────────────────
+
         H_spin = get_h_spin(TYPE, v_net_spin, w, n_shells_per_atom, shell_types)
 
         d_Hcoul_diag = Hubbard_U[atom_ids] * v_atomic[atom_ids] + d_CoulPot[atom_ids]
-        # ── DFTB3: linearized response of third-order term ────────────────────
+        # ── DFTB3: linearized response of diagonal third-order term ───────────
         # d/dlambda [(1/2) dU/dq * (q + lambda*v)^2]|_{lambda=0} = dU/dq * q * v
-        if dU_dq is not None:
+        # Skipped when full off-diagonal thirdorder is active (already included).
+        if dU_dq is not None and thirdorder is None:
             d_Hcoul_diag = (
                 d_Hcoul_diag + dU_dq[atom_ids] * q_atomic[atom_ids] * v_atomic[atom_ids]
             )
@@ -743,6 +766,7 @@ def kernel_update_lr_batch(
     dists: torch.Tensor = None,
     CALPHA: torch.Tensor = None,
     dU_dq_gathered: Optional[torch.Tensor] = None,
+    gbsa=None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -837,6 +861,10 @@ def kernel_update_lr_batch(
         else:  # Direct Coulomb case
             d_CoulPot = torch.bmm(C[active_mask], v.unsqueeze(-1)).squeeze(-1)
 
+        # Add GBSA Born shift response (linear in v)
+        if gbsa is not None:
+            d_CoulPot = d_CoulPot + gbsa.get_shifts(v)
+
         dq = calc_dq_batch(
             Hubbard_U_gathered[active_mask],
             v.gather(1, atom_ids[active_mask]),
@@ -862,30 +890,26 @@ def kernel_update_lr_batch(
 
         # Small overlap O and RHS (vectorized)
         rank_m = krylov_rank + 1
-        F_small = fi[active_mask, :, :rank_m]  # (Nats, r)
-        # O = F_small.transpose(-1,-2) @ F_small                  # (r, r)
+        F_small = fi[active_mask, :, :rank_m]
         O = torch.bmm(F_small.transpose(-1, -2), F_small)  # noqa: E741
         rhs = torch.bmm(
             F_small.transpose(-1, -2), K0Res[active_mask].unsqueeze(-1)
-        ).squeeze(-1)  # (B, r)
+        ).squeeze(-1)
 
-        # Solve O Y = rhs (stable) instead of explicit inverse
-        Y = torch.linalg.solve(O, rhs)  # (r,)
-        Y_all = torch.zeros(batch_size, rank_m, device=S.device, dtype=S.dtype)
-        Y_all[active_mask] = Y
+        Y = torch.linalg.solve(O, rhs)
 
         # Residual norm in the subspace
         proj = torch.bmm(F_small, Y.unsqueeze(-1)).squeeze(-1)
         Fel = torch.norm(proj - K0Res[active_mask], dim=1)
+
+        # Keep latest Krylov step for all active systems
+        step_active = torch.bmm(vi[active_mask, :, :rank_m], Y.unsqueeze(-1)).squeeze(
+            -1
+        )
+        step[active_mask] = step_active
+
         Fel_all[active_mask] = Fel
-        active_mask_old = active_mask.clone()
         active_mask = Fel_all > FelTol
-
-        cur_change_mask = active_mask_old != active_mask
-
-        step[cur_change_mask] = torch.bmm(
-            vi[cur_change_mask, :, :rank_m], Y_all[cur_change_mask].unsqueeze(-1)
-        ).squeeze(-1)
 
         fel_list = Fel_all.detach().cpu().tolist()
         for b, val in enumerate(fel_list):

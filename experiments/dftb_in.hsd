@@ -1,0 +1,34 @@
+Geometry = xyzFormat {
+<<< "COORD_8WATER.xyz"
+} 
+
+Hamiltonian = DFTB {
+  SCC = Yes
+  MaxAngularMomentum {
+    H = "s"
+    O = "p"
+  }
+  Filling = Fermi {
+    Temperature [K] = 2000
+  }
+  Dispersion = SimpleDftD3 {
+	a1 = 0.5719
+	a2 = 3.6017
+	s6 = 1.0
+	s8 = 0.5883
+  }
+  SlaterKosterFiles = Type2FileNames {
+	Prefix = "/home/maxim/Projects/DFTB/DFTorch/experiments/sk_orig/mio-1-1/mio-1-1/"
+
+    Separator = "-"
+    Suffix = ".skf"
+  }
+  Solvation = GeneralizedBorn { ParamFile = param_alpb_h2o.txt
+								ALPB = Yes}
+
+  
+}
+
+Options = { WriteDetailedOut = Yes }
+Analysis { CalculateForces = Yes }
+ParserOptions = { ParserVersion = 10 }
