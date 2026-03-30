@@ -276,6 +276,145 @@ def ewald_real_screening(
     return torch.sum(energy) / 2.0, FORCE, COULOMBV
 
 
+def ewald_real_screening_stress(
+    nbr_inds: torch.Tensor,
+    nbr_diff_vecs: torch.Tensor,
+    nbr_dists: torch.Tensor,
+    charges: torch.Tensor,
+    hubbard_u: torch.Tensor,
+    atomtypes: torch.Tensor,
+    alpha: float,
+    cutoff: float,
+    cell: torch.Tensor,
+) -> torch.Tensor:
+    """Real-space Ewald Coulomb stress with Hubbard-U screening.
+
+    Computes the virial contribution to the stress tensor from the real-space
+    Ewald sum, including the short-range damping corrections for same-element
+    and different-element pairs (matching ``ewald_real_screening``).
+
+    Parameters
+    ----------
+    nbr_inds : (N, K) neighbor indices (-1 = padding)
+    nbr_diff_vecs : (3, N, K) displacement vectors R_j - R_i
+    nbr_dists : (N, K) pair distances
+    charges : (N,) atomic charges
+    hubbard_u : (N,) Hubbard U per atom
+    atomtypes : (N,) element types
+    alpha : Ewald splitting parameter
+    cutoff : real-space cutoff
+    cell : (3, 3) lattice vectors
+
+    Returns
+    -------
+    sigma : (3, 3) real-space Coulomb stress in the *same internal units*
+            as the real-space energy (i.e. before CONV_FACTOR multiplication).
+            Caller must multiply by CONV_FACTOR to get eV/Å³.
+    """
+    KECONST = 14.3996437701414
+    device = nbr_dists.device
+    dtype = nbr_dists.dtype
+
+    one = torch.tensor(1.0, dtype=dtype, device=device)
+    zero = torch.tensor(0.0, dtype=dtype, device=device)
+
+    DUMMY_NBR_IND = -1
+    mask = (nbr_inds != DUMMY_NBR_IND) & (nbr_dists <= cutoff)
+    same_element_mask = mask & (atomtypes.unsqueeze(1) == atomtypes[nbr_inds])
+    different_element_mask = mask & ~same_element_mask
+
+    TFACT = 16.0 / (5.0 * KECONST)
+    TI = torch.where(mask, TFACT * hubbard_u.unsqueeze(1) * mask, one)
+    TI2 = TI * TI
+    TI3 = TI2 * TI
+    TI4 = TI2 * TI2
+    TI6 = TI4 * TI2
+
+    SSA = TI
+    SSB = TI3 / 48.0
+    SSC = 3.0 * TI2 / 16.0
+    SSD = 11.0 * TI / 16.0
+    SSE = 1.0
+
+    MAGR = torch.where(mask, nbr_dists, one)
+    MAGR2 = MAGR * MAGR
+    NUMREP_ERFC = torch.special.erfc(abs(alpha * MAGR))
+    EXPTI = torch.exp(-TI * MAGR)
+
+    # --- Compute dJ0/dR (radial derivative of the screened potential) ---
+    alpha2 = alpha * alpha
+    # Ewald part: d(erfc(aR)/R)/dR = -(erfc(aR)/R + 2a*exp(-a²R²)/√π) / R
+    CA = NUMREP_ERFC / MAGR + 2.0 * alpha * torch.exp(-alpha2 * MAGR2) / math.sqrt(
+        math.pi
+    )
+    dJ0_dR = torch.where(mask, -CA / MAGR, zero)
+
+    # Same-element damping derivative
+    dJ0_dR = dJ0_dR + torch.where(
+        same_element_mask,
+        EXPTI
+        * (
+            (torch.where(same_element_mask, SSE / MAGR2, zero) - 2.0 * SSB * MAGR - SSC)
+            + SSA
+            * (
+                SSB * MAGR2
+                + SSC * MAGR
+                + SSD
+                + torch.where(same_element_mask, SSE / MAGR, zero)
+            )
+        ),
+        zero,
+    )
+
+    # Different-element damping derivative
+    TJ = torch.where(
+        different_element_mask,
+        TFACT * hubbard_u[nbr_inds] * different_element_mask,
+        one,
+    )
+    TJ2 = TJ * TJ
+    TJ4 = TJ2 * TJ2
+    TJ6 = TJ4 * TJ2
+    EXPTJ = torch.exp(-TJ * MAGR)
+    TI2MTJ2 = torch.where(different_element_mask, TI2 - TJ2, one)
+    SA = TI
+    SB = EXPTI * TJ4 * TI / 2.0 / TI2MTJ2 / TI2MTJ2
+    SC = EXPTI * (TJ6 - 3.0 * TJ4 * TI2) / TI2MTJ2 / TI2MTJ2 / TI2MTJ2
+    SD = TJ
+    SE = EXPTJ * TI4 * TJ / 2.0 / TI2MTJ2 / TI2MTJ2
+    SF = EXPTJ * (-(TI6 - 3.0 * TI4 * TJ2)) / TI2MTJ2 / TI2MTJ2 / TI2MTJ2
+
+    dJ0_dR = dJ0_dR + torch.where(
+        different_element_mask,
+        (
+            SA * (SB - torch.where(different_element_mask, SC / MAGR, zero))
+            - torch.where(different_element_mask, SC / MAGR2, zero)
+        )
+        + (
+            SD * (SE - torch.where(different_element_mask, SF / MAGR, zero))
+            - torch.where(different_element_mask, SF / MAGR2, zero)
+        ),
+        zero,
+    )
+
+    # --- Virial stress: σ_αβ = (1/2V) Σ_{ij} q_i q_j (dJ0/dR) R_α R_β / R ---
+    # Ensure nbr_diff_vecs is (N, K, 3) for the outer product
+    if nbr_diff_vecs.shape[0] == 3:
+        Rab = nbr_diff_vecs.permute(1, 2, 0)  # (N, K, 3)
+    else:
+        Rab = nbr_diff_vecs  # already (N, K, 3)
+
+    qq = charges.unsqueeze(1) * charges[nbr_inds]  # (N, K)
+    weight = qq * dJ0_dR / MAGR * mask  # (N, K)
+
+    # Outer product sum: σ_αβ = Σ weight * R_α * R_β
+    # Rab shape (N, K, 3), weight shape (N, K)
+    Vcell = torch.abs(torch.det(cell))
+    sigma = torch.einsum("ij,ija,ijb->ab", weight, Rab, Rab) / (2.0 * Vcell)
+    sigma = 0.5 * (sigma + sigma.T)
+    return sigma
+
+
 def ewald_real_matrix(
     my_inds, nbr_inds, nbr_diff_vecs, nbr_dists, charges, alpha: float
 ):

@@ -1,6 +1,7 @@
 import torch
-from ._io import read_xyz
+from ._io import read_xyz, read_pdb
 from ._atomic_density_matrix import atomic_density_matrix, atomic_density_matrix_batch
+from ._cell import normalize_cell, normalize_cell_batch, wrap_positions
 
 
 class Structure(torch.nn.Module):
@@ -10,8 +11,10 @@ class Structure(torch.nn.Module):
 
     Parameters
     ----------
-    LBox : sequence or torch.Tensor (3,)
-        Box lengths (Å) for periodic lattice vectors (diagonal lattice).
+    cell : sequence or torch.Tensor
+        Periodic cell specification. May be:
+        - shape (3,) for orthorhombic box lengths in Å
+        - shape (3,3) for a full triclinic cell matrix in Å
     const : object
         Constants database with fields (n_orb, mass, tore, U, Es, Ep, Ed, Up, Ud,
         n_s, n_p, n_d, max_ang, etc.).
@@ -22,9 +25,9 @@ class Structure(torch.nn.Module):
 
     Attributes
     ----------
-    TYPE, RX, RY, RZ, LBox : as passed
+    TYPE, RX, RY, RZ, cell : as passed
     lattice_vecs : (3,3) torch.Tensor
-        Diagonal lattice vectors built from LBox.
+        Diagonal lattice vectors built from cell.
     Nats : int
         Number of atoms.
     n_orbitals_per_atom : (N,) torch.Tensor
@@ -54,7 +57,7 @@ class Structure(torch.nn.Module):
     def __init__(
         self,
         file,
-        LBox,
+        cell,
         const,
         charge: int = 0,
         spin_pol: int = 0,
@@ -63,6 +66,7 @@ class Structure(torch.nn.Module):
         e_field: torch.Tensor = None,
         device: str = "cpu",
         req_grad_xyz: bool = False,
+        req_grad_cell: bool = False,
         species=None,
         coordinates=None,
         ignore_spin: bool = False,
@@ -72,8 +76,14 @@ class Structure(torch.nn.Module):
         super().__init__(*args, **kwargs)
 
         self.req_grad_xyz = req_grad_xyz
+        self.req_grad_cell = req_grad_cell
         if species is None or coordinates is None:
-            species, coordinates = read_xyz([file], sort=False)  # Input coordinate file
+            if file is not None and file.lower().endswith(".pdb"):
+                species, coordinates = read_pdb([file], sort=False)
+            else:
+                species, coordinates = read_xyz(
+                    [file], sort=False
+                )  # Input coordinate file
 
         # self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
 
@@ -101,34 +111,49 @@ class Structure(torch.nn.Module):
             coordinates[0, :, 2].clone().detach().requires_grad_(self.req_grad_xyz)
         )
 
-        # self.RX = torch.tensor(
-        #     coordinates[0, :, 0],
-        #     device=device,
-        #     dtype=torch.get_default_dtype(),
-        #     requires_grad=self.req_grad_xyz,
-        # )
-        # self.RY = torch.tensor(
-        #     coordinates[0, :, 1],
-        #     device=device,
-        #     dtype=torch.get_default_dtype(),
-        #     requires_grad=self.req_grad_xyz,
-        # )
-        # self.RZ = torch.tensor(
-        #     coordinates[0, :, 2],
-        #     device=device,
-        #     dtype=torch.get_default_dtype(),
-        #     requires_grad=self.req_grad_xyz,
-        # )
+        self.cell = (
+            None
+            if cell is None
+            else torch.as_tensor(cell, device=device, dtype=torch.get_default_dtype())
+        )
+        self.cell = normalize_cell(
+            self.cell, device=device, dtype=torch.get_default_dtype()
+        )
+        self.cell_inv = None if self.cell is None else torch.linalg.inv(self.cell)
+        self.lattice_vecs = self.cell
 
-        if LBox is None:
-            self.LBox = None
-            self.lattice_vecs = None
-        else:
-            self.LBox = LBox.to(torch.get_default_dtype())
-            self.RX = (self.RX) % self.LBox[0]
-            self.RY = (self.RY) % self.LBox[1]
-            self.RZ = (self.RZ) % self.LBox[2]
-            self.lattice_vecs = torch.eye(3, device=device) * self.LBox
+        if self.cell is not None:
+            with torch.no_grad():
+                R = torch.stack((self.RX, self.RY, self.RZ), dim=-1)
+                R_wrapped = wrap_positions(R, self.cell, self.cell_inv)
+
+            # Create new leaf tensors at the wrapped positions
+            self.RX = (
+                R_wrapped[..., 0].clone().detach().requires_grad_(self.req_grad_xyz)
+            )
+            self.RY = (
+                R_wrapped[..., 1].clone().detach().requires_grad_(self.req_grad_xyz)
+            )
+            self.RZ = (
+                R_wrapped[..., 2].clone().detach().requires_grad_(self.req_grad_xyz)
+            )
+
+            if self.req_grad_cell:
+                # Save leaf references for force extraction
+                self._RX_leaf = self.RX
+                self._RY_leaf = self.RY
+                self._RZ_leaf = self.RZ
+
+                # Detach the old cell, create a fresh leaf for cell gradients
+                cell_ref = self.cell.detach()
+                positions = torch.stack((self.RX, self.RY, self.RZ), dim=-1)
+                frac_coords = positions @ torch.linalg.inv(cell_ref)
+
+                self.cell = cell.detach().clone().requires_grad_(True)
+                self.cell_inv = torch.linalg.inv(self.cell.detach())
+
+                cart_coords = frac_coords @ self.cell
+                self.RX, self.RY, self.RZ = cart_coords.unbind(dim=-1)
 
         self.coordinates = torch.stack(
             (self.RX, self.RY, self.RZ),
@@ -258,6 +283,7 @@ class Structure(torch.nn.Module):
         )
         self.D0 = 0.5 * self.D0
         self.q_spin_sr = None
+        self.q = None
 
         if const.dftb3:
             self.dU_dq = const.dU_dq[self.TYPE]  # (Nr_atoms,)
@@ -276,12 +302,21 @@ class StructureBatch(torch.nn.Module):
           self.diagonal -> list[ torch.Tensor ]
           self.HDIM -> list[int]
           self.diagonal_padded -> (batch_size, max_HDIM) zero-padded
+
+    Parameters
+    ----------
+    cell : sequence or torch.Tensor
+        Periodic cell specification. May be:
+        - shape (3,) for one shared orthorhombic box
+        - shape (3,3) for one shared triclinic cell
+        - shape (B,3) for per-structure orthorhombic boxes
+        - shape (B,3,3) for per-structure triclinic cells
     """
 
     def __init__(
         self,
         file,
-        LBox,
+        cell,
         const,
         charge: int = 0,
         Te: float = 3000.0,
@@ -294,7 +329,11 @@ class StructureBatch(torch.nn.Module):
         super().__init__(*args, **kwargs)
 
         self.batch_size = len(file)
-        species, coordinates = read_xyz(file, sort=False)  # Input coordinate file
+        # Auto-detect PDB vs XYZ from first file extension
+        if file and isinstance(file[0], str) and file[0].lower().endswith(".pdb"):
+            species, coordinates = read_pdb(file, sort=False)
+        else:
+            species, coordinates = read_xyz(file, sort=False)  # Input coordinate file
         self.TYPE = torch.tensor(species, dtype=torch.int64, device=device)
         self.req_grad_xyz = req_grad_xyz
         self.RX = torch.tensor(
@@ -316,15 +355,25 @@ class StructureBatch(torch.nn.Module):
             requires_grad=self.req_grad_xyz,
         )
 
-        if LBox is None:
-            self.LBox = None
-            self.lattice_vecs = None
-        else:
-            self.LBox = LBox.to(torch.get_default_dtype())
-            self.RX = (self.RX) % self.LBox[:, 0].unsqueeze(-1)
-            self.RY = (self.RY) % self.LBox[:, 1].unsqueeze(-1)
-            self.RZ = (self.RZ) % self.LBox[:, 2].unsqueeze(-1)
-            self.lattice_vecs = torch.diag_embed(self.LBox)  # shape (batch, 3, 3)
+        self.cell = (
+            None
+            if cell is None
+            else torch.as_tensor(cell, device=device, dtype=torch.get_default_dtype())
+        )
+        self.cell = normalize_cell_batch(
+            self.cell,
+            B=self.batch_size,
+            device=device,
+            dtype=torch.get_default_dtype(),
+        )
+        self.cell_inv = None if self.cell is None else torch.linalg.inv(self.cell)
+        self.lattice_vecs = self.cell
+
+        if self.cell is not None:
+            R = torch.stack((self.RX, self.RY, self.RZ), dim=-1)  # (B,N,3)
+            R = wrap_positions(R, self.cell, self.cell_inv)
+            self.RX, self.RY, self.RZ = R.unbind(dim=-1)
+
         self.coordinates = torch.stack(
             (self.RX, self.RY, self.RZ),
         )

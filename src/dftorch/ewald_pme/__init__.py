@@ -38,6 +38,7 @@ ewald_energy = impl.ewald_energy
 ewald_energy_torch = torch_impl.ewald_energy
 ewald_real = impl.ewald_real
 ewald_real_screening = impl.ewald_real_screening
+ewald_real_screening_stress = torch_impl.ewald_real_screening_stress
 ewald_real_torch = torch_impl.ewald_real
 ewald_kspace_part1 = impl.ewald_kspace_part1
 ewald_kspace_part2 = impl.ewald_kspace_part2
@@ -60,6 +61,7 @@ def is_triton_active():
 from .PME_torch import (
     init_PME_data,
     calculate_PME_energy,
+    calculate_PME_kspace_stress,
     map_charges_to_grid,
     calculate_PME_ewald,
 )

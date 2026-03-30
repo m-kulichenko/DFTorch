@@ -3,6 +3,7 @@ import time
 from typing import Union, Tuple
 
 from ._tools import ordered_pairs_from_TYPE
+from ._cell import normalize_cell, normalize_cell_batch
 
 
 # @torch.compile(dynamic=False)
@@ -11,7 +12,7 @@ def vectorized_nearestneighborlist(
     Rx: torch.Tensor,
     Ry: torch.Tensor,
     Rz: torch.Tensor,
-    LBox: Union[torch.Tensor, Tuple[float, float, float]],
+    cell: Union[torch.Tensor, Tuple[float, float, float]],
     Rcut: float,
     N: int,
     const,
@@ -42,8 +43,10 @@ def vectorized_nearestneighborlist(
         Integer type index per atom; must align with const.label for pair typing.
     Rx, Ry, Rz : torch.Tensor, each (N,)
         Cartesian coordinates of atoms along x, y, z (same device/dtype).
-    LBox : torch.Tensor or tuple(float, float, float)
-        Periodic box lengths (Lx, Ly, Lz). If tensor, should be on the same device.
+    cell : torch.Tensor or tuple
+        Periodic cell specification. May be:
+        - shape (3,) for orthorhombic box lengths
+        - shape (3,3) for a triclinic cell matrix
     Rcut : float
         Cutoff radius. Pairs with min-image distance < Rcut are kept.
     N : int
@@ -84,41 +87,24 @@ def vectorized_nearestneighborlist(
     - Uses large sentinels (e.g., 10000, 17320.5) for padded entries.
     - All outputs are on the same device/dtype as the inputs.
     """
-    # % Rx, Ry, Rz are the coordinates of atoms
-    # % LBox dimensions of peridic BC
-    # % N number of atoms
-    # % nrnnlist(I): number of atoms within distance of Rcut from atom I including atoms in the skin
-    # % nndist(I,J): distance between atom I(in box) and J (including atoms in the skin)
-    # % nnRx(I,J): x-coordinte of neighbor J to I within RCut (including atoms in the skin)
-    # % nnRy(I,J): y-coordinte of neighbor J to I within RCut (including atoms in the skin)
-    # % nnRz(I,J): z-coordinte of neighbor J to I within RCut (including atoms in the skin)
-    # % nnType(I,J): The neighbor J of I corresponds to some translated atom number in the box that we need to keep track of
-    # % nnStruct(I,J): The neigbors J to I within Rcut that are all within the box (not in the skin).
-    # % nrnnStruct(I): Number of neigbors to I within Rcut that are all within the box (not in the skin).
 
     start_time1 = time.perf_counter()
     R = torch.stack((Rx, Ry, Rz), dim=1)  # (N, 3)
 
-    # shift = [-2, -1, 0, 1, 2]
-    if LBox is None:
+    if cell is None:
         shift = [0]
-    else:
-        shift = [-1, 0, 1]
-
-    shifts = torch.tensor(
-        [[i, j, k] for i in shift for j in shift for k in shift],
-        dtype=Rx.dtype,
-        device=R.device,
-    )  # (27, 3)
-
-    if LBox is None:
+        shifts = torch.zeros((1, 3), dtype=Rx.dtype, device=R.device)
         R_translated = R.unsqueeze(1)
     else:
-        Lx, Ly, Lz = LBox
-        box = torch.tensor([Lx, Ly, Lz], dtype=Rx.dtype, device=R.device)
-        R_translated = R.unsqueeze(1) + shifts.unsqueeze(0) * box.view(
-            1, 1, 3
-        )  # (N, 27, 3)
+        shift = [-1, 0, 1]
+        shifts = torch.tensor(
+            [[i, j, k] for i in shift for j in shift for k in shift],
+            dtype=Rx.dtype,
+            device=R.device,
+        )
+        cell = normalize_cell(cell, device=R.device, dtype=Rx.dtype)
+        shift_cart = shifts @ cell
+        R_translated = R.unsqueeze(1) + shift_cart.unsqueeze(0)
 
     diff = R.view(N, 1, 1, 3) - R_translated.view(
         1, N, len(shift) ** 3, 3
@@ -254,7 +240,7 @@ def vectorized_nearestneighborlist_batch(
     Rx,
     Ry,
     Rz,
-    LBox,
+    cell,
     Rcut,
     N,
     const,
@@ -265,10 +251,13 @@ def vectorized_nearestneighborlist_batch(
 ):
     """
     Batched version of vectorized_nearestneighborlist.
-    TYPE, Rx, Ry, Rz have shape (B, N). LBox can be (3,) or (B,3).
-    Returns (nrnnlist, nndist, nnRx, nnRy, nnRz, nnType, nnStruct, nrnnStruct,
-             neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type)
-    neighbor_I, neighbor_J, IJ_pair_type, JI_pair_type have shape (B, Kmax), padded with -1.
+    TYPE, Rx, Ry, Rz have shape (B, N).
+
+    cell may be:
+    - shape (3,) for one shared orthorhombic box
+    - shape (3,3) for one shared triclinic cell
+    - shape (B,3) for per-structure orthorhombic boxes
+    - shape (B,3,3) for per-structure triclinic cells
     """
     start_time1 = time.perf_counter()
     B = TYPE.shape[0]
@@ -277,10 +266,11 @@ def vectorized_nearestneighborlist_batch(
 
     R = torch.stack((Rx, Ry, Rz), dim=-1)  # (B, N, 3)
 
-    if LBox is None:
+    if cell is None:
         shift = [0]
     else:
         shift = [-1, 0, 1]
+
     shifts = torch.tensor(
         [[i, j, k] for i in shift for j in shift for k in shift],
         dtype=dtype,
@@ -288,29 +278,33 @@ def vectorized_nearestneighborlist_batch(
     )  # (27,3)
     S = shifts.shape[0]
 
-    if LBox is None:
+    if cell is None:
         # No periodic box; use direct differences
         R_translated = R.unsqueeze(2)  # (B, N, 1, 3)
     else:
-        # Normalize LBox to shape (B,3); LBox always tensor
-        lb = LBox.to(device=device, dtype=dtype)
-        if lb.dim() == 1:
-            assert lb.numel() == 3, "LBox 1D must have length 3"
-            box = lb.view(1, 3).expand(B, 3)
-        elif lb.dim() == 2:
-            if lb.shape == (1, 3):
-                box = lb.expand(B, 3)
-            else:
-                assert lb.shape == (B, 3), (
-                    f"Expected LBox shape (B,3), got {tuple(lb.shape)}"
-                )
-                box = lb
-        else:
-            raise ValueError("LBox tensor must be 1D (3,) or 2D (B,3)")
-        # Use per-batch box
-        R_translated = R.unsqueeze(2) + shifts.view(1, 1, S, 3) * box.view(
-            B, 1, 1, 3
-        )  # (B,N,S,3)
+        # Normalize cell to shape (B,3); cell always tensor
+        # lb = cell.to(device=device, dtype=dtype)
+        # if lb.dim() == 1:
+        #     assert lb.numel() == 3, "cell 1D must have length 3"
+        #     box = lb.view(1, 3).expand(B, 3)
+        # elif lb.dim() == 2:
+        #     if lb.shape == (1, 3):
+        #         box = lb.expand(B, 3)
+        #     else:
+        #         assert lb.shape == (B, 3), (
+        #             f"Expected cell shape (B,3), got {tuple(lb.shape)}"
+        #         )
+        #         box = lb
+        # else:
+        #     raise ValueError("cell tensor must be 1D (3,) or 2D (B,3)")
+        # # Use per-batch box
+        # R_translated = R.unsqueeze(2) + shifts.view(1, 1, S, 3) * box.view(
+        #     B, 1, 1, 3
+        # )  # (B,N,S,3)
+
+        cell = normalize_cell_batch(cell, B=B, device=device, dtype=dtype)  # (B,3,3)
+        shift_cart = torch.einsum("sk,bkl->bsl", shifts, cell)  # (B,S,3)
+        R_translated = R.unsqueeze(2) + shift_cart.unsqueeze(1)  # (B,N,S,3)
 
     # Pairwise differences: (B,N,N,S,3)
     diff = R.unsqueeze(2).unsqueeze(3) - R_translated.unsqueeze(1)  # (B,N,N,S,3)

@@ -9,6 +9,8 @@ from dftorch.ewald_pme import (
     init_PME_data,
     calculate_alpha_and_num_grids,
 )
+from dftorch._cell import wrap_positions
+
 from dftorch._tools import calculate_dist_dips
 from dftorch._repulsive_spline import get_repulsion_energy
 
@@ -87,13 +89,13 @@ class MDXL_Graph(MDXL):
 
         if dftorch_params["coul_method"] == "PME":
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
-                structure.lattice_vecs.cpu().numpy(),
+                structure.cell.cpu().numpy(),
                 dftorch_params["cutoff"],
                 dftorch_params["Coulomb_acc"],
             )
             self.PME_data = init_PME_data(
                 grid_dimensions,
-                structure.lattice_vecs,
+                structure.cell,
                 self.CALPHA,
                 dftorch_params["PME_order"],
             )
@@ -211,7 +213,7 @@ class MDXL_Graph(MDXL):
                 write_pdb_frame(
                     traj_filename + ".pdb",
                     structure,
-                    structure.LBox,
+                    structure.cell,
                     step=md_step,
                     etot=Energ,
                     temp=Temperature,
@@ -237,14 +239,22 @@ class MDXL_Graph(MDXL):
             if self.langevin_enabled:
                 self._langevin_kick(structure, dt)
 
-            if structure.LBox is not None:
-                structure.RX = (structure.RX + dt * self.VX) % structure.LBox[0]
-                structure.RY = (structure.RY + dt * self.VY) % structure.LBox[1]
-                structure.RZ = (structure.RZ + dt * self.VZ) % structure.LBox[2]
+            if structure.cell is not None:
+                R = torch.stack(
+                    (
+                        structure.RX + dt * self.VX,
+                        structure.RY + dt * self.VY,
+                        structure.RZ + dt * self.VZ,
+                    ),
+                    dim=-1,
+                )
+                R = wrap_positions(R, structure.cell, structure.cell_inv)
+                structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
             else:
                 structure.RX = structure.RX + dt * self.VX
                 structure.RY = structure.RY + dt * self.VY
                 structure.RZ = structure.RZ + dt * self.VZ
+
             structure.coordinates = torch.stack(
                 (structure.RX, structure.RY, structure.RZ),
             )
@@ -284,7 +294,7 @@ class MDXL_Graph(MDXL):
             ewald_e1, forces1, CoulPot = calculate_PME_ewald(
                 positions.detach().clone(),
                 self.n,
-                structure.lattice_vecs,
+                structure.cell,
                 nl,
                 disps,
                 dists,
@@ -410,7 +420,7 @@ class MDXL_Graph(MDXL):
                 ch_structure.ch[: ch_structure.core_size],
                 ch_structure.hindex.cpu(),
                 structure.coordinates.T.cpu().numpy(),
-                structure.lattice_vecs.cpu().numpy(),
+                structure.cell.cpu().numpy(),
                 nl.cpu().numpy(),
                 alpha=0.7,
             )
@@ -470,7 +480,7 @@ class MDXL_Graph(MDXL):
         dist.all_reduce(s_entropy, op=dist.ReduceOp.SUM)
         if dist.get_rank() == 0:
             # nuclear repulsion
-            e_repulsion, dVr = get_repulsion_energy(
+            e_repulsion, dVr, stress_repulsion = get_repulsion_energy(
                 structure.const.R_rep_tensor,
                 structure.const.rep_splines_tensor,
                 structure.const.close_exp_tensor,
@@ -478,7 +488,7 @@ class MDXL_Graph(MDXL):
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.LBox,
+                structure.cell,
                 6.0,
                 structure.Nats,  # repulsive_rcut
                 structure.const,

@@ -26,6 +26,7 @@ def H0_and_S_vectorized(
     R_orb: torch.Tensor,
     coeffs_tensor: torch.Tensor,
     verbose: bool = False,
+    store_stress_metadata: object = None,
 ):
     """
     Build one-electron Hamiltonian H0, overlap S, their Cartesian derivatives,
@@ -276,6 +277,23 @@ def H0_and_S_vectorized(
     ) * 0.5  # Enforce exact symmetry. Some DFTB files give slightly asymmetric data.
     dS = dS.reshape(3, HDIM, HDIM) / 27.21138625
     dS = (dS - dS.transpose(1, 2)) * 0.5  # Enforce exact symmetry.
+
+    # Optionally store pair-level metadata for analytical stress computation.
+    # We store the minimum needed: bond vectors, spline indices, pair types,
+    # pre-computed AO offsets (i0/j0), and per-pair orbital counts (2 uint8
+    # tensors) from which all 9 boolean masks can be reconstructed on the fly.
+    if store_stress_metadata is not None:
+        Rab_mskd = torch.stack((Rab_X[nn_mask], Rab_Y[nn_mask], Rab_Z[nn_mask]), dim=-1)
+        store_stress_metadata._stress_metadata = {
+            "Rab_mskd": Rab_mskd,  # (P, 3) bond vectors
+            "IJ_pair_type": IJ_pair_type,  # (P,) long
+            "JI_pair_type": JI_pair_type,  # (P,) long
+            "idx": idx,  # (P,) long — spline interval
+            "i0": H_INDEX_START[neighbor_I],  # (P,) long — AO offset of atom I
+            "j0": H_INDEX_START[neighbor_J],  # (P,) long — AO offset of atom J
+            "n_orb_I": const.n_orb[TYPE[neighbor_I]].to(torch.uint8),  # (P,) uint8
+            "n_orb_J": const.n_orb[TYPE[neighbor_J]].to(torch.uint8),  # (P,) uint8
+        }
 
     if verbose:
         print("H0_and_S t {:.1f} s\n".format(time.perf_counter() - start_time1))

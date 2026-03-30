@@ -13,6 +13,10 @@ from ._forces_batch import forces_batch
 from ._coulomb_matrix import coulomb_matrix_vectorized
 from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
 from dftorch._spin import get_spin_energy, get_h_spin
+from ._stress import get_total_stress_analytical
+from ._gbsa import create_gbsa
+from ._dftd3 import create_dftd3
+from ._thirdorder import create_thirdorder
 
 
 import math
@@ -75,7 +79,7 @@ class ESDriver(torch.nn.Module):
             structure.RX,
             structure.RY,
             structure.RZ,
-            structure.LBox,
+            structure.cell,
             self.electronic_rcut,
             structure.Nats,
             const,
@@ -104,6 +108,7 @@ class ESDriver(torch.nn.Module):
             const.R_orb,
             const.coeffs_tensor,
             verbose=verbose,
+            store_stress_metadata=const,
         )
         del (
             _,
@@ -119,30 +124,36 @@ class ESDriver(torch.nn.Module):
         structure.Z = fractional_matrix_power_symm(structure.S, -0.5)
 
         # nuclear repulsion
-        structure.e_repulsion, structure.dVr = get_repulsion_energy(
-            const.R_rep_tensor,
-            const.rep_splines_tensor,
-            const.close_exp_tensor,
-            structure.TYPE,
-            structure.RX,
-            structure.RY,
-            structure.RZ,
-            structure.LBox,
-            self.repulsive_rcut,
-            structure.Nats,
-            const,
-            verbose=verbose,
+        structure.e_repulsion, structure.dVr, structure.stress_repulsion = (
+            get_repulsion_energy(
+                const.R_rep_tensor,
+                const.rep_splines_tensor,
+                const.close_exp_tensor,
+                structure.TYPE,
+                structure.RX,
+                structure.RY,
+                structure.RZ,
+                structure.cell,
+                self.repulsive_rcut,
+                structure.Nats,
+                const,
+                verbose=verbose,
+            )
         )
 
         if self.dftorch_params["coul_method"] == "PME":
             structure.C = None
             structure.dCC = None
+            # TODO: Full off-diagonal DFTB3 with PME requires building a
+            # separate neighbor list for the short-range Γ³ matrix.
+            # For now, PME uses diagonal-only DFTB3.
+            structure.thirdorder = None
         else:
             Coulomb_acc = self.dftorch_params["Coulomb_acc"]
             SQRTX = math.sqrt(-math.log(Coulomb_acc))
             COULCUT = self.dftorch_params["cutoff"]
             CALPHA = SQRTX / COULCUT
-            if COULCUT > 50.0:
+            if COULCUT > 50.0 and structure.cell is not None:
                 COULCUT = 50.0
                 CALPHA = SQRTX / COULCUT
 
@@ -165,7 +176,7 @@ class ESDriver(torch.nn.Module):
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.LBox,
+                structure.cell,
                 COULCUT,
                 structure.Nats,
                 const,
@@ -180,8 +191,7 @@ class ESDriver(torch.nn.Module):
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.LBox,
-                structure.lattice_vecs,
+                structure.cell,
                 structure.Nats,
                 Coulomb_acc,
                 nnRx,
@@ -192,7 +202,52 @@ class ESDriver(torch.nn.Module):
                 neighbor_J,
                 CALPHA,
                 verbose=verbose,
+                h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
+                h5_params=self.dftorch_params.get("h5_params", None),
             )
+
+            # ── Full off-diagonal DFTB3 third-order matrices ────────────
+            if (
+                structure.dU_dq is not None
+                and self.dftorch_params.get("dftb3_diagonal_only", False) is False
+            ):
+                # Compute pairwise distances/unit-vectors for the masked pairs
+                Ra = torch.stack(
+                    (
+                        structure.RX.unsqueeze(-1),
+                        structure.RY.unsqueeze(-1),
+                        structure.RZ.unsqueeze(-1),
+                    ),
+                    dim=-1,
+                )
+                Rb = torch.stack((nnRx, nnRy, nnRz), dim=-1)
+                Rab = Rb - Ra
+                dR_full = torch.norm(Rab, dim=-1)
+                dR_dxyz_full = Rab / dR_full.unsqueeze(-1).clamp(min=1e-30)
+                nn_mask = nnType != -1
+                dR_masked = dR_full[nn_mask]
+                dR_dxyz_masked = dR_dxyz_full[nn_mask]  # (Npairs, 3)
+
+                structure.thirdorder = create_thirdorder(
+                    structure.Hubbard_U,
+                    structure.dU_dq,
+                    structure.TYPE,
+                    h_damp_exp=self.dftorch_params.get("h_damp_exp", 4.0),
+                )
+                structure.thirdorder.update_coords(
+                    structure.RX,
+                    structure.RY,
+                    structure.RZ,
+                    structure.cell,
+                    neighbor_I,
+                    neighbor_J,
+                    dR_masked,
+                    dR_dxyz_masked,
+                )
+            else:
+                structure.thirdorder = None
+            # ────────────────────────────────────────────────────────────
+
             del (
                 _,
                 nndist,
@@ -208,6 +263,33 @@ class ESDriver(torch.nn.Module):
             )
 
         if do_scf:
+            # --- GBSA / ALPB implicit solvation ---
+            if self.dftorch_params.get("solvent", None) is not None:
+                structure.gbsa = create_gbsa(
+                    structure,
+                    self.device,
+                    solvent=self.dftorch_params["solvent"],
+                    param_file=self.dftorch_params.get("solvent_param_file", None),
+                    solvation_model=self.dftorch_params.get("solvation_model", "alpb"),
+                )
+            else:
+                structure.gbsa = None
+
+            # --- D3(BJ) dispersion correction ---
+            d3_params = self.dftorch_params.get("d3_params", None)
+            if d3_params is not None:
+                structure.dftd3 = create_dftd3(
+                    atomic_numbers=structure.TYPE.cpu().numpy().astype(int),
+                    s6=d3_params.get("s6", 1.0),
+                    s8=d3_params.get("s8", 0.5883),
+                    a1=d3_params.get("a1", 0.5719),
+                    a2=d3_params.get("a2", 3.6017),
+                    device=self.device,
+                    dtype=torch.float64,
+                )
+            else:
+                structure.dftd3 = None
+
             if self.dftorch_params.get("UNRESTRICTED", False):  # open-shell
                 (
                     structure.H,
@@ -225,6 +307,7 @@ class ESDriver(torch.nn.Module):
                     structure.e_coul_tmp,
                     structure.f_coul,
                     structure.dq_p1,
+                    structure.stress_coulomb,
                 ) = scf_x_os(
                     structure.el_per_shell,
                     structure.shell_types,
@@ -235,7 +318,7 @@ class ESDriver(torch.nn.Module):
                     structure.RX,
                     structure.RY,
                     structure.RZ,
-                    structure.lattice_vecs,
+                    structure.cell,
                     structure.Nats,
                     structure.Nocc,
                     structure.n_orbitals_per_atom,
@@ -252,6 +335,8 @@ class ESDriver(torch.nn.Module):
                     structure.C,
                     structure.req_grad_xyz,
                     structure.q_spin_sr,
+                    gbsa=structure.gbsa,
+                    thirdorder=structure.thirdorder,
                 )
 
                 structure.q = structure.q_tot_atom
@@ -366,12 +451,13 @@ class ESDriver(torch.nn.Module):
                     structure.e_coul_tmp,
                     structure.f_coul,
                     structure.dq_p1,
+                    structure.stress_coulomb,
                 ) = SCFx(
                     self.dftorch_params,
                     structure.RX,
                     structure.RY,
                     structure.RZ,
-                    structure.lattice_vecs,
+                    structure.cell,
                     structure.Nats,
                     structure.Nocc,
                     structure.n_orbitals_per_atom,
@@ -387,6 +473,9 @@ class ESDriver(torch.nn.Module):
                     structure.e_field,
                     structure.C,
                     structure.req_grad_xyz,
+                    structure.q,
+                    gbsa=structure.gbsa,
+                    thirdorder=structure.thirdorder,
                 )
                 structure.e_spin = 0.0
 
@@ -412,15 +501,55 @@ class ESDriver(torch.nn.Module):
                 structure.f,
                 structure.Te,
                 structure.dU_dq,
+                thirdorder=structure.thirdorder,
             )
 
             structure.e_tot = (
                 structure.e_elec_tot + structure.e_repulsion + structure.e_spin
             )
 
+            # --- GBSA solvation energy (differentiable) ---
+            if structure.gbsa is not None:
+                coords_ang = torch.stack(
+                    [structure.RX, structure.RY, structure.RZ], dim=1
+                )
+                structure.e_solv = structure.gbsa.get_energy_differentiable(
+                    coords_ang,
+                    structure.q,
+                )
+                # Keep non-differentiable e_gb / e_sasa for reporting
+                e_gb, e_sasa = structure.gbsa.get_energies(structure.q)
+                structure.e_gb = e_gb
+                structure.e_sasa = e_sasa
+                structure.e_tot = structure.e_tot + structure.e_solv
+            else:
+                structure.e_gb = 0.0
+                structure.e_sasa = 0.0
+                structure.e_solv = 0.0
+
+            # --- D3(BJ) dispersion energy ---
+            if structure.dftd3 is not None:
+                coords_ang = torch.stack(
+                    [structure.RX, structure.RY, structure.RZ], dim=1
+                )
+                structure.e_d3 = structure.dftd3.get_energy(coords_ang)
+                structure.e_tot = structure.e_tot + structure.e_d3
+            else:
+                structure.e_d3 = 0.0
+
     def calc_forces(self, structure, const):
 
         with torch.no_grad():
+            # Compute solvation shift for force calculation
+            solv_shift = None
+            if structure.gbsa is not None:
+                solv_shift = structure.gbsa.get_shifts(structure.q)
+
+            # Compute third-order shift for force calculation
+            to_shift = None
+            if structure.thirdorder is not None:
+                to_shift = structure.thirdorder.get_shifts(structure.q)
+
             if (
                 self.dftorch_params["coul_method"] == "PME"
             ):  # f_coul was calculated in _scf via calculate_PME_ewald
@@ -453,6 +582,7 @@ class ESDriver(torch.nn.Module):
                     const,
                     structure.TYPE,
                     structure.dU_dq,
+                    solvation_shift=solv_shift,
                 )
                 structure.f_tot = f_tot + structure.f_coul
             else:
@@ -484,7 +614,9 @@ class ESDriver(torch.nn.Module):
                     structure.Nats,
                     const,
                     structure.TYPE,
-                    structure.dU_dq,
+                    structure.dU_dq if structure.thirdorder is None else None,
+                    solvation_shift=solv_shift,
+                    thirdorder_shift=to_shift,
                 )
 
             if self.dftorch_params.get("UNRESTRICTED", False):  # open-shell
@@ -498,6 +630,47 @@ class ESDriver(torch.nn.Module):
                 )
 
                 structure.f_tot = structure.f_tot + structure.f_spin
+
+            # --- GBSA solvation gradients ---
+            if structure.gbsa is not None:
+                structure.f_gbsa_sasa = structure.gbsa.get_sasa_gradients(
+                    structure.q
+                ).T  # (3, N)
+                structure.f_gbsa_born = structure.gbsa.get_born_gradients(
+                    structure.q
+                ).T  # (3, N)
+                structure.f_gbsa = structure.f_gbsa_sasa + structure.f_gbsa_born
+                structure.f_tot = structure.f_tot + structure.f_gbsa
+
+            # --- Full DFTB3 off-diagonal gradient (dΓ³/dr) ---
+            if structure.thirdorder is not None:
+                structure.f_thirdorder_dc = structure.thirdorder.get_gradient_dc(
+                    structure.q
+                )
+                structure.f_tot = structure.f_tot + structure.f_thirdorder_dc
+
+            # --- D3(BJ) dispersion forces (analytical) ---
+            if structure.dftd3 is not None:
+                coords_ang = torch.stack(
+                    [structure.RX, structure.RY, structure.RZ], dim=1
+                )
+                structure.f_d3 = structure.dftd3.get_forces(coords_ang).to(self.device)
+                structure.f_tot = structure.f_tot + structure.f_d3
+
+    def calc_stress(self, structure, const):
+        stress_dict = get_total_stress_analytical(
+            structure,
+            const,
+            repulsive_rcut=self.repulsive_rcut,
+            dftorch_params=self.dftorch_params,
+            verbose=False,
+        )
+
+        structure.stress_repulsion = stress_dict["repulsion"]
+        structure.stress_band = stress_dict["band"]
+        structure.stress_overlap = stress_dict["overlap"]
+        structure.stress_coulomb = stress_dict["coulomb"]
+        structure.stress_tot = stress_dict["total"]
 
 
 class ESDriverBatch(torch.nn.Module):
@@ -557,7 +730,7 @@ class ESDriverBatch(torch.nn.Module):
             structure.RX,
             structure.RY,
             structure.RZ,
-            structure.LBox,
+            structure.cell,
             self.electronic_rcut,
             structure.Nats,
             const,
@@ -613,7 +786,7 @@ class ESDriverBatch(torch.nn.Module):
             structure.RX,
             structure.RY,
             structure.RZ,
-            structure.LBox,
+            structure.cell,
             self.repulsive_rcut,
             structure.Nats,
             const,
@@ -653,7 +826,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.LBox,
+                structure.cell,
                 COULCUT,
                 structure.Nats,
                 const,
@@ -668,8 +841,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.LBox,
-                structure.lattice_vecs,
+                structure.cell,
                 structure.Nats,
                 Coulomb_acc,
                 nnRx,
@@ -680,6 +852,8 @@ class ESDriverBatch(torch.nn.Module):
                 neighbor_J,
                 CALPHA,
                 verbose=verbose,
+                h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
+                h5_params=self.dftorch_params.get("h5_params", None),
             )
 
             del (

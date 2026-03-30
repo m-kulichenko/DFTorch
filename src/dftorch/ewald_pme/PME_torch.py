@@ -2,6 +2,7 @@
 import torch
 import math
 from . import ewald_real, CONV_FACTOR, ewald_self_energy, ewald_real_screening
+from .ewald_torch import ewald_real_screening_stress
 from typing import Optional, Tuple, List, Union
 
 
@@ -160,6 +161,111 @@ def calculate_PME_energy(position, charge, box, alpha: float, PME_init_data: tup
     return e
 
 
+def calculate_PME_kspace_stress(
+    positions: torch.Tensor,
+    charges: torch.Tensor,
+    box: torch.Tensor,
+    alpha: float,
+    PME_init_data: tuple,
+) -> torch.Tensor:
+    """Reciprocal-space Ewald metric stress via PME.
+
+    For each reciprocal-space grid point **m** with wavevector
+    G = h^{-T} m  the k-space energy density is
+
+        E_G = grid_multip(G) · |F[Q](G)|^2
+
+    Under a homogeneous cell strain at fixed fractional coordinates the
+    metric derivative gives the stress contribution
+
+        σ_{αβ}^{kspace} = (1/V) Σ_G  E_G · (-δ_{αβ} + 2 G_α G_β / G²
+                                              + G_α G_β / (2 α²))
+
+    This uses the same FFT grid and B-spline interpolation as
+    ``calculate_PME_energy`` so no additional Fourier transforms are needed
+    beyond the one already done for the energy.
+
+    Parameters
+    ----------
+    positions : (3, N) atomic coordinates
+    charges : (N,) atomic charges
+    box : (3, 3) lattice vectors
+    alpha : Ewald splitting parameter
+    PME_init_data : tuple from ``init_PME_data``
+
+    Returns
+    -------
+    sigma : (3, 3) k-space metric stress, same internal units as the energy
+            (before CONV_FACTOR).
+    """
+    grid_dimensions, grid_multip, inverse_box, order = PME_init_data
+
+    grid_new = map_charges_to_grid(
+        positions, charges, inverse_box, grid_dimensions, order
+    )
+    Fgrid = torch.fft.fftn(grid_new)
+    # Per-G energy density (real, same grid as grid_multip)
+    E_G = grid_multip * (Fgrid.real**2 + Fgrid.imag**2)  # (K1, K2, K3)
+
+    V = torch.abs(torch.linalg.det(box))
+    alpha2 = alpha * alpha
+
+    # Build G-vectors on the grid
+    # m-vectors in fractional reciprocal coordinates
+    freq0 = torch.fft.fftfreq(grid_dimensions[0], device=box.device, dtype=box.dtype)
+    freq1 = torch.fft.fftfreq(grid_dimensions[1], device=box.device, dtype=box.dtype)
+    freq2 = torch.fft.fftfreq(grid_dimensions[2], device=box.device, dtype=box.dtype)
+    m0, m1, m2 = torch.meshgrid(freq0, freq1, freq2, indexing="ij")
+
+    # G = h^{-T} · (K1*m0, K2*m1, K3*m2)  — but init_PME_data already built
+    # m = inv_box * (K_i * m_i), so we rebuild G in Cartesian:
+    # G_cart = 2π * (inv_box^T @ n) where n = (K1*m0, K2*m1, K3*m2) / K_i = (m0,m1,m2)
+    # Actually the m-vectors in init_PME_data are:
+    #   m = inv_box[0]*m0*K0 + inv_box[1]*m1*K1 + inv_box[2]*m2*K2
+    # and m_2 = |m|^2. The actual G-vector is 2π·m.  But in the energy formula
+    # the 2π factors are already absorbed into the prefactor.
+    # We just need the direction for the metric tensor.
+
+    # Reconstruct the Cartesian m-vectors (matching init_PME_data)
+    # m = inv_box[:,0]*m0*K0 + inv_box[:,1]*m1*K1 + inv_box[:,2]*m2*K2
+    m_vec = (
+        inverse_box[None, None, None, 0] * m0[:, :, :, None] * grid_dimensions[0]
+        + inverse_box[None, None, None, 1] * m1[:, :, :, None] * grid_dimensions[1]
+        + inverse_box[None, None, None, 2] * m2[:, :, :, None] * grid_dimensions[2]
+    )  # (K1, K2, K3, 3)
+
+    m_2 = torch.sum(m_vec**2, dim=-1)  # (K1, K2, K3)
+    # Avoid division by zero at G=0
+    m_2_safe = torch.where(m_2 > 0, m_2, torch.ones_like(m_2))
+
+    eye = torch.eye(3, dtype=box.dtype, device=box.device)
+
+    # Metric tensor per G-point:
+    #   T_{αβ}(G) = -δ_{αβ} + 2 G_α G_β / G² + G_α G_β / (2α²)
+    # where G = 2π·m, G² = 4π²·m², G_αG_β = 4π² m_α m_β
+    # So:  2 G_αG_β/G² = 2 m_α m_β / m²
+    #      G_αG_β/(2α²) = 4π² m_α m_β / (2α²) = 2π² m_α m_β / α²
+    # But wait — in init_PME_data the exponential is exp(-π² m² / α²),
+    # and the prefactor is 1/(2πV) · exp(…) / m².
+    # The actual G = 2π·m, so G² = 4π²m², and the metric correction is:
+    #   -δ + 2·m⊗m/m² + 2π²·m⊗m/α²
+
+    mm = m_vec.unsqueeze(-1) * m_vec.unsqueeze(-2)  # (K1,K2,K3,3,3)
+    metric = (
+        -eye[None, None, None, :, :]
+        + 2.0 * mm / m_2_safe[:, :, :, None, None]
+        + 2.0 * (math.pi**2) * mm / (alpha2)
+    )  # (K1,K2,K3,3,3)
+
+    # Zero out the G=0 contribution (m_2 == 0)
+    g_mask = (m_2 > 0).float()  # (K1,K2,K3)
+
+    # σ_{αβ} = (1/V) Σ_G  E_G · T_{αβ}(G)
+    sigma = torch.einsum("ijk,ijk,ijkab->ab", E_G, g_mask, metric) / V
+    sigma = 0.5 * (sigma + sigma.T)
+    return sigma
+
+
 def calculate_PME_ewald(
     positions: torch.Tensor,
     charges: torch.Tensor,
@@ -175,13 +281,16 @@ def calculate_PME_ewald(
     calculate_forces: int = 0,
     calculate_dq: int = 0,
     screening: int = 0,
-) -> Tuple[float, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    calculate_stress: int = 0,
+) -> Tuple[
+    float, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]
+]:
     """
     Computes the total Ewald sum energy using Particle Mesh Ewald (PME).
 
     This function calculates the real-space and PME-based reciprocal-space
-    contributions to the Ewald summation. It also optionally computes forces
-    and charge derivatives.
+    contributions to the Ewald summation. It also optionally computes forces,
+    charge derivatives, and the stress tensor.
 
     Args:
         positions (torch.Tensor): Atomic positions. Shape: `(N, 3)` or  `(3, N)`, where:
@@ -198,17 +307,20 @@ def calculate_PME_ewald(
         PME_init_data (tuple): Precomputed PME initialization data.
         calculate_forces (int): Flag to compute forces (`1` for True, `0` for False).
         calculate_dq (int, optional): Flag to compute charge derivatives (`1` for True, `0` for False`). Defaults to `0`.
+        screening (int, optional): Flag to use Hubbard-U screening. Defaults to `0`.
+        calculate_stress (int, optional): Flag to compute stress tensor (`1` for True, `0` for False). Defaults to `0`.
 
     Returns:
-        Tuple[float, Optional[torch.Tensor], Optional[torch.Tensor]]:
+        Tuple[float, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
             - **(float)** Total Ewald energy contribution.
             - **(torch.Tensor, shape `(3, N)`, optional)** Computed forces if `calculate_forces` is enabled, otherwise `None`.
                 If the positions are provided as `(N, 3)`, the forces will be also  `(N, 3)`.
-
             - **(torch.Tensor, shape `(N,)`, optional)** Charge derivatives if `calculate_dq` is enabled, otherwise `None`.
+            - **(torch.Tensor, shape `(3, 3)`, optional)** Stress tensor in eV/Å³ if `calculate_stress` is enabled, otherwise `None`.
 
     Notes:
         - Forces and charge derivatives for PME are computed via automatic differentiation.
+        - Stress is computed analytically: real-space virial + k-space metric tensor.
     """
     N = len(charges)
     # As the internal functions expects (3, N), transpose the position tensor as needed
@@ -285,4 +397,27 @@ def calculate_PME_ewald(
             charges.requires_grad = False
 
     total_ewald_e = (my_e_real + pme_e + self_e) * CONV_FACTOR
+
+    # --- Stress tensor (analytical) ---
+    if calculate_stress:
+        # Real-space virial (uses same damping logic as ewald_real_screening)
+        real_stress = ewald_real_screening_stress(
+            nbr_inds,
+            nbr_disp_vecs,
+            nbr_dists,
+            charges,
+            hubbard_u,
+            atomtypes,
+            alpha,
+            cutoff,
+            box,
+        )
+        # K-space metric tensor stress
+        kspace_stress = calculate_PME_kspace_stress(
+            positions, charges, box, alpha, PME_init_data
+        )
+        # Self-energy has no cell dependence → zero stress contribution
+        stress = (real_stress + kspace_stress) * CONV_FACTOR
+        return total_ewald_e, forces, dq, stress
+
     return total_ewald_e, forces, dq

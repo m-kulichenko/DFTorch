@@ -1,3 +1,4 @@
+from ._cell import wrap_positions
 from .ESDriver import ESDriverBatch
 from ._energy import energy_shadow
 from ._forces_batch import forces_shadow_batch
@@ -13,6 +14,8 @@ from ._xl_tools import (
     calc_q_batch,
 )
 from ._spin import get_h_spin, get_spin_energy_shadow
+from ._stress import get_total_stress_analytical
+from ._gbsa import create_gbsa
 
 import torch
 
@@ -23,6 +26,14 @@ from dftorch._tools import calculate_dist_dips
 
 
 class MDXL:
+    """Extended-Lagrangian Born–Oppenheimer MD for closed- and open-shell systems.
+
+    The class auto-detects the spin mode from the ``structure`` passed to
+    :meth:`run` (open-shell ↔ ``structure.Nocc`` is a 2-element tensor) and
+    adjusts the charge variable, kernel, and energy/force evaluation
+    accordingly.
+    """
+
     def __init__(self, es_driver: ESDriverBatch, const, temperature_K: float):
 
         self.NoRank = False
@@ -45,6 +56,17 @@ class MDXL:
         self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
         self.langevin_enabled = False
 
+        # Berendsen barostat parameters
+        self.barostat_enabled = False
+        self.target_pressure = 0.0  # target pressure in eV/Å³
+        self.barostat_tau = 100.0  # coupling time in fs
+        self.barostat_isotropic = True  # True = isotropic, False = anisotropic
+        self.barostat_compressibility = (
+            4.57e-5  # compressibility in 1/GPa (water default)
+        )
+        self.P_array = None  # pressure history
+        self.V_array = None  # volume history
+
         self.es_driver = es_driver
         self.temperature_K = temperature_K
         self.n = None
@@ -63,6 +85,11 @@ class MDXL:
         self.Res_array = None
 
         self.cuda_sync = False
+
+        # These are set in run() once the spin mode is known
+        self._os: bool = False  # open-shell flag
+        self.atom_ids_sr = None  # shell-resolved atom ids (os only)
+        self.shell_to_atom = None  # shell→atom mapping     (os only)
 
     def enable_langevin(self, gamma: float):
         """
@@ -116,6 +143,170 @@ class MDXL:
         self.VY = c1 * self.VY + noise_scale * xi_y
         self.VZ = c1 * self.VZ + noise_scale * xi_z
 
+    def enable_barostat(
+        self,
+        target_pressure: float = 0.0,
+        tau: float = 100.0,
+        isotropic: bool = True,
+        compressibility: float = 4.57e-5,
+    ):
+        """
+        Enable Berendsen barostat for NPT ensemble.
+
+        Parameters
+        ----------
+        target_pressure : float
+            Target external pressure in GPa.
+            0.0 = ambient / zero pressure.
+        tau : float
+            Pressure coupling time constant in fs.
+            Typical: 100–1000 fs. Smaller = stronger coupling.
+        isotropic : bool
+            If True, uniform scaling along all three axes (hydrostatic).
+            If False, allow independent scaling per axis (anisotropic).
+        compressibility : float
+            Isothermal compressibility in **1/bar** (the standard MD
+            convention used e.g. by GROMACS).
+            Default 4.57×10⁻⁵  1/bar  (liquid water at 300 K).
+            For solids, ∼1–5×10⁻⁶  1/bar.
+        """
+        self.barostat_enabled = True
+        # 1 GPa = 1/(160.21766208) eV/Å³  →  1 eV/Å³ = 160.21766208 GPa
+        # 1 GPa = 1e4 bar  →  1 eV/Å³ = 160.21766208e4 bar
+        # β in 1/bar  →  β in Å³/eV = β_bar × 160.21766208e4
+        GPa_per_eVA3 = 160.21766208
+        bar_per_eVA3 = GPa_per_eVA3 * 1e4
+        self.target_pressure = target_pressure / GPa_per_eVA3  # GPa → eV/Å³
+        self.barostat_tau = tau
+        self.barostat_isotropic = isotropic
+        # Convert compressibility from 1/bar → Å³/eV for internal use
+        self.barostat_compressibility = compressibility * bar_per_eVA3  # Å³/eV
+
+    def _compute_stress_tensor(self, structure, dftorch_params):
+        """
+        Compute the potential-energy stress tensor using analytical formulas.
+
+        In XL-BOMD the shadow energy depends on both the SCF charges *q*
+        (from diagonalisation) and the extrapolated charges *n* (from the
+        extended Lagrangian).  We pass *n* to the stress routine so that the
+        SCC-overlap and Coulomb contributions use the shadow expressions
+        consistent with ``forces_shadow`` / ``energy_shadow``.
+
+        Returns the 3×3 stress tensor in eV/Å³.
+        """
+        # Atom-resolved extrapolated charges for the shadow stress.
+        # CS: self.n is already atom-resolved (Nats,).
+        # OS: self.n is shell-resolved (2, Nshells); sum over spin then
+        #     scatter to atoms.
+        if self._os:
+            n_atom = torch.zeros_like(structure.RX)
+            n_atom.scatter_add_(0, self.shell_to_atom, self.n.sum(dim=0))
+        else:
+            n_atom = self.n
+
+        stress_dict = get_total_stress_analytical(
+            structure,
+            self.const,
+            repulsive_rcut=self.es_driver.repulsive_rcut,
+            dftorch_params=dftorch_params,
+            verbose=False,
+            n=n_atom,
+        )
+        return stress_dict["total"]  # (3, 3) in eV/Å³
+
+    def _compute_kinetic_stress(self, structure):
+        """
+        Compute the kinetic (ideal-gas) contribution to the stress tensor.
+
+        σ^kin_αβ = (1/V) Σ_i  m_i v_iα v_iβ   (in eV/Å³)
+        """
+        V = torch.abs(torch.det(structure.cell))
+        vel = torch.stack((self.VX, self.VY, self.VZ), dim=-1)  # (N, 3)
+        mass = structure.Mnuc  # (N,) in amu
+        # m_i v_i⊗v_i  summed → amu·Å²/fs²
+        # 1 amu·Å²/fs² = 2 * MVV2KE eV  (MVV2KE converts ½mv² → eV)
+        mvv = torch.einsum("i,ia,ib->ab", mass, vel, vel)  # (3,3)
+        sigma_kin = (2.0 * self.MVV2KE * mvv) / V
+        return sigma_kin  # eV/Å³
+
+    def _barostat_scale(self, structure, dt):
+        """
+        Apply Berendsen barostat scaling to cell and positions.
+
+        Scaling factor:
+          μ = [1 - (β dt / (3 τ_P)) (P_target - P_inst)]^{1/3}
+
+        Isotropic: scalar μ applied uniformly.
+        Anisotropic: independent μ_α per axis from diagonal P_αα.
+        """
+        sigma_pot = self._compute_stress_tensor(structure, self._dftorch_params)
+        sigma_kin = self._compute_kinetic_stress(structure)
+
+        # Pressure tensor: P = σ_kin - σ_pot
+        P_inst = sigma_kin - sigma_pot  # (3, 3) eV/Å³
+
+        P_scalar = torch.trace(P_inst) / 3.0
+        GPa_per_eVA3 = 160.21766208
+
+        # Store for logging (GPa)
+        self._P_inst_GPa = P_scalar * GPa_per_eVA3
+        self._P_tensor = P_inst * GPa_per_eVA3
+
+        # Berendsen prefactor: β dt / (3 τ_P)
+        # β is in Å³/eV (converted from 1/bar in enable_barostat),
+        # dP is in eV/Å³  →  β·dP is dimensionless  ✓
+        prefactor = self.barostat_compressibility * dt / (3.0 * self.barostat_tau)
+
+        if self.barostat_isotropic:
+            dP = self.target_pressure - P_scalar  # eV/Å³
+            mu = (1.0 - prefactor * dP) ** (1.0 / 3.0)
+            mu_t = torch.tensor(
+                mu, dtype=structure.cell.dtype, device=structure.cell.device
+            )
+
+            structure.cell = structure.cell * mu_t
+            structure.cell_inv = torch.linalg.inv(structure.cell)
+
+            structure.RX = structure.RX * mu_t
+            structure.RY = structure.RY * mu_t
+            structure.RZ = structure.RZ * mu_t
+        else:
+            # Anisotropic: per-axis diagonal scaling (eV/Å³)
+            diag_P = torch.diagonal(P_inst)  # (3,) eV/Å³
+            dP = self.target_pressure - diag_P
+            mu_diag = (1.0 - prefactor * dP) ** (1.0 / 3.0)
+
+            structure.cell = structure.cell * mu_diag.unsqueeze(-1)
+            structure.cell_inv = torch.linalg.inv(structure.cell)
+
+            structure.RX = structure.RX * mu_diag[0]
+            structure.RY = structure.RY * mu_diag[1]
+            structure.RZ = structure.RZ * mu_diag[2]
+
+        # Wrap positions after rescaling
+        R = torch.stack((structure.RX, structure.RY, structure.RZ), dim=-1)
+        R = wrap_positions(R, structure.cell, structure.cell_inv)
+        structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
+
+        # Rebuild PME data for the new cell (if using PME Coulomb)
+        if self._dftorch_params["coul_method"] == "PME":
+            from .ewald_pme import (
+                init_PME_data,
+                calculate_alpha_and_num_grids,
+            )
+
+            self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
+                structure.cell.detach().cpu().numpy(),
+                self._dftorch_params["cutoff"],
+                self._dftorch_params["Coulomb_acc"],
+            )
+            self.PME_data = init_PME_data(
+                grid_dimensions,
+                structure.cell,
+                self.CALPHA,
+                self._dftorch_params["PME_order"],
+            )
+
     def run(
         self,
         structure,
@@ -125,6 +316,14 @@ class MDXL:
         dump_interval=1,
         traj_filename="md_trj.xyz",
     ):
+        # Detect open-shell from structure.Nocc:
+        # CS: int or 1-element tensor, OS: 2-element tensor [Nocc_alpha, Nocc_beta]
+        self._os = (
+            isinstance(structure.Nocc, torch.Tensor) and structure.Nocc.numel() == 2
+        )
+
+        # Store params for barostat (needs them during step)
+        self._dftorch_params = dftorch_params
 
         if self.VX is None:
             self.VX, self.VY, self.VZ = initialize_velocities(
@@ -134,7 +333,14 @@ class MDXL:
                 rescale_to_T=True,
                 remove_angmom=True,
             )
-        q = structure.q.clone()
+
+        # Propagated charge variable: atom-resolved q (CS) or shell-resolved
+        # q_spin_sr of shape (2, Nshells) (OS).
+        if self._os:
+            q = structure.q_spin_sr.clone()
+        else:
+            q = structure.q.clone()
+
         if self.n is None:
             self.n = q
             self.n_0 = q
@@ -143,8 +349,14 @@ class MDXL:
             self.n_3 = q
             self.n_4 = q
             self.n_5 = q
+
         if self.K0Res is None:
-            self.K0Res = structure.KK @ (q - self.n)
+            if self._os:
+                self.K0Res = torch.bmm(
+                    structure.KK, (q - self.n).unsqueeze(-1)
+                ).squeeze(-1)
+            else:
+                self.K0Res = structure.KK @ (q - self.n)
 
         # Generate atom index for each orbital
         self.atom_ids = torch.repeat_interleave(
@@ -157,6 +369,17 @@ class MDXL:
         else:
             self.dU_dq_gathered = None
 
+        # Open-shell-specific index arrays
+        if self._os:
+            self.atom_ids_sr = torch.repeat_interleave(
+                torch.arange(len(structure.shell_types), device=structure.device),
+                self.const.shell_dim[structure.shell_types],
+            )
+            self.shell_to_atom = torch.repeat_interleave(
+                torch.arange(len(structure.TYPE), device=structure.device),
+                structure.n_shells_per_atom,
+            )
+
         if dftorch_params["coul_method"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
@@ -164,13 +387,13 @@ class MDXL:
             )
 
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
-                structure.lattice_vecs.cpu().numpy(),
+                structure.cell.cpu().numpy(),
                 dftorch_params["cutoff"],
                 dftorch_params["Coulomb_acc"],
             )
             self.PME_data = init_PME_data(
                 grid_dimensions,
-                structure.lattice_vecs,
+                structure.cell,
                 self.CALPHA,
                 dftorch_params["PME_order"],
             )
@@ -184,6 +407,12 @@ class MDXL:
             self.Ek_array = torch.empty((0,), device=structure.device)
             self.Ep_array = torch.empty((0,), device=structure.device)
             self.Res_array = torch.empty((0,), device=structure.device)
+
+        if self.barostat_enabled and self.P_array is None:
+            self.P_array = torch.empty((0,), device=structure.device)
+            self.V_array = torch.empty((0,), device=structure.device)
+            self._P_inst_GPa = torch.tensor(0.0, device=structure.device)
+            self._P_tensor = torch.zeros(3, 3, device=structure.device)
 
         self.EPOT = structure.e_tot
         for md_step in range(num_steps):
@@ -214,8 +443,9 @@ class MDXL:
         Energ = (
             self.EKIN + self.EPOT
         )  # Total Energy in eV, Total energy fluctuations Propto dt^2
-        # Time = md_step * dt
-        ResErr = torch.norm(structure.q - self.n) / (
+
+        q_current = structure.q_spin_sr if self._os else structure.q
+        ResErr = torch.norm(q_current - self.n) / (
             structure.Nats**0.5
         )  # ResErr Propto dt^2
 
@@ -234,44 +464,64 @@ class MDXL:
         )
 
         if md_step % dump_interval == 0:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV"
+            if self._os:
+                comm_string = (
+                    f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, "
+                    f"Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, "
+                    f"NS = {structure.net_spin_sr.sum().item():.4f}, "
+                    f"Res = {ResErr:.6f}"
+                )
+            else:
+                comm_string = (
+                    f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, "
+                    f"Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, "
+                    f"Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV"
+                )
             write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
 
             write_pdb_frame(
                 traj_filename + ".pdb",
                 structure,
-                structure.LBox,
+                structure.cell,
                 step=md_step,
                 etot=Energ,
                 temp=Temperature,
                 mode="a",
-            )  # 'w' — create fresh file
+            )
 
+        # ── First half velocity Verlet ───────────────────────────────────
         self.VX = (
             self.VX
             + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
             - self.fric * self.VX
-        )  # First 1/2 of Leapfrog step
+        )
         self.VY = (
             self.VY
             + 0.5 * dt * (self.F2V * structure.f_tot[1] / structure.Mnuc)
             - self.fric * self.VY
-        )  # F2V: Unit conversion
+        )
         self.VZ = (
             self.VZ
             + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
             - self.fric * self.VZ
-        )  # -c*V c>0 => Fricition
+        )
 
         # ── Langevin half-kick (before position update) ──────────────────
         if self.langevin_enabled:
             self._langevin_kick(structure, dt)
 
-        # update positions and translate coordinates if go beyond box. Apply periodic boundary conditions
-        if structure.LBox is not None:
-            structure.RX = (structure.RX + dt * self.VX) % structure.LBox[0]
-            structure.RY = (structure.RY + dt * self.VY) % structure.LBox[1]
-            structure.RZ = (structure.RZ + dt * self.VZ) % structure.LBox[2]
+        # ── Position update + PBC wrapping ───────────────────────────────
+        if structure.cell is not None:
+            R = torch.stack(
+                (
+                    structure.RX + dt * self.VX,
+                    structure.RY + dt * self.VY,
+                    structure.RZ + dt * self.VZ,
+                ),
+                dim=-1,
+            )
+            R = wrap_positions(R, structure.cell, structure.cell_inv)
+            structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
         else:
             structure.RX = structure.RX + dt * self.VX
             structure.RY = structure.RY + dt * self.VY
@@ -281,477 +531,9 @@ class MDXL:
             torch.cuda.synchronize()
         tic2_1 = time.perf_counter()
 
-        self.es_driver(structure, self.const, do_scf=False)
-        self.n = (
-            2 * self.n_0
-            - self.n_1
-            - self.kappa * self.K0Res
-            + self.alpha
-            * (
-                self.C0 * self.n_0
-                + self.C1 * self.n_1
-                + self.C2 * self.n_2
-                + self.C3 * self.n_3
-                + self.C4 * self.n_4
-                + self.C5 * self.n_5
-            )
-        )
-        self.n_5 = self.n_4
-        self.n_4 = self.n_3
-        self.n_3 = self.n_2
-        self.n_2 = self.n_1
-        self.n_1 = self.n_0
-        self.n_0 = self.n
-
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
-        tic2_1 = time.perf_counter()
-
-        if dftorch_params["coul_method"] == "PME":
-            from .ewald_pme import (
-                calculate_PME_ewald,
-            )
-            from .ewald_pme.neighbor_list import NeighborState
-
-            nbr_state = NeighborState(
-                torch.stack((structure.RX, structure.RY, structure.RZ)),
-                structure.lattice_vecs,
-                None,
-                dftorch_params["cutoff"],
-                is_dense=True,
-                buffer=0.0,
-                use_triton=False,
-            )
-            disps, dists, nbr_inds = calculate_dist_dips(
-                torch.stack((structure.RX, structure.RY, structure.RZ)),
-                nbr_state,
-                dftorch_params["cutoff"],
-            )
-
-            _, forces1, CoulPot = calculate_PME_ewald(
-                torch.stack((structure.RX, structure.RY, structure.RZ)),
-                self.n,
-                structure.lattice_vecs,
-                nbr_inds,
-                disps,
-                dists,
-                self.CALPHA,
-                dftorch_params["cutoff"],
-                self.PME_data,
-                hubbard_u=structure.Hubbard_U,
-                atomtypes=structure.TYPE,
-                screening=1,
-                calculate_forces=1,
-                calculate_dq=1,
-            )
-        else:
-            CoulPot = structure.C @ self.n
-            nbr_inds = None
-            disps = None
-            dists = None
-
-        (
-            structure.q,
-            structure.H,
-            structure.Hcoul,
-            structure.D,
-            Dorth,
-            Q,
-            e,
-            structure.f,
-            structure.mu0,
-        ) = calc_q(
-            structure.H0,
-            self.Hubbard_U_gathered,
-            self.n[self.atom_ids],
-            CoulPot[self.atom_ids],
-            structure.S,
-            structure.Z,
-            structure.Te,
-            structure.Nocc,
-            structure.Znuc,
-            self.atom_ids,
-            self.dU_dq_gathered,
-        )
-
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
-        tic3 = time.perf_counter()
-
-        # Update Kernel
-        Res = structure.q - self.n
-        if md_step % 100000 == 0 and self.do_full_kernel:
-            1
-            # KK, _ = _kernel_fermi(
-            #     structure,
-            #     structure.mu0,
-            #     structure.Te,
-            #     structure.Nats,
-            #     structure.H,
-            #     C,
-            #     S,
-            #     Z,
-            #     Q,
-            #     e,
-            # )
-            # self.K0Res = KK @ Res
-        elif self.NoRank:
-            self.K0Res = -dftorch_params["SCF_ALPHA"] * Res
-        else:  # Preconditioned Low-Rank Krylov _scf acceleration
-            self.K0Res = kernel_update_lr(
-                structure.RX,
-                structure.RY,
-                structure.RZ,
-                structure.lattice_vecs,
-                structure.TYPE,
-                structure.Nats,
-                structure.Hubbard_U,
-                dftorch_params,
-                dftorch_params["KRYLOV_TOL_MD"],
-                structure.KK.clone(),
-                Res,
-                structure.q,
-                structure.S,
-                structure.Z,
-                self.PME_data,
-                self.atom_ids,
-                Q,
-                e,
-                structure.mu0,
-                structure.Te,
-                structure.C,
-                nbr_inds,
-                disps,
-                dists,
-                self.CALPHA,
-                structure.dU_dq,
-            )
-
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        print("KER: {:.3f} s".format(time.perf_counter() - tic3))
-        tic4 = time.perf_counter()
-
-        if dftorch_params["coul_method"] == "PME":
-            (
-                structure.e_elec_tot,
-                structure.e_band0,
-                structure.e_coul,
-                structure.e_dipole,
-                structure.e_entropy,
-                structure.s_ent,
-            ) = energy_shadow(
-                structure.H0,
-                structure.Hubbard_U,
-                structure.e_field,
-                structure.D0,
-                None,
-                CoulPot,
-                structure.D,
-                structure.q,
-                self.n,
-                structure.RX,
-                structure.RY,
-                structure.RZ,
-                structure.f,
-                structure.Te,
-                structure.dU_dq,
-            )
-
-            # no f_coul in PME forces_shadow_pme. Done in calculate_PME_ewald
-            (
-                structure.f_tot,
-                _,
-                structure.f_band0,
-                structure.f_dipole,
-                structure.f_pulay,
-                structure.f_s_coul,
-                structure.f_s_dipole,
-                structure.f_rep,
-            ) = forces_shadow_pme(
-                structure.H,
-                structure.Z,
-                CoulPot,
-                structure.D,
-                structure.D0,
-                structure.dH0,
-                structure.dS,
-                structure.dVr,
-                structure.e_field,
-                structure.Hubbard_U,
-                structure.q,
-                self.n,
-                structure.RX,
-                structure.RY,
-                structure.RZ,
-                structure.Nats,
-                self.const,
-                structure.TYPE,
-                structure.dU_dq,
-            )
-            structure.f_coul = forces1 * (2 * structure.q / self.n - 1.0)
-            structure.f_tot = structure.f_tot + structure.f_coul
-        else:
-            (
-                structure.e_elec_tot,
-                structure.e_band0,
-                structure.e_coul,
-                structure.e_dipole,
-                structure.e_entropy,
-                structure.s_ent,
-            ) = energy_shadow(
-                structure.H0,
-                structure.Hubbard_U,
-                structure.e_field,
-                structure.D0,
-                structure.C,
-                None,
-                structure.D,
-                structure.q,
-                self.n,
-                structure.RX,
-                structure.RY,
-                structure.RZ,
-                structure.f,
-                structure.Te,
-                structure.dU_dq,
-            )
-
-            (
-                structure.f_tot,
-                structure.f_coul,
-                structure.f_band0,
-                structure.f_dipole,
-                structure.f_pulay,
-                structure.f_s_coul,
-                structure.f_s_dipole,
-                structure.f_rep,
-            ) = forces_shadow(
-                structure.H,
-                structure.Z,
-                structure.C,
-                structure.D,
-                structure.D0,
-                structure.dH0,
-                structure.dS,
-                structure.dCC,
-                structure.dVr,
-                structure.e_field,
-                structure.Hubbard_U,
-                structure.q,
-                self.n,
-                structure.RX,
-                structure.RY,
-                structure.RZ,
-                structure.Nats,
-                self.const,
-                structure.TYPE,
-                structure.dU_dq,
-            )
-
-        structure.e_tot = structure.e_elec_tot + structure.e_repulsion
-        self.EPOT = structure.e_tot
-
-        self.VX = (
-            self.VX
-            + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
-            - self.fric * self.VX
-        )  # Integrate second 1/2 of leapfrog step
-        self.VY = (
-            self.VY
-            + 0.5 * dt * (self.F2V * structure.f_tot[1] / structure.Mnuc)
-            - self.fric * self.VY
-        )  # - c*V  c > 0 => friction
-        self.VZ = (
-            self.VZ
-            + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
-            - self.fric * self.VZ
-        )
-
-        # ── Langevin half-kick (after force update) ──────────────────────
-        if self.langevin_enabled:
-            self._langevin_kick(structure, dt)
-
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
-
-        print(
-            "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}, t = {:.1f} s".format(
-                Energ,
-                self.EPOT.item(),
-                self.EKIN.item(),
-                Temperature.item(),
-                ResErr.item(),
-                time.perf_counter() - start_time,
-            )
-        )
-        print(torch.cuda.memory_allocated() / 1e9, "GB\n")
-        print()
-
-
-class MDXLOS(MDXL):
-    def run(
-        self,
-        structure,
-        dftorch_params,
-        num_steps,
-        dt,
-        dump_interval=1,
-        traj_filename="md_trj.xyz",
-    ):
-
-        if self.VX is None:
-            self.VX, self.VY, self.VZ = initialize_velocities(
-                structure,
-                temperature_K=self.temperature_K,
-                remove_com=True,
-                rescale_to_T=True,
-                remove_angmom=True,
-            )
-        q = structure.q_spin_sr.clone()
-        if self.n is None:
-            self.n = q
-            self.n_0 = q
-            self.n_1 = q
-            self.n_2 = q
-            self.n_3 = q
-            self.n_4 = q
-            self.n_5 = q
-        if self.K0Res is None:
-            self.K0Res = torch.bmm(structure.KK, (q - self.n).unsqueeze(-1)).squeeze(-1)
-
-        # Generate atom index for each orbital
-        self.atom_ids = torch.repeat_interleave(
-            torch.arange(len(structure.n_orbitals_per_atom), device=structure.device),
-            structure.n_orbitals_per_atom,
-        )
-        self.atom_ids_sr = torch.repeat_interleave(
-            torch.arange(len(structure.shell_types), device=structure.device),
-            self.const.shell_dim[structure.shell_types],
-        )  # Generate atom index for each orbital
-        self.shell_to_atom = torch.repeat_interleave(
-            torch.arange(len(structure.TYPE), device=structure.device),
-            structure.n_shells_per_atom,
-        )
-
-        self.Hubbard_U_gathered = structure.Hubbard_U[self.atom_ids]
-        if structure.dU_dq is not None:
-            self.dU_dq_gathered = structure.dU_dq[self.atom_ids]
-        else:
-            self.dU_dq_gathered = None
-
-        if dftorch_params["coul_method"] == "PME":
-            from .ewald_pme import (
-                init_PME_data,
-                calculate_alpha_and_num_grids,
-            )
-
-            self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
-                structure.lattice_vecs.cpu().numpy(),
-                dftorch_params["cutoff"],
-                dftorch_params["Coulomb_acc"],
-            )
-            self.PME_data = init_PME_data(
-                grid_dimensions,
-                structure.lattice_vecs,
-                self.CALPHA,
-                dftorch_params["PME_order"],
-            )
-        else:
-            self.CALPHA = None
-            self.PME_data = None
-
-        if self.E_array is None:
-            self.E_array = torch.empty((0,), device=structure.device)
-            self.T_array = torch.empty((0,), device=structure.device)
-            self.Ek_array = torch.empty((0,), device=structure.device)
-            self.Ep_array = torch.empty((0,), device=structure.device)
-            self.Res_array = torch.empty((0,), device=structure.device)
-
-        self.EPOT = structure.e_tot
-        for md_step in range(num_steps):
-            self.step(
-                structure, dftorch_params, md_step, dt, dump_interval, traj_filename
-            )
-
-    def step(
-        self, structure, dftorch_params, md_step, dt, dump_interval, traj_filename
-    ):
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        start_time = time.perf_counter()
-        print(
-            "########## Step = {:} ##########".format(
-                md_step,
-            )
-        )
-
-        self.EKIN = (
-            0.5
-            * self.MVV2KE
-            * torch.sum(structure.Mnuc * (self.VX**2 + self.VY**2 + self.VZ**2))
-        )  # Kinetic energy in eV (MVV2KE: unit conversion)
-        Temperature = (
-            (2 / 3) * self.KE2T * self.EKIN / structure.Nats
-        )  # Statistical temperature in Kelvin
-        Energ = (
-            self.EKIN + self.EPOT
-        )  # Total Energy in eV, Total energy fluctuations Propto dt^2
-        # Time = md_step * dt
-        ResErr = torch.norm(structure.q_spin_sr - self.n) / (
-            structure.Nats**0.5
-        )  # ResErr Propto dt^2
-
-        self.E_array = torch.cat((self.E_array, Energ.detach().unsqueeze(0)), dim=0)
-        self.T_array = torch.cat(
-            (self.T_array, Temperature.detach().unsqueeze(0)), dim=0
-        )
-        self.Ek_array = torch.cat(
-            (self.Ek_array, self.EKIN.detach().unsqueeze(0)), dim=0
-        )
-        self.Ep_array = torch.cat(
-            (self.Ep_array, self.EPOT.detach().unsqueeze(0)), dim=0
-        )
-        self.Res_array = torch.cat(
-            (self.Res_array, ResErr.detach().unsqueeze(0)), dim=0
-        )
-
-        if md_step % dump_interval == 0:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, NS = {structure.net_spin_sr.sum().item():.4f}, Res = {ResErr:.6f}"
-            write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
-        self.VX = (
-            self.VX
-            + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
-            - self.fric * self.VX
-        )  # First 1/2 of Leapfrog step
-        self.VY = (
-            self.VY
-            + 0.5 * dt * (self.F2V * structure.f_tot[1] / structure.Mnuc)
-            - self.fric * self.VY
-        )  # F2V: Unit conversion
-        self.VZ = (
-            self.VZ
-            + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
-            - self.fric * self.VZ
-        )  # -c*V c>0 => Fricition
-        # update positions and translate coordinates if go beyond box. Apply periodic boundary conditions
-        if structure.LBox is not None:
-            structure.RX = (structure.RX + dt * self.VX) % structure.LBox[0]
-            structure.RY = (structure.RY + dt * self.VY) % structure.LBox[1]
-            structure.RZ = (structure.RZ + dt * self.VZ) % structure.LBox[2]
-        else:
-            structure.RX = structure.RX + dt * self.VX
-            structure.RY = structure.RY + dt * self.VY
-            structure.RZ = structure.RZ + dt * self.VZ
-
-        if self.cuda_sync:
-            torch.cuda.synchronize()
-        tic2_1 = time.perf_counter()
-
-        if ResErr > 0.012:
+        # ── H0 + S build & charge extrapolation ─────────────────────────
+        if self._os and ResErr > 0.05:
+            # OS divergence guard: fall back to full SCF
             self.es_driver(structure, self.const, do_scf=True)
             self.n = structure.q_spin_sr.clone()
             self.n_5 = self.n
@@ -794,12 +576,22 @@ class MDXLOS(MDXL):
             0, self.shell_to_atom, self.n.sum(dim=0)
         )  # atom-resolved
         n_net_spin_sr = self.n[0] - self.n[1]
+        # ── OS: compute atom-resolved charges from shell-resolved n ──────
+        if self._os:
+            n_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
+            n_spin_atom.scatter_add_(
+                1, self.shell_to_atom.unsqueeze(0).expand(2, -1), self.n
+            )
+            n_tot_atom = torch.zeros_like(structure.RX)
+            n_tot_atom.scatter_add_(0, self.shell_to_atom, self.n.sum(dim=0))
+            n_net_spin_sr = self.n[0] - self.n[1]
 
         if self.cuda_sync:
             torch.cuda.synchronize()
         print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic2_1 = time.perf_counter()
 
+        # ── Coulomb potential ────────────────────────────────────────────
         if dftorch_params["coul_method"] == "PME":
             from .ewald_pme import (
                 calculate_PME_ewald,
@@ -808,7 +600,7 @@ class MDXLOS(MDXL):
 
             nbr_state = NeighborState(
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
-                structure.lattice_vecs,
+                structure.cell,
                 None,
                 dftorch_params["cutoff"],
                 is_dense=True,
@@ -821,10 +613,11 @@ class MDXLOS(MDXL):
                 dftorch_params["cutoff"],
             )
 
+            pme_charge = n_tot_atom if self._os else self.n
             _, forces1, CoulPot = calculate_PME_ewald(
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
-                n_tot_atom,
-                structure.lattice_vecs,
+                pme_charge,
+                structure.cell,
                 nbr_inds,
                 disps,
                 dists,
@@ -838,7 +631,10 @@ class MDXLOS(MDXL):
                 calculate_dq=1,
             )
         else:
-            CoulPot = structure.C @ n_tot_atom
+            if self._os:
+                CoulPot = structure.C @ n_tot_atom
+            else:
+                CoulPot = structure.C @ self.n
             nbr_inds = None
             disps = None
             dists = None
@@ -879,48 +675,117 @@ class MDXLOS(MDXL):
             dftorch_params["DELTA_SCF"],
             dftorch_params, 
         )
+        # ── GBSA implicit solvation: rebuild for new geometry ────────────
+        if dftorch_params.get("solvent", None) is not None:
+            structure.gbsa = create_gbsa(
+                structure,
+                structure.device,
+                solvent=dftorch_params["solvent"],
+                param_file=dftorch_params.get("solvent_param_file", None),
+            )
+            # Born shift uses extrapolated charges n (shadow Hamiltonian)
+            solv_n = n_tot_atom if self._os else self.n
+            solv_shift = structure.gbsa.get_shadow_shifts(solv_n)
+            CoulPot = CoulPot + solv_shift
+        else:
+            structure.gbsa = None
+            solv_shift = None
 
-        structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
-        q_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
-        q_spin_atom.scatter_add_(
-            1, self.shell_to_atom.unsqueeze(0).expand(2, -1), structure.q_spin_sr
-        )  # atom-resolved
+        # ── Full off-diagonal DFTB3: add third-order shift to CoulPot ────
+        if structure.thirdorder is not None:
+            to_n = n_tot_atom if self._os else self.n
+            CoulPot = CoulPot + structure.thirdorder.get_shifts(to_n)
 
-        q_tot_atom = torch.zeros_like(structure.RX)
-        q_tot_atom.scatter_add_(
-            0, self.shell_to_atom, structure.q_spin_sr.sum(dim=0)
-        )  # atom-resolved
+        # ── Diagonalise & compute charges ────────────────────────────────
+        if self._os:
+            H_spin = get_h_spin(
+                structure.TYPE,
+                n_net_spin_sr,
+                self.const.w,
+                structure.n_shells_per_atom,
+                structure.shell_types,
+            )
+            (
+                structure.q_spin_sr,
+                structure.H,
+                structure.Hcoul,
+                structure.D,
+                structure.Dorth,
+                Q,
+                e,
+                structure.f,
+                structure.mu0,
+            ) = calc_q_os(
+                structure.H0,
+                H_spin,
+                self.Hubbard_U_gathered,
+                n_tot_atom[self.atom_ids],
+                CoulPot[self.atom_ids],
+                structure.S,
+                structure.Z,
+                structure.Te,
+                structure.Nocc,
+                structure.Znuc,
+                self.atom_ids,
+                self.atom_ids_sr,
+                structure.el_per_shell,
+                self.dU_dq_gathered if structure.thirdorder is None else None,
+                dftorch_params.get("SHARED_MU", False),
+            )
+
+            structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
+            q_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
+            q_spin_atom.scatter_add_(
+                1,
+                self.shell_to_atom.unsqueeze(0).expand(2, -1),
+                structure.q_spin_sr,
+            )
+            q_tot_atom = torch.zeros_like(structure.RX)
+            q_tot_atom.scatter_add_(
+                0, self.shell_to_atom, structure.q_spin_sr.sum(dim=0)
+            )
+        else:
+            (
+                structure.q,
+                structure.H,
+                structure.Hcoul,
+                structure.D,
+                Dorth,
+                Q,
+                e,
+                structure.f,
+                structure.mu0,
+            ) = calc_q(
+                structure.H0,
+                self.Hubbard_U_gathered,
+                self.n[self.atom_ids],
+                CoulPot[self.atom_ids],
+                structure.S,
+                structure.Z,
+                structure.Te,
+                structure.Nocc,
+                structure.Znuc,
+                self.atom_ids,
+                self.dU_dq_gathered if structure.thirdorder is None else None,
+            )
 
         if self.cuda_sync:
             torch.cuda.synchronize()
         print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic3 = time.perf_counter()
 
-        # Update Kernel
-        Res = structure.q_spin_sr - self.n
+        # ── Kernel update ────────────────────────────────────────────────
+        Res = (structure.q_spin_sr if self._os else structure.q) - self.n
         if md_step % 100000 == 0 and self.do_full_kernel:
-            1
-            # KK, _ = _kernel_fermi(
-            #     structure,
-            #     structure.mu0,
-            #     structure.Te,
-            #     structure.Nats,
-            #     structure.H,
-            #     C,
-            #     S,
-            #     Z,
-            #     Q,
-            #     e,
-            # )
-            # self.K0Res = KK @ Res
+            pass
         elif self.NoRank:
             self.K0Res = -dftorch_params["SCF_ALPHA"] * Res
-        else:  # Preconditioned Low-Rank Krylov _scf acceleration
+        elif self._os:
             self.K0Res = kernel_update_lr_os(
                 structure.RX,
                 structure.RY,
                 structure.RZ,
-                structure.lattice_vecs,
+                structure.cell,
                 structure.TYPE,
                 structure.Nats,
                 structure.Hubbard_U,
@@ -946,7 +811,38 @@ class MDXLOS(MDXL):
                 disps,
                 dists,
                 self.CALPHA,
-                structure.dU_dq,
+                structure.dU_dq if structure.thirdorder is None else None,
+                thirdorder=structure.thirdorder,
+            )
+        else:
+            self.K0Res = kernel_update_lr(
+                structure.RX,
+                structure.RY,
+                structure.RZ,
+                structure.cell,
+                structure.TYPE,
+                structure.Nats,
+                structure.Hubbard_U,
+                dftorch_params,
+                dftorch_params["KRYLOV_TOL_MD"],
+                structure.KK.clone(),
+                Res,
+                structure.q,
+                structure.S,
+                structure.Z,
+                self.PME_data,
+                self.atom_ids,
+                Q,
+                e,
+                structure.mu0,
+                structure.Te,
+                structure.C,
+                nbr_inds,
+                disps,
+                dists,
+                self.CALPHA,
+                structure.dU_dq if structure.thirdorder is None else None,
+                thirdorder=structure.thirdorder,
             )
 
         if self.cuda_sync:
@@ -954,14 +850,25 @@ class MDXLOS(MDXL):
         print("KER: {:.3f} s".format(time.perf_counter() - tic3))
         tic4 = time.perf_counter()
 
-        structure.e_spin = get_spin_energy_shadow(
-            structure.TYPE,
-            structure.net_spin_sr,
-            n_net_spin_sr,
-            self.const.w,
-            structure.n_shells_per_atom,
-        )
+        # ── Spin energy (OS only) ────────────────────────────────────────
+        if self._os:
+            structure.e_spin = get_spin_energy_shadow(
+                structure.TYPE,
+                structure.net_spin_sr,
+                n_net_spin_sr,
+                self.const.w,
+                structure.n_shells_per_atom,
+            )
 
+        # Atom-resolved charges used for energy / forces
+        if self._os:
+            q_e = q_tot_atom  # SCF charges
+            n_e = n_tot_atom  # extrapolated charges
+        else:
+            q_e = structure.q
+            n_e = self.n
+
+        # ── Energy + Forces ──────────────────────────────────────────────
         if dftorch_params["coul_method"] == "PME":
             (
                 structure.e_elec_tot,
@@ -978,14 +885,15 @@ class MDXLOS(MDXL):
                 None,
                 CoulPot,
                 structure.D,
-                q_tot_atom,
-                n_tot_atom,
+                q_e,
+                n_e,
                 structure.RX,
                 structure.RY,
                 structure.RZ,
                 structure.f,
                 structure.Te,
-                structure.dU_dq,
+                structure.dU_dq if structure.thirdorder is None else None,
+                thirdorder=structure.thirdorder,
             )
 
             # no f_coul in PME forces_shadow_pme. Done in calculate_PME_ewald
@@ -1009,17 +917,22 @@ class MDXLOS(MDXL):
                 structure.dVr,
                 structure.e_field,
                 structure.Hubbard_U,
-                structure.q,
-                self.n,
+                q_e,
+                n_e,
                 structure.RX,
                 structure.RY,
                 structure.RZ,
                 structure.Nats,
                 self.const,
                 structure.TYPE,
-                structure.dU_dq,
+                structure.dU_dq if structure.thirdorder is None else None,
+                thirdorder_shift=(
+                    structure.thirdorder.get_shifts(n_e)
+                    if structure.thirdorder is not None
+                    else None
+                ),
             )
-            structure.f_coul = forces1 * (2 * structure.q / self.n - 1.0)
+            structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
             structure.f_tot = structure.f_tot + structure.f_coul
         else:
             (
@@ -1037,14 +950,15 @@ class MDXLOS(MDXL):
                 structure.C,
                 None,
                 structure.D,
-                q_tot_atom,
-                n_tot_atom,
+                q_e,
+                n_e,
                 structure.RX,
                 structure.RY,
                 structure.RZ,
                 structure.f,
                 structure.Te,
-                structure.dU_dq,
+                structure.dU_dq if structure.thirdorder is None else None,
+                thirdorder=structure.thirdorder,
             )
 
             (
@@ -1068,64 +982,134 @@ class MDXLOS(MDXL):
                 structure.dVr,
                 structure.e_field,
                 structure.Hubbard_U,
-                q_tot_atom,
-                n_tot_atom,
+                q_e,
+                n_e,
                 structure.RX,
                 structure.RY,
                 structure.RZ,
                 structure.Nats,
                 self.const,
                 structure.TYPE,
-                structure.dU_dq,
+                structure.dU_dq if structure.thirdorder is None else None,
+                solvation_shift=solv_shift,
+                thirdorder_shift=(
+                    structure.thirdorder.get_shifts(n_e)
+                    if structure.thirdorder is not None
+                    else None
+                ),
             )
 
-        structure.f_spin = forces_spin(
-            structure.D,
-            structure.dS,
-            n_spin_atom,
-            structure.Nats,
-            self.const,
-            structure.TYPE,
-        )
-        structure.f_tot = structure.f_tot + structure.f_spin
+        # ── Spin forces (OS only) ───────────────────────────────────────
+        if self._os:
+            structure.f_spin = forces_spin(
+                structure.D,
+                structure.dS,
+                n_spin_atom,
+                structure.Nats,
+                self.const,
+                structure.TYPE,
+            )
+            structure.f_tot = structure.f_tot + structure.f_spin
+            structure.e_tot = (
+                structure.e_elec_tot + structure.e_repulsion + structure.e_spin
+            )
+        else:
+            structure.e_tot = structure.e_elec_tot + structure.e_repulsion
 
-        structure.e_tot = (
-            structure.e_elec_tot + structure.e_repulsion + structure.e_spin
-        )
+        # ── GBSA shadow solvation energy + gradients ─────────────────────
+        if structure.gbsa is not None:
+            e_gb, e_sasa = structure.gbsa.get_shadow_energies(q_e, n_e)
+            structure.e_gb = e_gb
+            structure.e_sasa = e_sasa
+            structure.e_tot = structure.e_tot + e_gb + e_sasa
+
+            structure.f_gbsa_sasa = structure.gbsa.get_shadow_sasa_gradients(
+                q_e, n_e
+            ).T  # (3, N)
+            structure.f_gbsa_born = structure.gbsa.get_shadow_born_gradients(
+                q_e, n_e
+            ).T  # (3, N)
+            structure.f_gbsa = structure.f_gbsa_sasa + structure.f_gbsa_born
+            structure.f_tot = structure.f_tot + structure.f_gbsa
+
+        # ── Full off-diagonal DFTB3: gradient from dΓ³/dr ───────────────
+        if structure.thirdorder is not None:
+            grad_dc = structure.thirdorder.get_gradient_dc_xlbomd(n_e, q_e)
+            structure.f_tot = structure.f_tot + grad_dc
+
         self.EPOT = structure.e_tot
 
+        # ── Second half velocity Verlet ──────────────────────────────────
         self.VX = (
             self.VX
             + 0.5 * dt * (self.F2V * structure.f_tot[0] / structure.Mnuc)
             - self.fric * self.VX
-        )  # Integrate second 1/2 of leapfrog step
+        )
         self.VY = (
             self.VY
             + 0.5 * dt * (self.F2V * structure.f_tot[1] / structure.Mnuc)
             - self.fric * self.VY
-        )  # - c*V  c > 0 => friction
+        )
         self.VZ = (
             self.VZ
             + 0.5 * dt * (self.F2V * structure.f_tot[2] / structure.Mnuc)
             - self.fric * self.VZ
         )
+
+        # ── Langevin half-kick (after force update) ──────────────────────
+        if self.langevin_enabled:
+            self._langevin_kick(structure, dt)
+
+        # ── Berendsen barostat: rescale cell + positions ─────────────────
+        if self.barostat_enabled:
+            self._barostat_scale(structure, dt)
+            V = torch.abs(torch.det(structure.cell))
+            self.P_array = torch.cat(
+                (self.P_array, self._P_inst_GPa.detach().unsqueeze(0)), dim=0
+            )
+            self.V_array = torch.cat((self.V_array, V.detach().unsqueeze(0)), dim=0)
+
         if self.cuda_sync:
             torch.cuda.synchronize()
         print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
 
-        print(
-            "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f},  NS = {:.4f}, ResErr = {:.6f}, t = {:.1f} s".format(
-                Energ,
-                self.EPOT.item(),
-                self.EKIN.item(),
-                Temperature.item(),
-                structure.net_spin_sr.sum().item(),
-                ResErr.item(),
-                time.perf_counter() - start_time,
+        if self.barostat_enabled:
+            V = torch.abs(torch.det(structure.cell))
+            P_str = f", P = {self._P_inst_GPa.item():.4f} GPa, V = {V.item():.2f} Å³"
+        else:
+            P_str = ""
+
+        if self._os:
+            print(
+                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f},  NS = {:.4f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
+                    Energ,
+                    self.EPOT.item(),
+                    self.EKIN.item(),
+                    Temperature.item(),
+                    structure.net_spin_sr.sum().item(),
+                    ResErr.item(),
+                    P_str,
+                    time.perf_counter() - start_time,
+                )
             )
-        )
+        else:
+            print(
+                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
+                    Energ,
+                    self.EPOT.item(),
+                    self.EKIN.item(),
+                    Temperature.item(),
+                    ResErr.item(),
+                    P_str,
+                    time.perf_counter() - start_time,
+                )
+            )
         print(torch.cuda.memory_allocated() / 1e9, "GB\n")
         print()
+
+
+# Backward-compatible alias — existing code that uses MDXLOS will keep working.
+MDXLOS = MDXL
 
 
 class MDXLBatch:
@@ -1305,15 +1289,22 @@ class MDXLBatch:
             - self.fric * self.VZ
         )  # -c*V c>0 => Fricition
         # update positions and translate coordinates if go beyond box. Apply periodic boundary conditions
-        structure.RX = (structure.RX + dt * self.VX) % structure.LBox[:, 0].unsqueeze(
-            -1
-        )
-        structure.RY = (structure.RY + dt * self.VY) % structure.LBox[:, 1].unsqueeze(
-            -1
-        )
-        structure.RZ = (structure.RZ + dt * self.VZ) % structure.LBox[:, 2].unsqueeze(
-            -1
-        )
+        if structure.cell is not None:
+            R = torch.stack(
+                (
+                    structure.RX + dt * self.VX,
+                    structure.RY + dt * self.VY,
+                    structure.RZ + dt * self.VZ,
+                ),
+                dim=-1,
+            )  # (B, N, 3)
+            R = wrap_positions(R, structure.cell, structure.cell_inv)
+            structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
+        else:
+            structure.RX = structure.RX + dt * self.VX
+            structure.RY = structure.RY + dt * self.VY
+            structure.RZ = structure.RZ + dt * self.VZ
+
         if self.cuda_sync:
             torch.cuda.synchronize()
         tic2_1 = time.perf_counter()

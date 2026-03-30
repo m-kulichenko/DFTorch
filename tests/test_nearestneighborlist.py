@@ -35,7 +35,7 @@ def test_nearestneighborlist_small_xyz(device):
     Ry = torch.tensor([0.0, 0.0, 1.0])
     Rz = torch.tensor([0.0, 0.0, 0.0])
     TYPE = torch.tensor([6, 6, 6], dtype=torch.int32)  # Carbon atoms
-    LBox = torch.tensor([10.0, 10.0, 10.0])
+    cell = torch.tensor([10.0, 10.0, 10.0])
     Rcut = 4.0
     N = 3
     const = Constants(
@@ -47,7 +47,7 @@ def test_nearestneighborlist_small_xyz(device):
         Rx,
         Ry,
         Rz,
-        LBox,
+        cell,
         Rcut,
         N,
         const,

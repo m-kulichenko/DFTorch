@@ -23,6 +23,8 @@ def Forces(
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
+    solvation_shift: torch.Tensor = None,
+    thirdorder_shift: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a DFTB-like total energy expression in gas phase
@@ -144,9 +146,15 @@ def Forces(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ q
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
+    if thirdorder_shift is not None:
+        CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
 
     # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
+    # When thirdorder_shift is provided, it already includes the full
+    # off-diagonal third-order contribution and dU_dq should be None.
     if dU_dq is not None:
         factor = (U * q + CoulPot + 0.5 * dU_dq * q**2) * 2
     else:
@@ -270,6 +278,7 @@ def Forces_PME(
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
+    solvation_shift: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a DFTB-like total energy expression using
@@ -390,6 +399,8 @@ def Forces_PME(
 
     # FScoul
     CoulPot = dq_p1
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
     # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
     if dU_dq is not None:
@@ -434,12 +445,12 @@ def Forces_PME(
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    tmp1 = (D_tot - D0) @ dS
+    D_diff = D_tot - D0
+    tmp1 = D_diff @ dS
     tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)
     FSdipole *= dotRE
 
-    D_diff = D_tot - D0
     n_orb = dS.shape[1]
     a = dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
     outs_by_atom = torch.zeros((3, n_orb, Nats), dtype=a.dtype, device=a.device)
@@ -477,6 +488,8 @@ def forces_shadow(
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
+    solvation_shift: torch.Tensor = None,
+    thirdorder_shift: torch.Tensor = None,
 ):
     """
     Computes atomic forces from a DFTB-like total energy expression.
@@ -604,9 +617,15 @@ def forces_shadow(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ n
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
+    if thirdorder_shift is not None:
+        CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
     # ── DFTB3: modify factor with extra dU/dq * q^2 term ─────────────────
-    if dU_dq is not None:
+    # When full off-diagonal thirdorder is active, its shift is already in
+    # CoulPot via thirdorder_shift, so the diagonal dU_dq term is suppressed.
+    if dU_dq is not None and thirdorder_shift is None:
         factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
     else:
         factor = (U * n + CoulPot) * 2
@@ -691,6 +710,8 @@ def forces_shadow_pme(
     const,
     TYPE: torch.Tensor,
     dU_dq: torch.Tensor = None,
+    solvation_shift: torch.Tensor = None,
+    thirdorder_shift: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a “shadow” DFTB-like total energy expression
@@ -794,6 +815,11 @@ def forces_shadow_pme(
     dtype = H.dtype
     device = H.device
 
+    if D.dim() == 3:  # os
+        D_tot = D.sum(0) / 2
+    else:  # cs
+        D_tot = D
+
     n_orbitals_per_atom = const.n_orb[TYPE]
     atom_ids = torch.repeat_interleave(
         torch.arange(len(n_orbitals_per_atom), device=Rx.device),
@@ -807,15 +833,21 @@ def forces_shadow_pme(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
+    if thirdorder_shift is not None:
+        CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((3, Nats), dtype=dtype, device=device)
     # ── DFTB3 shadow PME ──────────────────────────────────────────────────
-    if dU_dq is not None:
+    # When full off-diagonal thirdorder is active, its shift is already in
+    # CoulPot via thirdorder_shift, so the diagonal dU_dq term is suppressed.
+    if dU_dq is not None and thirdorder_shift is None:
         factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
     else:
         factor = (U * n + CoulPot) * 2
     # ─────────────────────────────────────────────────────────────────────
 
-    dS_times_D = D * dS * factor[atom_ids].unsqueeze(-1)
+    dS_times_D = D_tot * dS * factor[atom_ids].unsqueeze(-1)
     dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
     FScoul.scatter_add_(
         1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
@@ -826,7 +858,7 @@ def forces_shadow_pme(
     # Eband0 = 2 * torch.trace(H0 @ (D))
     # Fband0 = -4 * Tr[D * dH0/dR]
     Fband0 = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = 4 * (dH @ D).diagonal(offset=0, dim1=1, dim2=2)
+    TMP = 4 * (dH @ D_tot).diagonal(offset=0, dim1=1, dim2=2)
     Fband0.scatter_add_(
         1, atom_ids.expand(3, -1), TMP
     )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
@@ -834,7 +866,12 @@ def forces_shadow_pme(
     # Pulay forces
     SIHD = 4 * Z @ Z.T @ H @ D
     FPulay = torch.zeros((3, Nats), dtype=dtype, device=device)
-    TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    if SIHD.dim() == 2:  # cs
+        TMP = -(dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+    else:  # os
+        TMP = -0.5 * torch.matmul(dS.unsqueeze(0), SIHD.unsqueeze(1)).sum(0).diagonal(
+            offset=0, dim1=1, dim2=2
+        )  # (2, 3, 4, 4)
     FPulay.scatter_add_(
         1, atom_ids.expand(3, -1), TMP
     )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
@@ -846,7 +883,7 @@ def forces_shadow_pme(
     D0 = torch.diag(D0)
     dotRE = Rx * Efield[0] + Ry * Efield[1] + Rz * Efield[2]
     FSdipole = torch.zeros((3, Nats), dtype=dtype, device=device)
-    D_diff = D - D0
+    D_diff = D_tot - D0
     tmp1 = D_diff @ dS
     tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
     FSdipole.scatter_add_(1, atom_ids.expand(3, -1), tmp2)

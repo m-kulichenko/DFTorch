@@ -2,7 +2,7 @@ import torch
 from ._fermi_prt import Canon_DM_PRT
 
 
-def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
+def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e, gbsa=None):
     """
     Build the charge-response kernel for Krylov/Anderson _scf acceleration.
 
@@ -58,6 +58,8 @@ def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e):
         dq_J[J] = 1
 
         d_CoulPot = C @ dq_J
+        if gbsa is not None:
+            d_CoulPot = d_CoulPot + gbsa.get_shifts(dq_J)
         d_Hcoul_diag = (
             structure.Hubbard_U[atom_ids] * dq_J[atom_ids] + d_CoulPot[atom_ids]
         )

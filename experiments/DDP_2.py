@@ -71,16 +71,16 @@ def prepare_structure(device):
     }
 
     # filename = 'COORD_far.xyz'            # Solvated acetylacetone and glycine molecules in H20, Na, Cl
-    # LBox = torch.tensor([25.0, 25.0, 25.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
+    # cell = torch.tensor([25.0, 25.0, 25.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
     # filename = 'COORD_8WATER.xyz'            # Solvated acetylacetone and glycine molecules in H20, Na, Cl
-    # LBox = torch.tensor([30.0, 30.0, 30.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
+    # cell = torch.tensor([30.0, 30.0, 30.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
     # filename = "water_30.xyz"  # Solvated acetylacetone and glycine molecules in H20, Na, Cl)
-    # LBox = torch.tensor([35.0, 35.0, 35.0], device=device)  # Simulation box size in Angstroms. Only cubic boxes supported for now.
+    # cell = torch.tensor([35.0, 35.0, 35.0], device=device)  # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
     filename = "RDX_1K.xyz"
-    LBox = torch.tensor(
+    cell = torch.tensor(
         [22.886, 21.222, 26.312], device=device
     )  # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
@@ -94,7 +94,7 @@ def prepare_structure(device):
 
     structure = Structure(
         filename,
-        LBox,
+        cell,
         const,
         charge=0,
         spin_pol=0,
@@ -136,7 +136,7 @@ def init_processes(backend):
 
         nbr_state = NeighborState(
             positions,
-            structure.lattice_vecs,
+            structure.cell,
             None,
             dftorch_params["cutoff"],
             is_dense=True,
@@ -168,7 +168,7 @@ def init_processes(backend):
             nl_init.cpu().numpy(),
             dftorch_params["graph_cutoff"],
             MAX_DEG,
-            structure.LBox.cpu().numpy(),
+            structure.LBox.cpu().numpy(),  # important that LBOX is not a cell
         )
         parts = graph_partition(
             structure,
