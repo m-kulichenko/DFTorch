@@ -9,6 +9,7 @@ from ._dm_fermi_x import (
     dm_fermi_x,
     dm_fermi_x_os,
     dm_fermi_x_batch,
+    nonaufbau_constraints,
 )
 
 # from ._kernel_fermi import _kernel_fermi
@@ -717,6 +718,7 @@ def scf_x_os(
                 CoulPot = CoulPot + thirdorder.get_shifts(q_tot_atom)
 
             q_spin_sr_old = q_spin_sr.clone()
+
 
             H_spin = get_h_spin(TYPE, net_spin_sr, w, n_shells_per_atom, shell_types)
             q_spin_sr, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q_os(
@@ -1564,3 +1566,371 @@ def SCF_adaptive_mixing(
 
     f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
     return H, Hcoul, Hdipole, D, q, f
+
+
+
+
+def delta_scf_x_os(
+    el_per_shell: torch.Tensor,
+    shell_types: torch.Tensor,
+    n_shells_per_atom: torch.Tensor,
+    shell_dim: torch.Tensor,
+    w: torch.Tensor,
+    dftorch_params: Dict[str, Any],
+    RX,
+    RY,
+    RZ,
+    lattice_vecs: torch.Tensor,
+    Nats: int,
+    Nocc: int,
+    n_orbitals_per_atom: torch.Tensor,
+    Znuc: torch.Tensor,
+    TYPE: torch.Tensor,
+    Te: float,
+    Hubbard_U: torch.Tensor,
+    dU_dq: Optional[torch.Tensor],
+    D0: Optional[torch.Tensor],
+    H0: torch.Tensor,
+    H: torch.Tensor,
+    D: torch.Tensor,
+    f: torch.Tensor,
+    mu0: torch.Tensor,
+    S: torch.Tensor,
+    Z: torch.Tensor,
+    Efield: torch.Tensor,
+    C: torch.Tensor,
+    req_grad_xyz: bool,
+) -> Tuple[
+    torch.Tensor,  # H
+    torch.Tensor,  # Hcoul
+    torch.Tensor,  # Hdipole
+    torch.Tensor,  # KK (preconditioner / mixing kernel)
+    torch.Tensor,  # D
+    torch.Tensor,  # q
+    torch.Tensor,  # f
+    torch.Tensor,  # mu0
+    Optional[torch.Tensor],  # Ecoul (PME only)
+    Optional[torch.Tensor],  # forces1 (PME only)
+    Optional[torch.Tensor],  # dq_p1 (PME only)
+]:
+    """ """
+    print("### Do Delta_scf ###")
+
+
+    device = H0.device
+    atom_ids = torch.repeat_interleave(
+        torch.arange(len(n_orbitals_per_atom), device=H0.device), n_orbitals_per_atom
+    )  # Generate atom index for each orbital
+    atom_ids_sr = torch.repeat_interleave(
+        torch.arange(len(shell_types), device=H0.device), shell_dim[shell_types]
+    )  # Generate atom index for each orbital
+    shell_to_atom = torch.repeat_interleave(
+        torch.arange(len(TYPE), device=S.device), n_shells_per_atom
+    )
+
+    Hubbard_U_gathered = Hubbard_U[atom_ids]
+    if dU_dq is not None:
+        dU_dq_gathered = dU_dq[atom_ids]
+    else:
+        dU_dq_gathered = None
+
+    if dftorch_params["coul_method"] == "PME":
+        from .ewald_pme import (
+            calculate_PME_ewald,
+            init_PME_data,
+            calculate_alpha_and_num_grids,
+        )
+        from .ewald_pme.neighbor_list import NeighborState
+
+        # positions = torch.stack((RX, RY, RZ))
+        positions = torch.stack(
+            (RX, RY, RZ),
+        )
+        CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
+            lattice_vecs.cpu().numpy(),
+            dftorch_params["cutoff"],
+            dftorch_params["Coulomb_acc"],
+        )
+        PME_data = init_PME_data(
+            grid_dimensions, lattice_vecs, CALPHA, dftorch_params["PME_order"]
+        )
+        nbr_state = NeighborState(
+            positions,
+            lattice_vecs,
+            None,
+            dftorch_params["cutoff"],
+            is_dense=True,
+            buffer=0.0,
+            use_triton=False,
+        )
+        disps, dists, nbr_inds = calculate_dist_dips(
+            positions, nbr_state, dftorch_params["cutoff"]
+        )
+    else:
+        PME_data = None
+        nbr_inds = None
+        disps = None
+        dists = None
+        CALPHA = None
+
+    with torch.no_grad():
+        # if 1:
+        # Initial density matrix
+        print("  Initial dm_fermi")
+        Hdipole = torch.diag(
+            -RX[atom_ids] * Efield[0]
+            - RY[atom_ids] * Efield[1]
+            - RZ[atom_ids] * Efield[2]
+        )
+        Hdipole = 0.5 * Hdipole @ S + 0.5 * S @ Hdipole
+        H0 = H0 + Hdipole
+        H0 = H0.unsqueeze(0).expand(2, -1, -1)
+        # Nocc = torch.tensor([Nocc+1, Nocc-1], device=H0.device)
+        # Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
+        # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
+        broken_symmetry = dftorch_params.get("BROKEN_SYM", False)
+        # shared_mu0 = dftorch_params.get("SHARED_MU", False)
+        mu_0 = mu0
+        ES_config  = dftorch_params.get("DELTA_SCF_TARGET","")
+        ES_smearing  = dftorch_params.get("DELTA_SCF_SMEARING",False)
+
+        Dorth, Q, e, f, mu0 = nonaufbau_constraints(
+            Z.T @ H @ Z,
+            Te,
+            Nocc,
+            mu_0,
+            ES_config,
+            ES_smearing,
+        )
+
+        D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
+        DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+
+        q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
+        q_spin_sr.scatter_add_(
+            1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS
+        )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+
+        # break spin symmetry on q_spin_sr, not on density matrix
+        # if broken_symmetry:
+        #     # shift spin density: add electrons to alpha, remove from beta
+        #     # on shells belonging to atom with highest Znuc (most polarizable)
+        #     most_polarizable_atom = Znuc.argmax()
+        #     atom_shells = (shell_to_atom == most_polarizable_atom).nonzero().squeeze()
+        #     delta = 0.01
+        #     q_spin_sr[0, atom_shells] += delta   # alpha gets more
+        #     q_spin_sr[1, atom_shells] -= delta   # beta gets less
+        #     print(f"  Broken symmetry: perturbed shells {atom_shells.tolist()} "
+        #           f"on atom {most_polarizable_atom.item()} (Znuc={Znuc[most_polarizable_atom].item()})")
+
+        net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
+
+        q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+        q_spin_atom.scatter_add_(
+            1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr
+        )  # atom-resolved
+        q_tot_atom = torch.zeros_like(RX)
+        q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0))  # atom-resolved
+
+        KK = -dftorch_params["SCF_ALPHA"] * torch.eye(
+            n_shells_per_atom.sum(), device=H0.device
+        ).unsqueeze(0).expand(
+            2, -1, -1
+        )  # shell-resolved. Initial mixing coefficient for linear mixing
+        # KK0 = KK*torch.eye(Nats, device=H0.device)
+
+        ResNorm = torch.tensor(2.0, device=device)
+        dEc = torch.tensor(1000.0, device=device)
+        it = 0
+        Ecoul = torch.tensor(0.0, device=device)
+
+        print("\nStarting cycle")
+        while (
+            (ResNorm > dftorch_params["SCF_TOL"])
+            or (dEc > dftorch_params["SCF_TOL"] * 100)
+        ) and it < dftorch_params["SCF_MAX_ITER"]:
+            start_time = time.perf_counter()
+            it += 1
+            print("Iter {}".format(it))
+
+            if dftorch_params["coul_method"] == "PME":
+                # with torch.enable_grad():
+                if 1:
+                    ewald_e1, forces1, CoulPot = calculate_PME_ewald(
+                        positions.detach().clone(),
+                        q_tot_atom,
+                        lattice_vecs,
+                        nbr_inds,
+                        disps,
+                        dists,
+                        CALPHA,
+                        dftorch_params["cutoff"],
+                        PME_data,
+                        hubbard_u=Hubbard_U,
+                        atomtypes=TYPE,
+                        screening=1,
+                        calculate_forces=0,
+                        calculate_dq=1,
+                    )
+            else:
+                CoulPot = C @ q_tot_atom
+            q_spin_sr_old = q_spin_sr.clone()
+
+            H_spin = get_h_spin(TYPE, net_spin_sr, w, n_shells_per_atom, shell_types)
+            q_spin_sr, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q_os(
+                H0,
+                H_spin,
+                Hubbard_U_gathered,
+                q_tot_atom[atom_ids],
+                CoulPot[atom_ids],
+                S,
+                Z,
+                Te,
+                Nocc,
+                Znuc,
+                atom_ids,
+                atom_ids_sr,
+                el_per_shell,
+                dU_dq_gathered,
+                dftorch_params["SHARED_MU"],
+                dftorch_params["DELTA_SCF"],
+                dftorch_params,
+            )
+
+            q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+            q_spin_atom.scatter_add_(
+                1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr
+            )  # atom-resolved
+
+            Res = q_spin_sr - q_spin_sr_old
+            ResNorm = torch.norm(Res)
+            K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
+
+            if (
+                it == dftorch_params["KRYLOV_START"]
+            ):  # Calculate full kernel after KRYLOV_START steps
+                # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
+                # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
+                # KK0 = KK.clone()  # To be kept as preconditioner
+                1
+            # Preconditioned Low-Rank Krylov _scf acceleration
+            if it > dftorch_params["KRYLOV_START"]:
+                # Preconditioned residual
+                K0Res = kernel_update_lr_os(
+                    RX,
+                    RY,
+                    RZ,
+                    lattice_vecs,
+                    TYPE,
+                    Nats,
+                    Hubbard_U,
+                    dftorch_params,
+                    dftorch_params["KRYLOV_TOL"],
+                    KK.clone(),
+                    Res,
+                    q_spin_sr,
+                    S,
+                    Z,
+                    PME_data,
+                    atom_ids,
+                    atom_ids_sr,
+                    Q,
+                    e,
+                    mu0,
+                    Te,
+                    w,
+                    n_shells_per_atom,
+                    shell_types,
+                    C,
+                    nbr_inds,
+                    disps,
+                    dists,
+                    CALPHA,
+                    dU_dq,
+                )
+
+            # Mixing update (vector-form)
+            q_spin_sr = q_spin_sr_old - K0Res
+            # q_tot_sr = q_spin_sr.sum(dim=0)
+            q_tot_atom = torch.zeros_like(RX)
+            q_tot_atom.scatter_add_(
+                0, shell_to_atom, q_spin_sr.sum(dim=0)
+            )  # atom-resolved
+            net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
+
+            Ecoul_old = Ecoul.clone()
+            if dftorch_params["coul_method"] == "PME":
+                Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
+            else:
+                Ecoul = 0.5 * q_tot_atom @ (C @ q_tot_atom) + 0.5 * torch.sum(
+                    q_tot_atom**2 * Hubbard_U
+                )
+
+            dEc = torch.abs(Ecoul_old - Ecoul)
+
+            # print("Res = {:.9f}, dEb = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(ResNorm.item(), dEb.item(), torch.abs(Ecoul_old-Ecoul).item(), time.perf_counter()-start_time ))
+            print(
+                "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
+                    ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+                )
+            )
+            if it == dftorch_params["SCF_MAX_ITER"]:
+                print("Did not converge")
+
+        f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
+
+    D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
+    DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+
+    q_spin_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
+    q_spin_sr.scatter_add_(
+        1, atom_ids_sr.unsqueeze(0).expand(2, -1), DS
+    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+    net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
+
+    q_spin_atom = torch.zeros_like(RX.unsqueeze(0).expand(2, -1))
+    q_spin_atom.scatter_add_(
+        1, shell_to_atom.unsqueeze(0).expand(2, -1), q_spin_sr
+    )  # atom-resolved
+    q_tot_atom = torch.zeros_like(RX)
+    q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0))  # atom-resolved
+
+    if dftorch_params["coul_method"] == "PME":
+        ewald_e1, forces1, dq_p1 = calculate_PME_ewald(
+            positions,  # .detach().clone(),
+            q_tot_atom,
+            lattice_vecs,
+            nbr_inds,
+            disps,
+            dists,
+            CALPHA,
+            dftorch_params["cutoff"],
+            PME_data,
+            hubbard_u=Hubbard_U,
+            atomtypes=TYPE,
+            screening=1,
+            calculate_forces=0 if req_grad_xyz else 1,
+            calculate_dq=0 if req_grad_xyz else 1,
+        )
+        Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
+    else:
+        Ecoul, forces1, dq_p1 = None, None, None
+
+    return (
+        H,
+        Hcoul,
+        Hdipole,
+        KK,
+        D,
+        Q,
+        q_spin_atom,
+        q_tot_atom,
+        q_spin_sr,
+        net_spin_sr,
+        f,
+        mu0,
+        Ecoul,
+        forces1,
+        dq_p1,
+    )
+

@@ -6,7 +6,7 @@ from ._nearestneighborlist import (
     vectorized_nearestneighborlist_batch,
 )
 from ._tools import fractional_matrix_power_symm
-from ._scf import scf_x_os, SCFx, SCFx_batch
+from ._scf import scf_x_os, SCFx, SCFx_batch, delta_scf_x_os
 from ._energy import energy
 from ._forces import Forces, forces_spin, Forces_PME
 from ._forces_batch import forces_batch
@@ -360,6 +360,82 @@ class ESDriver(torch.nn.Module):
                     const.w,
                     structure.n_shells_per_atom,
                 )
+                #print(f"GS charges: {structure.q}")
+
+                if self.dftorch_params.get("DELTA_SCF", False):
+                    #print("detecting delta SCF calculation")
+                    (
+                        structure.H,
+                        structure.Hcoul,
+                        structure.Hdipole,
+                        structure.KK,
+                        structure.D,
+                        structure.Q,
+                        structure.q_spin_atom,
+                        structure.q_tot_atom,
+                        structure.q_spin_sr,
+                        structure.net_spin_sr,
+                        structure.f,
+                        structure.mu0,
+                        structure.e_coul_tmp,
+                        structure.f_coul,
+                       structure.dq_p1,
+                    ) = delta_scf_x_os(
+                        structure.el_per_shell,
+                        structure.shell_types,
+                        structure.n_shells_per_atom,
+                        const.shell_dim,
+                        const.w,
+                        self.dftorch_params,
+                        structure.RX,
+                        structure.RY,
+                        structure.RZ,
+                        structure.lattice_vecs,
+                        structure.Nats,
+                        structure.Nocc,
+                        structure.n_orbitals_per_atom,
+                        structure.Znuc,
+                        structure.TYPE,
+                        structure.Te,
+                        structure.Hubbard_U,
+                        structure.dU_dq,
+                        structure.D0,
+                        structure.H0,
+                        structure.H,
+                        structure.D,
+                        structure.f,
+                        structure.mu0,
+                        structure.S,
+                        structure.Z,
+                        structure.e_field,
+                        structure.C,
+                        structure.req_grad_xyz,
+                    )
+
+                    structure.q = structure.q_tot_atom
+                    #print(f"ES charges: {structure.q}")
+
+
+                    H_spin = get_h_spin(
+                        structure.TYPE,
+                        structure.net_spin_sr,
+                        const.w,
+                        structure.n_shells_per_atom,
+                        structure.shell_types,
+                    )
+                    structure.H_spin = (
+                        0.5
+                        * structure.S
+                        * H_spin.unsqueeze(0).expand(2, -1, -1)
+                        * torch.tensor([[[1]], [[-1]]], device=H_spin.device)
+                    )
+                    structure.e_spin = get_spin_energy(
+                        structure.TYPE,
+                        structure.net_spin_sr,
+                        const.w,
+                        structure.n_shells_per_atom,
+                    )
+
 
             else:  # closed-shell
                 (
