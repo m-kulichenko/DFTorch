@@ -133,7 +133,9 @@ def energy(
         Ecoul = 0.5 * torch.sum(q * Cq, dim=-1) + 0.5 * torch.sum(q**2 * U, dim=1)
 
         # ── DFTB3 batched ─────────────────────────────────────────────────
-        if dU_dq is not None:
+        if thirdorder is not None:
+            Ecoul = Ecoul + thirdorder.get_energy(q)
+        elif dU_dq is not None:
             Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3, dim=1)
         # ─────────────────────────────────────────────────────────────────
 
@@ -307,7 +309,9 @@ def energy_shadow(
         )
 
         # ── DFTB3 shadow batched ──────────────────────────────────────────
-        if dU_dq is not None:
+        if thirdorder is not None:
+            Ecoul = Ecoul + thirdorder.get_energy_xlbomd(n, q)
+        elif dU_dq is not None:
             Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(
                 0.5 * dU_dq * (2.0 * q - n) * n**2, dim=1
             )

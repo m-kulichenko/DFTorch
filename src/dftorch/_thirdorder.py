@@ -689,6 +689,115 @@ class ThirdOrder:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Batched ThirdOrder wrapper
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class ThirdOrderBatch:
+    """Batched wrapper for a list of per-structure ThirdOrder objects.
+
+    Stacks the (Nats, Nats) gamma3 matrices into (B, Nats, Nats) tensors
+    so that shift / energy / gradient operations are fully vectorised via
+    ``torch.bmm`` and batched einsum.
+
+    The individual ThirdOrder objects are kept so that ``update_coords``
+    can still be called per-structure (geometry dependent), after which
+    ``refresh()`` re-stacks the matrices.
+    """
+
+    def __init__(self, to_list: list):
+        self.B = len(to_list)
+        self._list = to_list
+        t0 = to_list[0]
+        self.device = t0.device
+        self.dtype = t0.dtype
+        self.Nats = t0.Nats
+        self.refresh()
+
+    def refresh(self):
+        """Re-stack matrices from individual ThirdOrder objects."""
+        self.gamma3ab = torch.stack([t.gamma3ab for t in self._list])  # (B,N,N)
+        self.gamma3ba = torch.stack([t.gamma3ba for t in self._list])  # (B,N,N)
+        self.gamma3ab_pR = torch.stack([t.gamma3ab_pR for t in self._list])  # (B,N,N)
+        self.gamma3ba_pR = torch.stack([t.gamma3ba_pR for t in self._list])  # (B,N,N)
+        self.diff_xyz = torch.stack([t.diff_xyz for t in self._list])  # (B,3,N,N)
+
+    def get_shifts(self, q):
+        """Third-order Hamiltonian shift.  q: (B,N) → (B,N)."""
+        # t1 = 2 * (gamma3ab @ q) * q  element-wise
+        g3ab_q = torch.bmm(self.gamma3ab, q.unsqueeze(-1)).squeeze(-1)  # (B,N)
+        t1 = 2.0 * g3ab_q * q
+        # t2 = gamma3ba @ (q²)
+        t2 = torch.bmm(self.gamma3ba, (q**2).unsqueeze(-1)).squeeze(-1)
+        return (1.0 / 3.0) * (t1 + t2)
+
+    def get_dshifts_dq(self, q, v):
+        """Linearised shift response for Krylov.  q,v: (B,N) → (B,N)."""
+        g3ab_v = torch.bmm(self.gamma3ab, v.unsqueeze(-1)).squeeze(-1)
+        g3ab_q = torch.bmm(self.gamma3ab, q.unsqueeze(-1)).squeeze(-1)
+        dt1 = 2.0 * (g3ab_v * q + g3ab_q * v)
+        dt2 = 2.0 * torch.bmm(self.gamma3ba, (q * v).unsqueeze(-1)).squeeze(-1)
+        return (1.0 / 3.0) * (dt1 + dt2)
+
+    def get_energy(self, q):
+        """Third-order energy.  q: (B,N) → (B,)."""
+        shift = self.get_shifts(q)
+        return (1.0 / 3.0) * (shift * q).sum(dim=1)
+
+    def get_energy_xlbomd(self, q_in, q_out):
+        """XL-BOMD third-order energy.  q_in, q_out: (B,N) → (B,)."""
+        s1 = (
+            (1.0 / 3.0)
+            * torch.bmm(self.gamma3ab, q_in.unsqueeze(-1)).squeeze(-1)
+            * q_in
+        )
+        s2 = (1.0 / 3.0) * torch.bmm(self.gamma3ba, (q_in**2).unsqueeze(-1)).squeeze(-1)
+        dq = q_out - q_in
+        return (s1 * q_out + s2 * dq + s1 * dq).sum(dim=1)
+
+    def get_gradient_dc(self, q):
+        """Gradient from dΓ³/dr.  q: (B,N) → (B,3,N)."""
+        N = self.Nats
+        # tmp(b,A,B) = q_A*q_B*(q_A*gamma3ab_pR + q_B*gamma3ba_pR)
+        qq = q.unsqueeze(2) * q.unsqueeze(1)  # (B,N,N)
+        tmp = qq * (
+            q.unsqueeze(2) * self.gamma3ab_pR + q.unsqueeze(1) * self.gamma3ba_pR
+        )
+        # Zero diagonal
+        diag_mask = torch.eye(N, device=self.device, dtype=self.dtype).unsqueeze(0)
+        tmp = (1.0 / 3.0) * tmp * (1.0 - diag_mask)
+
+        # grad[b,k,A] = Σ_B tmp[b,A,B] * diff_xyz[b,k,A,B]
+        grad = torch.einsum("bmn,bkmn->bkm", tmp, self.diff_xyz)  # (B,3,N)
+        return grad
+
+    def get_gradient_dc_xlbomd(self, q_in, q_out):
+        """XL-BOMD gradient.  q_in, q_out: (B,N) → (B,3,N)."""
+        N = self.Nats
+        dq = q_out - q_in
+
+        qI_A = q_in.unsqueeze(2)  # (B,N,1) — rows
+        qI_B = q_in.unsqueeze(1)  # (B,1,N) — cols
+        qO_A = q_out.unsqueeze(2)
+        qO_B = q_out.unsqueeze(1)
+        dq_A = dq.unsqueeze(2)
+        dq_B = dq.unsqueeze(1)
+
+        part1 = self.gamma3ab_pR * (
+            qI_A * qI_B * qO_A + qI_A**2 * dq_B + qI_A * qI_B * dq_A
+        )
+        part2 = self.gamma3ba_pR * (
+            qI_B * qI_A * qO_B + qI_B**2 * dq_A + qI_B * qI_A * dq_B
+        )
+        tmp = (1.0 / 3.0) * (part1 + part2)
+        diag_mask = torch.eye(N, device=self.device, dtype=self.dtype).unsqueeze(0)
+        tmp = tmp * (1.0 - diag_mask)
+
+        grad = torch.einsum("bmn,bkmn->bkm", tmp, self.diff_xyz)
+        return grad
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Factory function
 # ═══════════════════════════════════════════════════════════════════════════
 

@@ -60,7 +60,12 @@ class _AndersonMixer:
         self._r_hist.clear()
 
     def mix(self, q_in: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        """Return next mixed charge vector."""
+        """Return next mixed charge vector.
+
+        Handles both single-system (N,), open-shell (2, N), and batch (B, N)
+        inputs correctly by computing per-element DIIS coefficients when
+        the input has a leading batch dimension.
+        """
         self._q_hist.append(q_in.clone())
         self._r_hist.append(residual.clone())
 
@@ -70,36 +75,85 @@ class _AndersonMixer:
             return q_in + self.alpha * residual
 
         # Build overlap matrix of residuals  A_{ij} = R_i · R_j
-        R = torch.stack(list(self._r_hist))  # (m, N)  or (m, 2, N) for OS
-        R_flat = R.reshape(m, -1)
-        A = R_flat @ R_flat.T  # (m, m)
+        R = torch.stack(list(self._r_hist))  # (m, N)  or (m, 2, N) or (m, B, N)
 
-        # Tikhonov regularization to prevent ill-conditioned DIIS
-        reg = 1e-12 * torch.eye(m, device=q_in.device, dtype=q_in.dtype)
-        A = A + reg * A.diag().max().clamp(min=1e-30)
+        # Detect batch dimension: if input is (B, N) with B > 1 and
+        # ndim == 2, we need per-batch-element Anderson mixing.
+        # Non-batch: q_in is (N,) → R is (m, N)
+        # Open-shell: q_in is (2, N) → R is (m, 2, N)  (dim0=spin)
+        # Batch: q_in is (B, N) → R is (m, B, N)
+        # We distinguish batch from open-shell by checking if the class
+        # was marked as batch-aware.
+        is_batch = getattr(self, "_batch_mode", False)
 
-        # Constrained least squares via bordered matrix:
-        #   [ A  1 ] [ c  ]   [ 0 ]
-        #   [ 1  0 ] [ λ  ] = [ 1 ]
-        B = torch.zeros(m + 1, m + 1, device=q_in.device, dtype=q_in.dtype)
-        B[:m, :m] = A
-        B[:m, m] = 1.0
-        B[m, :m] = 1.0
-        rhs = torch.zeros(m + 1, device=q_in.device, dtype=q_in.dtype)
-        rhs[m] = 1.0
+        if is_batch and R.ndim == 3:
+            # Batched: R is (m, B, N) → per-batch overlap (B, m, m)
+            # A[b, i, j] = R[i, b, :] · R[j, b, :]
+            A = torch.einsum("ibn,jbn->bij", R, R)  # (B, m, m)
 
-        try:
-            sol = torch.linalg.solve(B, rhs)
-        except torch.linalg.LinAlgError:
-            # Singular — fall back to simple mixing
-            return q_in + self.alpha * residual
+            # Tikhonov regularization per batch element
+            reg_eye = 1e-12 * torch.eye(m, device=q_in.device, dtype=q_in.dtype)
+            A_diag_max = A.diagonal(dim1=-2, dim2=-1).max(dim=-1).values  # (B,)
+            A = A + reg_eye.unsqueeze(0) * A_diag_max.clamp(min=1e-30).unsqueeze(
+                -1
+            ).unsqueeze(-1)
 
-        c = sol[:m]  # coefficients that sum to 1
+            # Bordered system per batch element: (B, m+1, m+1)
+            Bmat = torch.zeros(
+                q_in.shape[0], m + 1, m + 1, device=q_in.device, dtype=q_in.dtype
+            )
+            Bmat[:, :m, :m] = A
+            Bmat[:, :m, m] = 1.0
+            Bmat[:, m, :m] = 1.0
+            rhs = torch.zeros(
+                q_in.shape[0], m + 1, device=q_in.device, dtype=q_in.dtype
+            )
+            rhs[:, m] = 1.0
 
-        # Extrapolated update:  Σ c_i (q_i + α R_i)
-        Q = torch.stack(list(self._q_hist))  # (m, N) or (m, 2, N)
-        q_new = torch.einsum("i,i...->...", c, Q + self.alpha * R)
-        return q_new
+            try:
+                sol = torch.linalg.solve(Bmat, rhs)  # (B, m+1)
+            except torch.linalg.LinAlgError:
+                return q_in + self.alpha * residual
+
+            c = sol[:, :m]  # (B, m)
+
+            # Extrapolated update per batch: Σ_i c[b,i] * (Q[i,b,:] + α R[i,b,:])
+            Q = torch.stack(list(self._q_hist))  # (m, B, N)
+            mixed = Q + self.alpha * R  # (m, B, N)
+            # q_new[b, n] = Σ_i c[b, i] * mixed[i, b, n]
+            q_new = torch.einsum("bi,ibn->bn", c, mixed)
+            return q_new
+        else:
+            # Non-batch or open-shell path (original)
+            R_flat = R.reshape(m, -1)
+            A = R_flat @ R_flat.T  # (m, m)
+
+            # Tikhonov regularization to prevent ill-conditioned DIIS
+            reg = 1e-12 * torch.eye(m, device=q_in.device, dtype=q_in.dtype)
+            A = A + reg * A.diag().max().clamp(min=1e-30)
+
+            # Constrained least squares via bordered matrix:
+            #   [ A  1 ] [ c  ]   [ 0 ]
+            #   [ 1  0 ] [ λ  ] = [ 1 ]
+            Bmat = torch.zeros(m + 1, m + 1, device=q_in.device, dtype=q_in.dtype)
+            Bmat[:m, :m] = A
+            Bmat[:m, m] = 1.0
+            Bmat[m, :m] = 1.0
+            rhs = torch.zeros(m + 1, device=q_in.device, dtype=q_in.dtype)
+            rhs[m] = 1.0
+
+            try:
+                sol = torch.linalg.solve(Bmat, rhs)
+            except torch.linalg.LinAlgError:
+                # Singular — fall back to simple mixing
+                return q_in + self.alpha * residual
+
+            c = sol[:m]  # coefficients that sum to 1
+
+            # Extrapolated update:  Σ c_i (q_i + α R_i)
+            Q = torch.stack(list(self._q_hist))  # (m, N) or (m, 2, N)
+            q_new = torch.einsum("i,i...->...", c, Q + self.alpha * R)
+            return q_new
 
 
 def SCFx(
@@ -898,6 +952,9 @@ def SCFx_batch(
     Z: torch.Tensor,
     Efield: torch.Tensor,
     C: torch.Tensor,
+    gbsa_batch=None,
+    thirdorder_batch=None,
+    q_init: Optional[torch.Tensor] = None,
 ) -> Tuple[
     torch.Tensor,  # H
     torch.Tensor,  # Hcoul
@@ -953,16 +1010,26 @@ def SCFx_batch(
         Hdipole = 0.5 * (torch.matmul(Hdipole, S) + torch.matmul(S, Hdipole))
         H0 = H0 + Hdipole
 
-        H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H0, Z))
-        Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
-            H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
-        )
-        D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
-        DS = 2 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
-        q = -1.0 * Znuc
-        q.scatter_add_(
-            1, atom_ids, DS
-        )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        if q_init is None:
+            H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H0, Z))
+            Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
+                H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
+            )
+            print("  Initial mu", mu0)
+            D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
+            DS = 2 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+            q = -1.0 * Znuc
+            q.scatter_add_(
+                1, atom_ids, DS
+            )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+        else:
+            # Use provided initial charges — skip expensive eigendecomposition
+            if q_init.dim() == 1:
+                # Single reference charges → broadcast to all batch elements
+                q = q_init.unsqueeze(0).expand(batch_size, -1).clone()
+            else:
+                q = q_init.clone()
+            print("  Using q_init (skipping initial dm_fermi)")
 
         KK = -dftorch_params["SCF_ALPHA"] * torch.eye(
             Nats, device=H0.device
@@ -981,13 +1048,14 @@ def SCFx_batch(
                 alpha=anderson_alpha,
                 depth=anderson_depth,
             )
+            _mixer._batch_mode = True  # per-batch-element DIIS
         else:
             _mixer = None
 
-        ResNorm = torch.zeros(batch_size, device=device) + 10.0  # float("inf")
+        ResNorm = torch.zeros(batch_size, device=device) + 2.0  # float("inf")
         dEc = torch.zeros(batch_size, device=device) + 1000.0  # float("inf")
         it = 0
-        Ecoul = torch.zeros(batch_size, device=device) + 10.0  # float("inf")
+        Ecoul = torch.zeros(batch_size, device=device) + 0.0  # float("inf")
 
         print("\nStarting cycle")
         while (
@@ -998,6 +1066,15 @@ def SCFx_batch(
             print("Iter {}".format(it))
 
             CoulPot = torch.matmul(C, q.unsqueeze(-1)).squeeze(-1)
+
+            # Add GBSA Born shift to Coulomb potential (vectorised over batch)
+            if gbsa_batch is not None:
+                CoulPot = CoulPot + gbsa_batch.get_shifts(q)
+
+            # Add full off-diagonal DFTB3 shift to Coulomb potential
+            if thirdorder_batch is not None:
+                CoulPot = CoulPot + thirdorder_batch.get_shifts(q)
+
             q_old = q.clone()
             q, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q_batch(
                 H0,
@@ -1010,7 +1087,7 @@ def SCFx_batch(
                 Nocc,
                 Znuc,
                 atom_ids,
-                dU_dq_gathered,
+                dU_dq_gathered if thirdorder_batch is None else None,
             )
             Res = q - q_old
             ResNorm = torch.norm(Res, dim=1)
@@ -1042,7 +1119,9 @@ def SCFx_batch(
                     disps,
                     dists,
                     CALPHA,
-                    dU_dq_gathered,
+                    dU_dq_gathered if thirdorder_batch is None else None,
+                    gbsa=gbsa_batch,
+                    thirdorder=thirdorder_batch,
                 )
                 q = q_old - K0Res
             elif _mixer is not None:
@@ -1059,6 +1138,12 @@ def SCFx_batch(
             Ecoul = 0.5 * torch.sum(q * Cq, dim=-1) + 0.5 * torch.sum(
                 q**2 * Hubbard_U, dim=1
             )
+
+            # Third-order energy contribution
+            if thirdorder_batch is not None:
+                Ecoul = Ecoul + thirdorder_batch.get_energy(q)
+            elif dU_dq is not None:
+                Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * q**3, dim=1)
 
             dEc = torch.abs(Ecoul_old - Ecoul)
 

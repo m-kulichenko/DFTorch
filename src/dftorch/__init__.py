@@ -19,7 +19,10 @@ from ._stress import (
     get_coulomb_stress_real,
     get_coulomb_stress_kspace,
 )
-from ._gbsa import GBSA, create_gbsa
+from ._gbsa import GBSA, GBSABatch, create_gbsa
+from ._thirdorder import ThirdOrder, ThirdOrderBatch, create_thirdorder
+from ._dftd3 import SimpleDftD3, create_dftd3
+from ._ml_sk import load_ml_sk_model, SKGraphNet
 
 __all__ = [
     "Constants",
@@ -31,10 +34,18 @@ __all__ = [
     "MDXLBatch",
     "MDXLOS",
     "GBSA",
+    "GBSABatch",
     "create_gbsa",
+    "ThirdOrder",
+    "ThirdOrderBatch",
+    "create_thirdorder",
+    "SimpleDftD3",
+    "create_dftd3",
     "get_electronic_stress_analytical",
     "get_total_stress_analytical",
     "get_coulomb_stress",
     "get_coulomb_stress_real",
     "get_coulomb_stress_kspace",
+    "load_ml_sk_model",
+    "SKGraphNet",
 ]

@@ -235,6 +235,7 @@ def scf(
             structure.Nats,  # repulsive_rcut
             structure.const,
             verbose=False,
+            compute_stress=False,
         )
         f_rep = dVr.sum(dim=2)
 

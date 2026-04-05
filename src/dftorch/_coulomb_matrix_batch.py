@@ -89,6 +89,8 @@ def coulomb_matrix_vectorized_batch(
     dR = torch.norm(Rab, dim=-1)
     dR_dxyz = Rab / dR.unsqueeze(-1)
 
+    use_ewald = lattice_vecs is not None
+
     CC_real, dCC_dxyz_real = ewald_real_space_vectorized_batch(
         Hubbard_U,
         TYPE,
@@ -98,6 +100,7 @@ def coulomb_matrix_vectorized_batch(
         neighbor_I,
         neighbor_J,
         CALPHA,
+        use_ewald,
         h_damp_exp=h_damp_exp,
         h5_params=h5_params,
     )
@@ -125,6 +128,7 @@ def ewald_real_space_vectorized_batch(
     neighbor_I: torch.Tensor,
     neighbor_J: torch.Tensor,
     CALPHA: float,
+    use_ewald: bool,
     h_damp_exp: Optional[float] = None,
     h5_params: Optional[Dict] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -182,9 +186,18 @@ def ewald_real_space_vectorized_batch(
     Ti = TFACT * Hubbard_U.gather(1, safe_I)[valid_pairs]
     Tj = TFACT * Hubbard_U.gather(1, safe_J)[valid_pairs]
     CC_real = torch.zeros((batch_size * Nats * Nats), device=dR.device, dtype=dR.dtype)
-    CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
-    tmp1 = CA.clone()
-    dtmp1 = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI) / dR_mskd
+
+    if use_ewald:
+        CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
+        dCA = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI) / dR_mskd
+        tmp1 = CA.clone()
+        dtmp1 = dCA.clone()
+
+    else:
+        CA = 1.0 / dR_mskd
+        dCA = -1.0 / (dR_mskd**2)
+        tmp1 = CA.clone()
+        dtmp1 = dCA.clone()
 
     # ── Hydrogen gamma damping (DFTB3) ──────────────────────────────────
     if h_damp_exp is not None:

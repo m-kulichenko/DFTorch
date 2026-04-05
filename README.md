@@ -12,6 +12,12 @@ uv venv --python 3.11
 uv pip install .
 ```
 
+or for compatibility with sedacs
+
+```bash
+uv pip install -e ".[sedacs]"
+```
+
 Run tests:
 ```bash
 uv run pytest

@@ -15,7 +15,7 @@ from ._xl_tools import (
 )
 from ._spin import get_h_spin, get_spin_energy_shadow
 from ._stress import get_total_stress_analytical
-from ._gbsa import create_gbsa
+from ._gbsa import create_gbsa, GBSABatch
 
 import torch
 
@@ -26,7 +26,7 @@ from dftorch._tools import calculate_dist_dips
 
 
 class MDXL:
-    """Extended-Lagrangian Born–Oppenheimer MD for closed- and open-shell systems.
+    """Extended-Lagrangian Born–Oppenheimer MD for_ closed- and open-shell systems.
 
     The class auto-detects the spin mode from the ``structure`` passed to
     :meth:`run` (open-shell ↔ ``structure.Nocc`` is a 2-element tensor) and
@@ -48,9 +48,9 @@ class MDXL:
         self.C2 = -8
         self.C3 = -3
         self.C4 = 4
-        self.C5 = -1  # Coefficients for modified Verlet integration
+        self.C5 = -1  # Coefficients for_ modified Verlet integration
         self.kappa = 1.82
-        self.alpha = 0.018  # Coefficients for modified Verlet integration
+        self.alpha = 0.018  # Coefficients for_ modified Verlet integration
 
         # Langevin thermostat parameters
         self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
@@ -109,7 +109,7 @@ class MDXL:
         Apply Langevin friction + random force as a velocity correction.
         Called once per half-step (splitting scheme).
 
-        The impulse for half-step dt/2:
+        The impulse for_ half-step dt/2:
           v <- v * c1 + c2 * xi / sqrt(M)
         where
           c1 = exp(-gamma * dt/2)
@@ -151,7 +151,7 @@ class MDXL:
         compressibility: float = 4.57e-5,
     ):
         """
-        Enable Berendsen barostat for NPT ensemble.
+        Enable Berendsen barostat for_ NPT ensemble.
 
         Parameters
         ----------
@@ -179,7 +179,7 @@ class MDXL:
         self.target_pressure = target_pressure / GPa_per_eVA3  # GPa → eV/Å³
         self.barostat_tau = tau
         self.barostat_isotropic = isotropic
-        # Convert compressibility from 1/bar → Å³/eV for internal use
+        # Convert compressibility from 1/bar → Å³/eV for_ internal use
         self.barostat_compressibility = compressibility * bar_per_eVA3  # Å³/eV
 
     def _compute_stress_tensor(self, structure, dftorch_params):
@@ -194,7 +194,7 @@ class MDXL:
 
         Returns the 3×3 stress tensor in eV/Å³.
         """
-        # Atom-resolved extrapolated charges for the shadow stress.
+        # Atom-resolved extrapolated charges for_ the shadow stress.
         # CS: self.n is already atom-resolved (Nats,).
         # OS: self.n is shell-resolved (2, Nshells); sum over spin then
         #     scatter to atoms.
@@ -248,7 +248,7 @@ class MDXL:
         P_scalar = torch.trace(P_inst) / 3.0
         GPa_per_eVA3 = 160.21766208
 
-        # Store for logging (GPa)
+        # Store for_ logging (GPa)
         self._P_inst_GPa = P_scalar * GPa_per_eVA3
         self._P_tensor = P_inst * GPa_per_eVA3
 
@@ -288,7 +288,7 @@ class MDXL:
         R = wrap_positions(R, structure.cell, structure.cell_inv)
         structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
 
-        # Rebuild PME data for the new cell (if using PME Coulomb)
+        # Rebuild PME data for_ the new cell (if using PME Coulomb)
         if self._dftorch_params["coul_method"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
@@ -322,7 +322,7 @@ class MDXL:
             isinstance(structure.Nocc, torch.Tensor) and structure.Nocc.numel() == 2
         )
 
-        # Store params for barostat (needs them during step)
+        # Store params for_ barostat (needs them during step)
         self._dftorch_params = dftorch_params
 
         if self.VX is None:
@@ -358,7 +358,7 @@ class MDXL:
             else:
                 self.K0Res = structure.KK @ (q - self.n)
 
-        # Generate atom index for each orbital
+        # Generate atom index for_ each orbital
         self.atom_ids = torch.repeat_interleave(
             torch.arange(len(structure.n_orbitals_per_atom), device=structure.device),
             structure.n_orbitals_per_atom,
@@ -628,13 +628,14 @@ class MDXL:
             disps = None
             dists = None
 
-        # ── GBSA implicit solvation: rebuild for new geometry ────────────
+        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
         if dftorch_params.get("solvent", None) is not None:
             structure.gbsa = create_gbsa(
                 structure,
                 structure.device,
                 solvent=dftorch_params["solvent"],
                 param_file=dftorch_params.get("solvent_param_file", None),
+                solvation_model=dftorch_params.get("solvation_model", "alpb"),
             )
             # Born shift uses extrapolated charges n (shadow Hamiltonian)
             solv_n = n_tot_atom if self._os else self.n
@@ -813,7 +814,7 @@ class MDXL:
                 structure.n_shells_per_atom,
             )
 
-        # Atom-resolved charges used for energy / forces
+        # Atom-resolved charges used for_ energy / forces
         if self._os:
             q_e = q_tot_atom  # SCF charges
             n_e = n_tot_atom  # extrapolated charges
@@ -879,6 +880,7 @@ class MDXL:
                 self.const,
                 structure.TYPE,
                 structure.dU_dq if structure.thirdorder is None else None,
+                solvation_shift=solv_shift,
                 thirdorder_shift=(
                     structure.thirdorder.get_shifts(n_e)
                     if structure.thirdorder is not None
@@ -990,6 +992,16 @@ class MDXL:
             grad_dc = structure.thirdorder.get_gradient_dc_xlbomd(n_e, q_e)
             structure.f_tot = structure.f_tot + grad_dc
 
+        # ── D3(BJ) dispersion energy + forces ───────────────────────────
+        if structure.dftd3 is not None:
+            coords_ang = torch.stack([structure.RX, structure.RY, structure.RZ], dim=1)
+            structure.e_d3 = structure.dftd3.get_energy(coords_ang)
+            structure.e_tot = structure.e_tot + structure.e_d3
+            structure.f_d3 = structure.dftd3.get_forces(coords_ang)
+            structure.f_tot = structure.f_tot + structure.f_d3
+        else:
+            structure.e_d3 = 0.0
+
         self.EPOT = structure.e_tot
 
         # ── Second half velocity Verlet ──────────────────────────────────
@@ -1080,9 +1092,9 @@ class MDXLBatch:
         self.C2 = -8
         self.C3 = -3
         self.C4 = 4
-        self.C5 = -1  # Coefficients for modified Verlet integration
+        self.C5 = -1  # Coefficients for_ modified Verlet integration
         self.kappa = 1.82
-        self.alpha = 0.018  # Coefficients for modified Verlet integration
+        self.alpha = 0.018  # Coefficients for_ modified Verlet integration
 
         self.es_driver = es_driver
         self.temperature_K = temperature_K
@@ -1135,7 +1147,7 @@ class MDXLBatch:
                 -1
             )
 
-        # Generate atom index for each orbital
+        # Generate atom index for_ each orbital
         counts = structure.n_orbitals_per_atom  # shape (B, N)
         cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
         total_orbs = int(cum_counts[0, -1].item())
@@ -1290,6 +1302,64 @@ class MDXLBatch:
         tic2_1 = time.perf_counter()
 
         CoulPot = torch.matmul(structure.C, self.n.unsqueeze(-1)).squeeze(-1)
+
+        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
+        if dftorch_params.get("solvent", None) is not None:
+            _gbsa_list = []
+            for b in range(structure.batch_size):
+
+                class _StructProxy:
+                    pass
+
+                proxy = _StructProxy()
+                proxy.RX = structure.RX[b]
+                proxy.RY = structure.RY[b]
+                proxy.RZ = structure.RZ[b]
+                proxy.TYPE = structure.TYPE[b]
+                _gbsa_list.append(
+                    create_gbsa(
+                        proxy,
+                        structure.device,
+                        solvent=dftorch_params["solvent"],
+                        param_file=dftorch_params.get("solvent_param_file", None),
+                        solvation_model=dftorch_params.get("solvation_model", "alpb"),
+                    )
+                )
+            structure.gbsa_list = _gbsa_list
+            structure.gbsa_batch = GBSABatch(_gbsa_list)
+            solv_shift = structure.gbsa_batch.get_shadow_shifts(self.n)  # (B, N)
+            CoulPot = CoulPot + solv_shift
+        else:
+            solv_shift = None
+
+        # ── Full off-diagonal DFTB3: add third-order shift to CoulPot ────
+        if (
+            hasattr(structure, "thirdorder_list")
+            and structure.thirdorder_list is not None
+        ):
+            Nats = structure.Nats
+            dev = structure.device
+            for b in range(structure.batch_size):
+                rxb, ryb, rzb = structure.RX[b], structure.RY[b], structure.RZ[b]
+                dx = rxb.unsqueeze(0) - rxb.unsqueeze(1)
+                dy = ryb.unsqueeze(0) - ryb.unsqueeze(1)
+                dz = rzb.unsqueeze(0) - rzb.unsqueeze(1)
+                dr = torch.sqrt(dx**2 + dy**2 + dz**2 + 1e-30)
+                mask = (dr < 50.0) & (~torch.eye(Nats, dtype=torch.bool, device=dev))
+                ni = torch.arange(Nats, device=dev).unsqueeze(1).expand(-1, Nats)[mask]
+                nj = torch.arange(Nats, device=dev).unsqueeze(0).expand(Nats, -1)[mask]
+                dR_m = dr[mask]
+                dxyz = torch.stack([dx[mask], dy[mask], dz[mask]], dim=-1)
+                dR_dxyz_m = dxyz / dR_m.unsqueeze(-1)
+                structure.thirdorder_list[b].update_coords(
+                    rxb, ryb, rzb, None, ni, nj, dR_m, dR_dxyz_m
+                )
+            structure.thirdorder_batch.refresh()
+            thirdorder_shift = structure.thirdorder_batch.get_shifts(self.n)  # (B, N)
+            CoulPot = CoulPot + thirdorder_shift
+        else:
+            thirdorder_shift = None
+
         (
             structure.q,
             structure.H,
@@ -1311,7 +1381,7 @@ class MDXLBatch:
             structure.Nocc,
             structure.Znuc,
             self.atom_ids,
-            self.dU_dq_gathered,
+            self.dU_dq_gathered if thirdorder_shift is None else None,
         )
 
         if self.cuda_sync:
@@ -1360,7 +1430,11 @@ class MDXLBatch:
                 self.disps,
                 self.dists,
                 self.CALPHA,
-                self.dU_dq_gathered,
+                self.dU_dq_gathered if thirdorder_shift is None else None,
+                gbsa=structure.gbsa_batch if hasattr(structure, "gbsa_batch") else None,
+                thirdorder=structure.thirdorder_batch
+                if hasattr(structure, "thirdorder_batch")
+                else None,
             )
 
         if self.cuda_sync:
@@ -1390,10 +1464,36 @@ class MDXLBatch:
             structure.RZ,
             structure.f,
             structure.Te,
-            structure.dU_dq,
+            structure.dU_dq if thirdorder_shift is None else None,
         )
 
         structure.e_tot = structure.e_elec_tot + structure.e_repulsion
+
+        # ── Full off-diagonal DFTB3: add per-structure thirdorder energy ─
+        if (
+            hasattr(structure, "thirdorder_batch")
+            and structure.thirdorder_batch is not None
+        ):
+            structure.e_thirdorder = structure.thirdorder_batch.get_energy_xlbomd(
+                self.n, structure.q
+            )  # (B,)
+            structure.e_tot = structure.e_tot + structure.e_thirdorder
+
+        # ── GBSA shadow solvation energy (vectorised) ────────────────────
+        if hasattr(structure, "gbsa_batch") and structure.gbsa_batch is not None:
+            structure.e_gb, structure.e_sasa = structure.gbsa_batch.get_shadow_energies(
+                structure.q, self.n
+            )  # each (B,)
+            structure.e_tot = structure.e_tot + structure.e_gb + structure.e_sasa
+
+        # ── D3(BJ) dispersion energy (vectorised) ──────────────────────
+        if hasattr(structure, "dftd3") and structure.dftd3 is not None:
+            coords_batch = torch.stack(
+                [structure.RX, structure.RY, structure.RZ], dim=2
+            )  # (B, N, 3)
+            structure.e_d3 = structure.dftd3.get_energy_batch(coords_batch)  # (B,)
+            structure.e_tot = structure.e_tot + structure.e_d3
+
         self.EPOT = structure.e_tot
 
         (
@@ -1425,8 +1525,39 @@ class MDXLBatch:
             structure.Nats,
             self.const,
             structure.TYPE,
-            structure.dU_dq,
+            structure.dU_dq if thirdorder_shift is None else None,
+            solvation_shift=solv_shift,
+            thirdorder_shift=thirdorder_shift,
         )
+
+        # ── GBSA shadow solvation gradients (vectorised) ──────────────────
+        if hasattr(structure, "gbsa_batch") and structure.gbsa_batch is not None:
+            f_sasa = structure.gbsa_batch.get_shadow_sasa_gradients(
+                structure.q, self.n
+            ).permute(0, 2, 1)  # (B,N,3) → (B,3,N)
+            f_born = structure.gbsa_batch.get_shadow_born_gradients(
+                structure.q, self.n
+            ).permute(0, 2, 1)  # (B,N,3) → (B,3,N)
+            structure.f_gbsa = f_sasa + f_born  # (B,3,N)
+            structure.f_tot = structure.f_tot + structure.f_gbsa
+
+        # ── Full off-diagonal DFTB3: gradient from dΓ³/dr (vectorised) ──
+        if (
+            hasattr(structure, "thirdorder_batch")
+            and structure.thirdorder_batch is not None
+        ):
+            structure.f_thirdorder = structure.thirdorder_batch.get_gradient_dc_xlbomd(
+                self.n, structure.q
+            )  # (B, 3, N)
+            structure.f_tot = structure.f_tot + structure.f_thirdorder
+
+        # ── D3(BJ) dispersion forces (vectorised) ────────────────────────
+        if hasattr(structure, "dftd3") and structure.dftd3 is not None:
+            coords_batch = torch.stack(
+                [structure.RX, structure.RY, structure.RZ], dim=2
+            )  # (B, N, 3)
+            structure.f_d3 = structure.dftd3.get_forces_batch(coords_batch)  # (B,3,N)
+            structure.f_tot = structure.f_tot + structure.f_d3
 
         self.VX = (
             self.VX
@@ -1493,7 +1624,7 @@ def initialize_velocities(
     remove_angmom : bool
         If True, remove net angular momentum about the center of mass.
     generator : torch.Generator, optional
-        RNG for reproducible sampling.
+        RNG for_ reproducible sampling.
 
     Returns
     -------
@@ -1521,7 +1652,7 @@ def initialize_velocities(
     eC = 1.602176634e-19
     MVV2KE = (amu_kg * (ang2m / fs2s) ** 2) / eC  # ≈ 103.642691 eV per (amu * (Å/fs)^2)
 
-    # Sampling stddev (0 for zero-mass)
+    # Sampling stddev (0 for_ zero-mass)
     kT = torch.as_tensor(kB_eV_per_K * temperature_K, device=device, dtype=dtype)
     inv_m = torch.where(mpos, 1.0 / masses_amu, torch.zeros_like(masses_amu))
     std = torch.sqrt(torch.clamp(kT * inv_m / MVV2KE, min=0)).to(dtype)
@@ -1563,7 +1694,7 @@ def initialize_velocities(
             )
         ).sum(dim=0)  # (3,3)
 
-        # Solve I * omega = L; use pinv for robustness
+        # Solve I * omega = L; use pinv for_ robustness
         # If I is near-singular (e.g., colinear atoms), pinv safely handles it.
         omega = torch.linalg.pinv(I) @ L  # (3,)
 
@@ -1622,7 +1753,7 @@ def initialize_velocities_batch(
     eC = 1.602176634e-19
     MVV2KE = (amu_kg * (ang2m / fs2s) ** 2) / eC  # ≈ 103.642691 eV per (amu * (Å/fs)^2)
 
-    # Sampling stddev (0 for zero-mass)
+    # Sampling stddev (0 for_ zero-mass)
     kT = torch.as_tensor(kB_eV_per_K * temperature_K, device=device, dtype=dtype)
     inv_m = torch.where(mpos, 1.0 / masses_amu, torch.zeros_like(masses_amu))
     std = torch.sqrt(torch.clamp(kT.unsqueeze(-1) * inv_m / MVV2KE, min=0)).to(dtype)
@@ -1667,7 +1798,7 @@ def initialize_velocities_batch(
             )
         ).sum(dim=1)  # (3,3)
 
-        # Solve I * omega = L; use pinv for robustness
+        # Solve I * omega = L; use pinv for_ robustness
         # If I is near-singular (e.g., colinear atoms), pinv safely handles it.
         omega = torch.bmm(torch.linalg.pinv(I), L.unsqueeze(-1)).squeeze(-1)
         # Remove rotation: v <- v + r x omega  (since r x omega = - omega x r)

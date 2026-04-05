@@ -33,7 +33,10 @@ def Slater_Koster_Pair_SKF_vectorized(
     stress_weight: torch.Tensor | None = None,
     i0_stress: torch.Tensor | None = None,
     j0_stress: torch.Tensor | None = None,
-    ml_ctx: dict | None = None,
+    ml_HS_IJ: torch.Tensor | None = None,
+    ml_HS_IJ_dR: torch.Tensor | None = None,
+    ml_HS_JI: torch.Tensor | None = None,
+    ml_HS_JI_dR: torch.Tensor | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 ):
@@ -187,31 +190,26 @@ def Slater_Koster_Pair_SKF_vectorized(
     H0 = torch.zeros((HDIM * HDIM), dtype=dR_dxyz.dtype, device=dR_dxyz.device)
     dH0 = torch.zeros(3, HDIM * HDIM, dtype=H0.dtype, device=H0.device)
 
-    # -- ML / spline evaluation helper --
-    _use_ml = ml_ctx is not None
+    # -- ML direct-injection helpers --
+    _use_ml = ml_HS_IJ is not None
 
-    def _get_val_dR(pair_type_sel, idx_sel, dx_sel, channel, mask, direction="IJ"):
+    def _get_val_dR(pair_type_sel, idx_sel, dx_sel, channel, mask, direction='IJ'):
         """Return (value, dvalue_dR) for a single SK channel."""
+        ch = channel + SH_shift * 10
         if _use_ml:
-            from ._ml_sk import ml_eval_channel
-
-            return ml_eval_channel(ml_ctx, mask, channel, SH_shift, direction)
+            src = ml_HS_IJ if direction == 'IJ' else ml_HS_JI
+            dsrc = ml_HS_IJ_dR if direction == 'IJ' else ml_HS_JI_dR
+            val = src[mask, ch]
+            dval = dsrc[mask, ch]
         else:
-            ch = channel + SH_shift * 10
             cs = coeffs_tensor[pair_type_sel, idx_sel, ch]
-            val = (
-                cs[:, 0]
-                + cs[:, 1] * dx_sel
-                + cs[:, 2] * dx_sel**2
-                + cs[:, 3] * dx_sel**3
-            )
+            val = cs[:, 0] + cs[:, 1] * dx_sel + cs[:, 2] * dx_sel**2 + cs[:, 3] * dx_sel**3
             dval = cs[:, 1] + 2 * cs[:, 2] * dx_sel + 3 * cs[:, 3] * dx_sel**2
-            return val, dval
-
-    # -- end ML / spline helper --
+        return val, dval
+    # -- end ML helpers --
 
     #######
-    HSSS_all, HSSS_dR = _get_val_dR(IJ_pair_type, idx, dx, 9, slice(None), "IJ")
+    HSSS_all, HSSS_dR = _get_val_dR(IJ_pair_type, idx, dx, 9, slice(None), 'IJ')
     H0.index_add_(
         0, H_INDEX_START[neighbor_I] * HDIM + H_INDEX_START[neighbor_J], HSSS_all
     )
@@ -240,7 +238,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HSPS_all, HSPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, "IJ")
+    HSPS_all, HSPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, 'IJ')
 
     H0.index_add_(0, idx_row * HDIM + idx_col + 1, L[tmp_mask] * HSPS_all)
     H0.index_add_(0, idx_row * HDIM + idx_col + 2, M[tmp_mask] * HSPS_all)
@@ -273,7 +271,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HPSS_all, HPSS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, "JI")
+    HPSS_all, HPSS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, 'JI')
 
     H0.index_add_(0, (idx_row + 1) * HDIM + idx_col, -L[tmp_mask] * HPSS_all)
     H0.index_add_(0, (idx_row + 2) * HDIM + idx_col, -M[tmp_mask] * HPSS_all)
@@ -303,9 +301,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HPPS, HPPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 5, tmp_mask, "IJ")
+    HPPS, HPPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 5, tmp_mask, 'IJ')
 
-    HPPP, HPPP_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 6, tmp_mask, "IJ")
+    HPPP, HPPP_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 6, tmp_mask, 'IJ')
 
     PPSMPP = HPPS - HPPP
     PXPX = HPPP + L_XX * L_XX * PPSMPP
@@ -415,7 +413,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_sd_sigma, V_sd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, "IJ")
+    V_sd_sigma, V_sd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, 'IJ')
     H_S_XY = (3**0.5) * tmp_L * tmp_M * V_sd_sigma
     H_S_YZ = (3**0.5) * tmp_M * tmp_N * V_sd_sigma
     H_S_ZX = (3**0.5) * tmp_N * tmp_L * V_sd_sigma
@@ -479,8 +477,8 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_pd_sigma, V_pd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, "IJ")
-    V_pd_pi, V_pd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, "IJ")
+    V_pd_sigma, V_pd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, 'IJ')
+    V_pd_pi, V_pd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, 'IJ')
     H_X_XY = (3**0.5) * tmp_L**2 * tmp_M * V_pd_sigma + tmp_M * (
         1 - 2 * tmp_L**2
     ) * V_pd_pi
@@ -796,7 +794,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_ds_sigma, V_ds_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, "JI")
+    V_ds_sigma, V_ds_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, 'JI')
     H_XY_S = (3**0.5) * tmp_L * tmp_M * V_ds_sigma
     H_YZ_S = (3**0.5) * tmp_M * tmp_N * V_ds_sigma
     H_ZX_S = (3**0.5) * tmp_N * tmp_L * V_ds_sigma
@@ -860,8 +858,8 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_dp_sigma, V_dp_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, "JI")
-    V_dp_pi, V_dp_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, "JI")
+    V_dp_sigma, V_dp_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, 'JI')
+    V_dp_pi, V_dp_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, 'JI')
     H_XY_X = -(
         (3**0.5) * tmp_L**2 * tmp_M * V_dp_sigma + tmp_M * (1 - 2 * tmp_L**2) * V_dp_pi
     )
@@ -1179,9 +1177,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_dd_sigma, V_dd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 0, tmp_mask, "IJ")
-    V_dd_pi, V_dd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 1, tmp_mask, "IJ")
-    V_dd_delta, V_dd_delta_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 2, tmp_mask, "IJ")
+    V_dd_sigma, V_dd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 0, tmp_mask, 'IJ')
+    V_dd_pi, V_dd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 1, tmp_mask, 'IJ')
+    V_dd_delta, V_dd_delta_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 2, tmp_mask, 'IJ')
     H_XY_XY = (
         3 * tmp_L**2 * tmp_M**2 * V_dd_sigma
         + (tmp_L**2 + tmp_M**2 - 4 * tmp_L**2 * tmp_M**2) * V_dd_pi

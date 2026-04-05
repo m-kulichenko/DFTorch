@@ -428,6 +428,167 @@ class SimpleDftD3:
         return f
 
     # -------------------------------------------------------------------
+    # Batched API  — coords (B, N, 3) in Angstrom
+    # -------------------------------------------------------------------
+
+    def get_energy_batch(self, coords: torch.Tensor) -> torch.Tensor:
+        """Dispersion energy for a batch of geometries.
+
+        Parameters
+        ----------
+        coords : (B, N, 3) in Angstrom.
+
+        Returns
+        -------
+        e_disp : (B,) in eV, differentiable w.r.t. *coords*.
+        """
+        coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR  # (B,N,3)
+
+        diff = coords_bohr.unsqueeze(1) - coords_bohr.unsqueeze(2)  # (B,N,N,3)
+        r2 = (diff * diff).sum(dim=-1)  # (B,N,N)
+        diag_mask = torch.eye(self.N, device=self.device, dtype=self.dtype) * 1e30
+        r2 = r2 + diag_mask.unsqueeze(0)
+        r = torch.sqrt(r2)
+
+        # CN  (B,N)
+        rc0 = self._covrad.unsqueeze(0) + self._covrad.unsqueeze(1)  # (N,N)
+        mask = (r < self.cutoff_cn).to(self.dtype)
+        off_diag = 1.0 - torch.eye(self.N, device=self.device, dtype=self.dtype)
+        mask = mask * off_diag.unsqueeze(0)
+        arg = -_KCN * (rc0.unsqueeze(0) / r - 1.0)
+        expterm = torch.exp(arg.clamp(max=50.0))
+        cn = (mask / (1.0 + expterm)).sum(dim=2)  # (B,N)
+
+        # C6 interpolation  (B,N,N)
+        dcn = cn.unsqueeze(2) - self._refcn.unsqueeze(0)  # (B,N,maxRef)
+        gw_raw = torch.exp(-_WEIGHTING_FACTOR * dcn * dcn) * self._ref_mask.unsqueeze(0)
+        gw_sum = gw_raw.sum(dim=2, keepdim=True).clamp(min=1e-30)
+        gw = gw_raw / gw_sum  # (B,N,maxRef)
+        c6 = torch.einsum("bir,ijrs,bjs->bij", gw, self._c6ref, gw)  # (B,N,N)
+
+        # BJ-damped energy
+        r6 = r2 * r2 * r2
+        r8 = r6 * r2
+        rc1 = self._rc1.unsqueeze(0)  # (1,N,N)
+        rc = self._rc.unsqueeze(0)  # (1,N,N)
+
+        f6 = 1.0 / (r6 + rc1**6)
+        f8 = 1.0 / (r8 + rc1**8)
+        dEr = self.s6 * f6 + self.s8 * f8 * rc
+
+        if self.s10 != 0.0:
+            r10 = r8 * r2
+            f10 = 1.0 / (r10 + rc1**10)
+            dEr = dEr + self.s10 * (49.0 / 40.0) * rc * rc * f10
+
+        pair_mask = (r < self.cutoff_disp).to(self.dtype)
+        pair_mask = pair_mask * off_diag.unsqueeze(0)
+
+        e_disp_ha = -0.5 * (c6 * dEr * pair_mask).sum(dim=(1, 2))  # (B,)
+        return e_disp_ha * HA_TO_EV
+
+    def get_forces_batch(
+        self,
+        coords: torch.Tensor,
+        use_autograd: bool = False,
+    ) -> torch.Tensor:
+        """Dispersion forces for a batch of geometries.
+
+        Parameters
+        ----------
+        coords : (B, N, 3) in Angstrom.
+
+        Returns
+        -------
+        f_disp : (B, 3, N) in eV/Å.
+        """
+        if use_autograd:
+            coords_ag = coords.detach().requires_grad_(True)
+            e = self.get_energy_batch(coords_ag)  # (B,)
+            (grad,) = torch.autograd.grad(e.sum(), coords_ag, create_graph=False)
+            return (-grad).permute(0, 2, 1)  # (B,3,N)
+
+        # Analytical — loop-free over batch via full vectorised path
+        N = self.N
+        dev = self.device
+        dt = self.dtype
+
+        coords_bohr = coords.to(dt) * ANG_TO_BOHR
+
+        diff = coords_bohr.unsqueeze(1) - coords_bohr.unsqueeze(2)  # (B,N,N,3)
+        r2 = (diff * diff).sum(dim=-1)  # (B,N,N)
+        diag_inf = torch.eye(N, device=dev, dtype=dt).unsqueeze(0) * 1e30
+        r2safe = r2 + diag_inf
+        r = torch.sqrt(r2safe)
+
+        off_diag = (1.0 - torch.eye(N, device=dev, dtype=dt)).unsqueeze(0)
+        disp_mask = (r < self.cutoff_disp).to(dt) * off_diag
+        cn_mask = (r < self.cutoff_cn).to(dt) * off_diag
+
+        # 1) CN + dcount/dr
+        rc0 = (self._covrad.unsqueeze(0) + self._covrad.unsqueeze(1)).unsqueeze(0)
+        arg = -_KCN * (rc0 / r - 1.0)
+        expterm = torch.exp(arg.clamp(max=50.0))
+        cn_count = cn_mask / (1.0 + expterm)
+        cn = cn_count.sum(dim=2)  # (B,N)
+
+        dcount_dr = (-_KCN * rc0 * expterm) / (r2safe * (1.0 + expterm) ** 2)
+        dcount_dr = dcount_dr * cn_mask
+
+        # 2) Gaussian weights + d(gw)/d(CN)
+        wf = _WEIGHTING_FACTOR
+        dcn = cn.unsqueeze(2) - self._refcn.unsqueeze(0)  # (B,N,maxRef)
+        gw_raw = torch.exp(-wf * dcn * dcn) * self._ref_mask.unsqueeze(0)
+        gw_sum = gw_raw.sum(dim=2, keepdim=True).clamp(min=1e-30)
+        gw = gw_raw / gw_sum
+
+        dgw_raw = 2.0 * wf * (-dcn) * gw_raw
+        dgw_sum = dgw_raw.sum(dim=2, keepdim=True)
+        gwdcn = (dgw_raw * gw_sum - gw_raw * dgw_sum) / (gw_sum * gw_sum)
+
+        # 3) C6 + dc6/dCN
+        c6 = torch.einsum("bir,ijrs,bjs->bij", gw, self._c6ref, gw)
+        dc6dcn = torch.einsum("bir,ijrs,bjs->bij", gwdcn, self._c6ref, gw)
+
+        # 4) BJ-damped energy + direct dE/dr
+        r4 = r2safe * r2safe
+        r5 = r4 * r
+        r6 = r4 * r2safe
+        r8 = r6 * r2safe
+        rc1 = self._rc1.unsqueeze(0)
+        rc = self._rc.unsqueeze(0)
+
+        f6 = 1.0 / (r6 + rc1**6)
+        f8 = 1.0 / (r8 + rc1**8)
+        df6 = -6.0 * r5 * f6 * f6
+        df8 = -8.0 * r2safe * r5 * f8 * f8
+
+        dEr = self.s6 * f6 + self.s8 * f8 * rc
+        dGr = self.s6 * df6 + self.s8 * df8 * rc
+
+        if self.s10 != 0.0:
+            r10 = r8 * r2safe
+            f10 = 1.0 / (r10 + rc1**10)
+            df10 = -10.0 * r4 * r5 * f10 * f10
+            c10 = self.s10 * (49.0 / 40.0) * rc * rc
+            dEr = dEr + c10 * f10
+            dGr = dGr + c10 * df10
+
+        # 5) Forces
+        coeff_direct = (-dGr * c6 * disp_mask) / r
+        f_direct = -torch.einsum("bij,bijc->bic", coeff_direct, diff)  # (B,N,3)
+
+        dEdcn = -(dc6dcn * dEr * disp_mask).sum(dim=2)  # (B,N)
+        A = dcount_dr / r
+        coeff_cn = (dEdcn.unsqueeze(1) + dEdcn.unsqueeze(2)) * A
+        f_cn = torch.einsum("bij,bijc->bic", coeff_cn, diff)  # (B,N,3)
+
+        f_ha = (-f_direct + f_cn).permute(0, 2, 1)  # (B,3,N)
+
+        # Convert Ha/Bohr → eV/Å
+        return f_ha * (HA_TO_EV * ANG_TO_BOHR)
+
+    # -------------------------------------------------------------------
     # Coordination number (exponential counting function, kcn = 16)
     # -------------------------------------------------------------------
 

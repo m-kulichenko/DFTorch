@@ -323,6 +323,7 @@ class StructureBatch(torch.nn.Module):
         e_field: torch.Tensor = None,
         device: str = "cpu",
         req_grad_xyz: bool = False,
+        ignore_spin: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -401,10 +402,15 @@ class StructureBatch(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
-        self.Nocc = (const.tore[self.TYPE].sum(dim=1) / 2).to(int) - int(charge / 2)
+
+        tot_el = const.tore[self.TYPE].sum(dim=1) - charge
+        if ((tot_el % 2) == 1).any() and not ignore_spin:
+            raise ValueError("Closed shell systems require even number of electrons")
+        self.Nocc = (tot_el / 2).to(int)
+
         self.Hubbard_U = const.U[self.TYPE]
 
-        # Shell on-site energies per atom (pulled from your dicts)
+        # Shell on-site energies per atom (pulled from dicts)
         EsA = const.Es[self.TYPE]  # (batch, Nats)
         EpA = const.Ep[self.TYPE]  # (batch, Nats)
         EdA = const.Ed[self.TYPE]  # (batch, Nats)
