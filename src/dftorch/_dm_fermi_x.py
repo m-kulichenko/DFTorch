@@ -146,7 +146,7 @@ def dm_fermi_x_os(
 
         lumo = nocc.unsqueeze(0).T
         if broken_symmetry:
-            v[0, :, nocc[0] - 1] = 0.8 * v[0, :, nocc[0] - 1] + 0.2 * v[0, :, nocc[0]]
+            v[0, :, nocc[0] - 1] = 0.9 * v[0, :, nocc[0] - 1] + 0.1 * v[0, :, nocc[0]]
         mu0 = 0.5 * (h.gather(1, lumo) + h.gather(1, lumo - 1)).reshape(-1)
     else:
         mu0 = mu_0

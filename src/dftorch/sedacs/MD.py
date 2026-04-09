@@ -306,6 +306,8 @@ class MDXL_Graph(MDXL):
                 screening=1,
                 calculate_forces=1,
                 calculate_dq=1,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
             )
 
             if self.cuda_sync:

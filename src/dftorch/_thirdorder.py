@@ -378,7 +378,7 @@ class ThirdOrder:
         Hubbard_U: torch.Tensor,
         dU_dq: torch.Tensor,
         TYPE: torch.Tensor,
-        h_damp_exp: float = 4.0,
+        h_damp_exp: Optional[float] = None,
     ):
         """
         Parameters
@@ -386,7 +386,8 @@ class ThirdOrder:
         Hubbard_U : (Nats,) tensor – per-atom Hubbard U in eV.
         dU_dq : (Nats,) tensor – per-atom dU/dq in eV/e.
         TYPE : (Nats,) long tensor – atomic numbers.
-        h_damp_exp : float – ζ exponent for H-damping (typ. 4.0 for mio, 4.05 for 3ob).
+        h_damp_exp : float or None – ζ exponent for H-damping (typ. 4.0 for
+            mio, 4.05 for 3ob).  ``None`` disables damping (default).
         """
         self.Nats = TYPE.shape[0]
         self.device = TYPE.device
@@ -399,7 +400,13 @@ class ThirdOrder:
         self.h_damp_exp = h_damp_exp
 
         # Determine which atoms are "damped" (hydrogen, Z=1)
-        self.damped = TYPE == 1  # (Nats,) bool
+        # Only apply damping when h_damp_exp is explicitly set (not None)
+        if h_damp_exp is not None:
+            self.damped = TYPE == 1  # (Nats,) bool
+        else:
+            self.damped = torch.zeros(
+                TYPE.shape[0], dtype=torch.bool, device=TYPE.device
+            )
 
         # Matrices to be set by update_coords
         self.gamma3ab = None  # (Nats, Nats) – Γ³(U_A, U_B, dU_A, r_AB)
@@ -806,7 +813,7 @@ def create_thirdorder(
     Hubbard_U: torch.Tensor,
     dU_dq: torch.Tensor,
     TYPE: torch.Tensor,
-    h_damp_exp: float = 4.0,
+    h_damp_exp: Optional[float] = None,
 ) -> ThirdOrder:
     """Convenience constructor.
 
@@ -815,7 +822,7 @@ def create_thirdorder(
     Hubbard_U : (Nats,) – per-atom Hubbard U in eV.
     dU_dq : (Nats,) – per-atom dU/dq in eV/e.
     TYPE : (Nats,) – atomic numbers (long tensor).
-    h_damp_exp : float – ζ for H-damping.
+    h_damp_exp : float or None – ζ for H-damping.  ``None`` disables (default).
 
     Returns
     -------

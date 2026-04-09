@@ -12,7 +12,6 @@ Vectorized implementation -- all O(N^2) pair loops replaced by tensor ops.
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 
@@ -434,12 +433,12 @@ class GBSA:
     species : (N,) Atomic numbers (Z).
     device  : torch.device
     param_file : str   Path to DFTB+ GBSA parameter file.
-    alpb       : bool  Enable ALPB correction (default True).
+    alpb       : bool  Enable ALPB correction (default False).
     alpha_alpb : float ALPB alpha parameter (default 0.571412).
     """
 
     def __init__(
-        self, coords, species, device, param_file, alpb=True, alpha_alpb=0.571412
+        self, coords, species, device, param_file, alpb=False, alpha_alpb=0.571412
     ):
         self.device = device
         self.nAtom = coords.shape[0]
@@ -1505,9 +1504,7 @@ class GBSABatch:
 # ---------------------------------------------------------------------------
 # Convenience function for ESDriver
 # ---------------------------------------------------------------------------
-def create_gbsa(
-    structure, device, solvent="water", param_file=None, solvation_model="alpb"
-):
+def create_gbsa(structure, device, param_file=None, solvation_model="gbsa"):
     """Create a GBSA/ALPB object from a DFTorch Structure.
 
     Parameters
@@ -1516,14 +1513,11 @@ def create_gbsa(
         DFTorch Structure object.
     device : torch.device
         Device for tensors.
-    solvent : str
-        Solvent name (used for auto-discovery of parameter files).
     param_file : str or None
-        Explicit path to parameter file.  If None, auto-discovered from
-        the SK directory using *solvation_model* and *solvent*.
+        Explicit path to parameter file.
     solvation_model : str
-        ``"alpb"`` (default) — Analytical Linearized Poisson-Boltzmann.
-        ``"gbsa"`` — plain Generalized Born + SASA (no ALPB correction).
+        ``"alpb"`` — Analytical Linearized Poisson-Boltzmann.
+        ``"gbsa"`` (default) — plain Generalized Born + SASA (no ALPB correction).
         The choice determines (a) which parameter file is loaded when
         *param_file* is None, and (b) whether the ALPB correction term
         is applied.  The two models use **different** fitted parameters
@@ -1540,24 +1534,8 @@ def create_gbsa(
     species = structure.TYPE
 
     if param_file is None:
-        if hasattr(structure, "SK_path"):
-            sk_dir = structure.SK_path
-        else:
-            sk_dir = None
-        if sk_dir is not None:
-            # Search for the matching parameter file (alpb or gbsa)
-            candidate = os.path.join(
-                sk_dir,
-                "solvation",
-                f"param_{solvation_model}_{solvent.lower()}.txt",
-            )
-            if os.path.isfile(candidate):
-                param_file = candidate
-
-    if param_file is None:
         raise ValueError(
             f"Could not find {solvation_model.upper()} parameter file for "
-            f"solvent '{solvent}'. Please provide param_file explicitly via "
             f"dftorch_params['solvent_param_file']."
         )
 

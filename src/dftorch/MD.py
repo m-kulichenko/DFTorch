@@ -618,6 +618,8 @@ class MDXL:
                 screening=1,
                 calculate_forces=1,
                 calculate_dq=1,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
             )
         else:
             if self._os:
@@ -629,13 +631,12 @@ class MDXL:
             dists = None
 
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
-        if dftorch_params.get("solvent", None) is not None:
+        if dftorch_params.get("solvent_param_file", None) is not None:
             structure.gbsa = create_gbsa(
                 structure,
                 structure.device,
-                solvent=dftorch_params["solvent"],
                 param_file=dftorch_params.get("solvent_param_file", None),
-                solvation_model=dftorch_params.get("solvation_model", "alpb"),
+                solvation_model=dftorch_params.get("solvation_model", "gbsa"),
             )
             # Born shift uses extrapolated charges n (shadow Hamiltonian)
             solv_n = n_tot_atom if self._os else self.n
@@ -1096,6 +1097,21 @@ class MDXLBatch:
         self.kappa = 1.82
         self.alpha = 0.018  # Coefficients for_ modified Verlet integration
 
+        # Langevin thermostat parameters
+        self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
+        self.langevin_enabled = False
+
+        # Berendsen barostat parameters
+        self.barostat_enabled = False
+        self.target_pressure = 0.0  # target pressure in eV/Å³
+        self.barostat_tau = 100.0  # coupling time in fs
+        self.barostat_isotropic = True  # True = isotropic, False = anisotropic
+        self.barostat_compressibility = (
+            4.57e-5  # compressibility in 1/GPa (water default)
+        )
+        self.P_array = None  # pressure history
+        self.V_array = None  # volume history
+
         self.es_driver = es_driver
         self.temperature_K = temperature_K
         self.n = None
@@ -1115,6 +1131,186 @@ class MDXLBatch:
 
         self.cuda_sync = True
 
+    def enable_langevin(self, gamma: float):
+        """
+        Enable Langevin thermostat.
+
+        Parameters
+        ----------
+        gamma : float
+            Friction coefficient in 1/fs. Typical values: 0.001–0.1 1/fs.
+            Higher = stronger coupling to bath, less NVE-like.
+        """
+        self.langevin_gamma = gamma
+        self.langevin_enabled = True
+
+    def _langevin_kick(self, structure, dt):
+        """
+        Apply Langevin friction + random force as a velocity correction (batched).
+        Called once per half-step (splitting scheme).
+
+        The impulse for_ half-step dt/2:
+          v <- v * c1 + c2 * xi / sqrt(M)
+        where
+          c1 = exp(-gamma * dt/2)
+          c2 = sqrt((1 - c1^2) * kB * T / MVV2KE)
+        """
+        kB_eV = 8.617333262145e-5  # eV/K
+        # temperature_K is (B,) tensor for batched MD
+        T = self.temperature_K  # (B,)
+        if not isinstance(T, torch.Tensor):
+            T = torch.tensor(T, dtype=structure.RX.dtype, device=structure.RX.device)
+        if T.dim() == 0:
+            T = T.unsqueeze(0).expand(structure.batch_size)
+
+        dt_half = 0.5 * dt
+        c1 = torch.exp(
+            torch.tensor(
+                -self.langevin_gamma * dt_half,
+                dtype=structure.RX.dtype,
+                device=structure.RX.device,
+            )
+        )
+        # noise magnitude: sqrt(kB*T / (M * MVV2KE)) * sqrt(1 - c1^2)
+        # T is (B,), Mnuc is (B, N) → noise_scale is (B, N)
+        noise_scale = torch.sqrt(
+            (1.0 - c1**2) * kB_eV * T.unsqueeze(-1) / (structure.Mnuc * self.MVV2KE)
+        )
+
+        xi_x = torch.randn_like(self.VX)
+        xi_y = torch.randn_like(self.VY)
+        xi_z = torch.randn_like(self.VZ)
+
+        self.VX = c1 * self.VX + noise_scale * xi_x
+        self.VY = c1 * self.VY + noise_scale * xi_y
+        self.VZ = c1 * self.VZ + noise_scale * xi_z
+
+    def enable_barostat(
+        self,
+        target_pressure: float = 0.0,
+        tau: float = 100.0,
+        isotropic: bool = True,
+        compressibility: float = 4.57e-5,
+    ):
+        """
+        Enable Berendsen barostat for_ NPT ensemble (batched).
+
+        Parameters
+        ----------
+        target_pressure : float
+            Target external pressure in GPa.
+            0.0 = ambient / zero pressure.
+        tau : float
+            Pressure coupling time constant in fs.
+            Typical: 100–1000 fs. Smaller = stronger coupling.
+        isotropic : bool
+            If True, uniform scaling along all three axes (hydrostatic).
+            If False, allow independent scaling per axis (anisotropic).
+        compressibility : float
+            Isothermal compressibility in **1/bar** (the standard MD
+            convention used e.g. by GROMACS).
+            Default 4.57×10⁻⁵  1/bar  (liquid water at 300 K).
+            For solids, ∼1–5×10⁻⁶  1/bar.
+        """
+        self.barostat_enabled = True
+        GPa_per_eVA3 = 160.21766208
+        bar_per_eVA3 = GPa_per_eVA3 * 1e4
+        self.target_pressure = target_pressure / GPa_per_eVA3  # GPa → eV/Å³
+        self.barostat_tau = tau
+        self.barostat_isotropic = isotropic
+        self.barostat_compressibility = compressibility * bar_per_eVA3  # Å³/eV
+
+    def _compute_kinetic_stress_batch(self, structure):
+        """
+        Compute the kinetic (ideal-gas) contribution to the stress tensor (batched).
+
+        σ^kin_αβ = (1/V) Σ_i  m_i v_iα v_iβ   (in eV/Å³)
+
+        Returns (B, 3, 3) tensor.
+        """
+        V = torch.abs(torch.det(structure.cell))  # (B,)
+        vel = torch.stack((self.VX, self.VY, self.VZ), dim=-1)  # (B, N, 3)
+        mass = structure.Mnuc  # (B, N) in amu
+        # m_i v_i⊗v_i summed → (B, 3, 3) in amu·Å²/fs²
+        mvv = torch.einsum("bi,bia,bib->bab", mass, vel, vel)  # (B, 3, 3)
+        sigma_kin = (2.0 * self.MVV2KE * mvv) / V.unsqueeze(-1).unsqueeze(-1)
+        return sigma_kin  # (B, 3, 3) eV/Å³
+
+    def _compute_virial_stress_batch(self, structure):
+        """
+        Compute the virial contribution to the stress tensor (batched).
+
+        σ^vir_αβ = -(1/V) Σ_i  r_iα f_iβ   (in eV/Å³)
+
+        Returns (B, 3, 3) tensor.
+        """
+        V = torch.abs(torch.det(structure.cell))  # (B,)
+        # positions: (B, N)  forces: (B, 3, N)
+        R = torch.stack((structure.RX, structure.RY, structure.RZ), dim=-1)  # (B, N, 3)
+        F = structure.f_tot.permute(0, 2, 1)  # (B, N, 3)
+        # virial = -sum_i r_i ⊗ f_i
+        virial = -torch.einsum("bia,bib->bab", R, F)  # (B, 3, 3)
+        sigma_vir = virial / V.unsqueeze(-1).unsqueeze(-1)
+        return sigma_vir  # (B, 3, 3) eV/Å³
+
+    def _barostat_scale(self, structure, dt):
+        """
+        Apply Berendsen barostat scaling to cell and positions (batched).
+
+        Scaling factor:
+          μ = [1 - (β dt / (3 τ_P)) (P_target - P_inst)]^{1/3}
+
+        Isotropic: scalar μ applied uniformly per batch element.
+        Anisotropic: independent μ_α per axis from diagonal P_αα.
+        """
+        sigma_kin = self._compute_kinetic_stress_batch(structure)  # (B, 3, 3)
+        sigma_vir = self._compute_virial_stress_batch(structure)  # (B, 3, 3)
+
+        # Pressure tensor: P = σ_kin + σ_vir
+        P_inst = sigma_kin + sigma_vir  # (B, 3, 3) eV/Å³
+
+        # Scalar pressure = trace / 3
+        P_scalar = torch.diagonal(P_inst, dim1=-2, dim2=-1).sum(dim=-1) / 3.0  # (B,)
+        GPa_per_eVA3 = 160.21766208
+
+        # Store for_ logging (GPa)
+        self._P_inst_GPa = P_scalar * GPa_per_eVA3  # (B,)
+
+        # Berendsen prefactor: β dt / (3 τ_P)
+        prefactor = self.barostat_compressibility * dt / (3.0 * self.barostat_tau)
+
+        if self.barostat_isotropic:
+            dP = self.target_pressure - P_scalar  # (B,)
+            mu = (1.0 - prefactor * dP) ** (1.0 / 3.0)  # (B,)
+
+            # Scale cell: (B, 3, 3) * (B, 1, 1)
+            structure.cell = structure.cell * mu.unsqueeze(-1).unsqueeze(-1)
+            structure.cell_inv = torch.linalg.inv(structure.cell)
+
+            # Scale positions: (B, N) * (B, 1)
+            mu_expand = mu.unsqueeze(-1)
+            structure.RX = structure.RX * mu_expand
+            structure.RY = structure.RY * mu_expand
+            structure.RZ = structure.RZ * mu_expand
+        else:
+            # Anisotropic: per-axis diagonal scaling (B, 3)
+            diag_P = torch.diagonal(P_inst, dim1=-2, dim2=-1)  # (B, 3)
+            dP = self.target_pressure - diag_P  # (B, 3)
+            mu_diag = (1.0 - prefactor * dP) ** (1.0 / 3.0)  # (B, 3)
+
+            # Scale cell: (B, 3, 3) * (B, 3, 1)
+            structure.cell = structure.cell * mu_diag.unsqueeze(-1)
+            structure.cell_inv = torch.linalg.inv(structure.cell)
+
+            structure.RX = structure.RX * mu_diag[:, 0:1]
+            structure.RY = structure.RY * mu_diag[:, 1:2]
+            structure.RZ = structure.RZ * mu_diag[:, 2:3]
+
+        # Wrap positions after rescaling
+        R = torch.stack((structure.RX, structure.RY, structure.RZ), dim=-1)
+        R = wrap_positions(R, structure.cell, structure.cell_inv)
+        structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
+
     def run(
         self,
         structure,
@@ -1124,6 +1320,9 @@ class MDXLBatch:
         dump_interval=1,
         traj_filename="md_trj.xyz",
     ):
+
+        # Store params for_ barostat (needs them during step)
+        self._dftorch_params = dftorch_params
 
         if self.VX is None:
             self.VX, self.VY, self.VZ = initialize_velocities_batch(
@@ -1185,6 +1384,17 @@ class MDXLBatch:
             )
             self.Res_array = torch.empty(
                 (0, structure.batch_size), device=structure.device
+            )
+
+        if self.barostat_enabled and self.P_array is None:
+            self.P_array = torch.empty(
+                (0, structure.batch_size), device=structure.device
+            )
+            self.V_array = torch.empty(
+                (0, structure.batch_size), device=structure.device
+            )
+            self._P_inst_GPa = torch.zeros(
+                structure.batch_size, device=structure.device
             )
 
         self.EPOT = structure.e_tot
@@ -1304,7 +1514,7 @@ class MDXLBatch:
         CoulPot = torch.matmul(structure.C, self.n.unsqueeze(-1)).squeeze(-1)
 
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
-        if dftorch_params.get("solvent", None) is not None:
+        if dftorch_params.get("solvent_param_file", None) is not None:
             _gbsa_list = []
             for b in range(structure.batch_size):
 
@@ -1320,9 +1530,8 @@ class MDXLBatch:
                     create_gbsa(
                         proxy,
                         structure.device,
-                        solvent=dftorch_params["solvent"],
                         param_file=dftorch_params.get("solvent_param_file", None),
-                        solvation_model=dftorch_params.get("solvation_model", "alpb"),
+                        solvation_model=dftorch_params.get("solvation_model", "gbsa"),
                     )
                 )
             structure.gbsa_list = _gbsa_list
@@ -1574,18 +1783,39 @@ class MDXLBatch:
             + 0.5 * dt * (self.F2V * structure.f_tot[:, 2] / structure.Mnuc)
             - self.fric * self.VZ
         )
+
+        # ── Langevin half-kick (after force update) ──────────────────────
+        if self.langevin_enabled:
+            self._langevin_kick(structure, dt)
+
+        # ── Berendsen barostat: rescale cell + positions ─────────────────
+        if self.barostat_enabled:
+            self._barostat_scale(structure, dt)
+            V = torch.abs(torch.det(structure.cell))  # (B,)
+            self.P_array = torch.cat(
+                (self.P_array, self._P_inst_GPa.detach().unsqueeze(0)), dim=0
+            )
+            self.V_array = torch.cat((self.V_array, V.detach().unsqueeze(0)), dim=0)
+
         if self.cuda_sync:
             torch.cuda.synchronize()
         print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
 
+        if self.barostat_enabled:
+            V = torch.abs(torch.det(structure.cell))  # (B,)
+
         for b in range(structure.batch_size):
+            P_str = ""
+            if self.barostat_enabled:
+                P_str = f", P = {self._P_inst_GPa[b].item():.4f} GPa, V = {V[b].item():.2f} Å³"
             print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}, t = {:.1f} s".format(
+                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
                     Energ[b].item(),
                     self.EPOT[b].item(),
                     self.EKIN[b].item(),
                     Temperature[b].item(),
                     ResErr[b].item(),
+                    P_str,
                     time.perf_counter() - start_time,
                 )
             )

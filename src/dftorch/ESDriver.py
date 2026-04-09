@@ -234,7 +234,7 @@ class ESDriver(torch.nn.Module):
                     structure.Hubbard_U,
                     structure.dU_dq,
                     structure.TYPE,
-                    h_damp_exp=self.dftorch_params.get("h_damp_exp", 4.0),
+                    h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
                 )
                 structure.thirdorder.update_coords(
                     structure.RX,
@@ -266,13 +266,12 @@ class ESDriver(torch.nn.Module):
 
         if do_scf:
             # --- GBSA / ALPB implicit solvation ---
-            if self.dftorch_params.get("solvent", None) is not None:
+            if self.dftorch_params.get("solvent_param_file", None) is not None:
                 structure.gbsa = create_gbsa(
                     structure,
                     self.device,
-                    solvent=self.dftorch_params["solvent"],
                     param_file=self.dftorch_params.get("solvent_param_file", None),
-                    solvation_model=self.dftorch_params.get("solvation_model", "alpb"),
+                    solvation_model=self.dftorch_params.get("solvation_model", "gbsa"),
                 )
             else:
                 structure.gbsa = None
@@ -883,7 +882,7 @@ class ESDriver(torch.nn.Module):
         gbsa_ref = None
         if (
             mode == "frozen_gbsa"
-            and self.dftorch_params.get("solvent", None) is not None
+            and self.dftorch_params.get("solvent_param_file", None) is not None
         ):
 
             class _StructProxy:
@@ -897,9 +896,8 @@ class ESDriver(torch.nn.Module):
             gbsa_ref = create_gbsa(
                 proxy,
                 self.device,
-                solvent=self.dftorch_params["solvent"],
                 param_file=self.dftorch_params.get("solvent_param_file", None),
-                solvation_model=self.dftorch_params.get("solvation_model", "alpb"),
+                solvation_model=self.dftorch_params.get("solvation_model", "gbsa"),
             )
             if verbose:
                 print("Reference GBSA computed (frozen geometry approximation)")
@@ -1244,7 +1242,7 @@ class ESDriverBatch(torch.nn.Module):
                         structure.Hubbard_U[b],
                         structure.dU_dq[b],
                         structure.TYPE[b],
-                        h_damp_exp=self.dftorch_params.get("h_damp_exp", 4.0),
+                        h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
                     )
                     # Build pairwise data for_ this structure from the Coulomb neighbor list.
                     # We rebuild a quick pairwise data from the full Coulomb matrix C[b].
@@ -1286,7 +1284,7 @@ class ESDriverBatch(torch.nn.Module):
                 # Reuse pre-computed GBSA (frozen geometry approximation)
                 structure.gbsa_batch = gbsa_batch_precomputed
                 structure.gbsa_list = gbsa_batch_precomputed._list
-            elif self.dftorch_params.get("solvent", None) is not None:
+            elif self.dftorch_params.get("solvent_param_file", None) is not None:
                 tic = time.time()
                 _gbsa_list = []
                 for b in range(structure.batch_size):
@@ -1302,10 +1300,9 @@ class ESDriverBatch(torch.nn.Module):
                     gbsa_b = create_gbsa(
                         proxy,
                         self.device,
-                        solvent=self.dftorch_params["solvent"],
                         param_file=self.dftorch_params.get("solvent_param_file", None),
                         solvation_model=self.dftorch_params.get(
-                            "solvation_model", "alpb"
+                            "solvation_model", "gbsa"
                         ),
                     )
                     _gbsa_list.append(gbsa_b)

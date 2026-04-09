@@ -2,8 +2,8 @@
 import torch
 import math
 from . import ewald_real, CONV_FACTOR, ewald_self_energy, ewald_real_screening
-from .ewald_torch import ewald_real_screening_stress
-from typing import Optional, Tuple, List, Union
+from .ewald_torch import ewald_real_screening_stress, h_damp_h5_correction
+from typing import Optional, Dict, Tuple, List, Union
 
 
 def b(m, order=4):
@@ -282,6 +282,8 @@ def calculate_PME_ewald(
     calculate_dq: int = 0,
     screening: int = 0,
     calculate_stress: int = 0,
+    h_damp_exp: Optional[float] = None,
+    h5_params: Optional[Dict] = None,
 ) -> Tuple[
     float, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]
 ]:
@@ -397,6 +399,31 @@ def calculate_PME_ewald(
             charges.requires_grad = False
 
     total_ewald_e = (my_e_real + pme_e + self_e) * CONV_FACTOR
+
+    # ── H-damping / H5 correction to real-space screening ────────────────
+    if screening and (h_damp_exp is not None or h5_params is not None):
+        # nbr_disp_vecs may have been transposed above; need (3,N,K) or (N,K,3)
+        de_corr, df_corr, dq_corr = h_damp_h5_correction(
+            nbr_inds,
+            nbr_disp_vecs,
+            nbr_dists,
+            charges,
+            hubbard_u,
+            atomtypes,
+            cutoff,
+            calculate_forces,
+            calculate_dq,
+            h_damp_exp=h_damp_exp,
+            h5_params=h5_params,
+        )
+        total_ewald_e = total_ewald_e + de_corr
+        if calculate_forces and df_corr is not None:
+            if transpose:
+                forces = forces + df_corr.T
+            else:
+                forces = forces + df_corr
+        if calculate_dq and dq_corr is not None:
+            dq = dq + dq_corr
 
     # --- Stress tensor (analytical) ---
     if calculate_stress:

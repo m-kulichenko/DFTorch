@@ -401,6 +401,8 @@ def SCFx(
                         screening=1,
                         calculate_forces=0,
                         calculate_dq=1,
+                        h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                        h5_params=dftorch_params.get("h5_params", None),
                     )
 
             else:
@@ -526,6 +528,8 @@ def SCFx(
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
             calculate_stress=0 if req_grad_xyz else 1,
+            h_damp_exp=dftorch_params.get("h_damp_exp", None),
+            h5_params=dftorch_params.get("h5_params", None),
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
     else:
@@ -758,6 +762,8 @@ def scf_x_os(
                         screening=1,
                         calculate_forces=0,
                         calculate_dq=1,
+                        h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                        h5_params=dftorch_params.get("h5_params", None),
                     )
             else:
                 CoulPot = C @ q_tot_atom
@@ -909,6 +915,8 @@ def scf_x_os(
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
             calculate_stress=0 if req_grad_xyz else 1,
+            h_damp_exp=dftorch_params.get("h_damp_exp", None),
+            h5_params=dftorch_params.get("h5_params", None),
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
     else:
