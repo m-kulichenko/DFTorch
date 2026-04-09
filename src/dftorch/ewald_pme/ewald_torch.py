@@ -3,8 +3,56 @@ import math
 import torch
 import numpy as np
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from .util import CONV_FACTOR
+
+
+# ── Van der Waals radii & H5 constants (mirrored from _coulomb_matrix.py) ─
+_VDW_RADII_PM: Dict[int, int] = {
+    1: 120,
+    2: 140,
+    3: 182,
+    4: 153,
+    5: 192,
+    6: 170,
+    7: 155,
+    8: 152,
+    9: 147,
+    10: 154,
+    11: 227,
+    12: 173,
+    13: 184,
+    14: 210,
+    15: 180,
+    16: 180,
+    17: 175,
+    18: 188,
+    19: 275,
+    20: 231,
+    28: 163,
+    29: 140,
+    30: 139,
+    31: 187,
+    32: 211,
+    33: 185,
+    34: 190,
+    35: 185,
+    36: 202,
+    46: 163,
+    47: 172,
+    48: 158,
+    49: 193,
+    50: 217,
+    51: 206,
+    52: 206,
+    53: 198,
+    54: 216,
+    79: 166,
+    80: 155,
+    92: 186,
+}
+_H5_DEFAULT_SCALING: Dict[int, float] = {7: 0.18, 8: 0.06, 16: 0.21}
+_GAUSS_WIDTH_FACTOR = 0.5 / math.sqrt(2.0 * math.log(2.0))
 
 
 @torch.compile
@@ -413,6 +461,495 @@ def ewald_real_screening_stress(
     sigma = torch.einsum("ij,ija,ijb->ab", weight, Rab, Rab) / (2.0 * Vcell)
     sigma = 0.5 * (sigma + sigma.T)
     return sigma
+
+    sigma = torch.einsum("ij,ija,ijb->ab", weight, Rab, Rab) / (2.0 * Vcell)
+    sigma = 0.5 * (sigma + sigma.T)
+    return sigma
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# H-damping / H5 correction to Ewald real-space screening
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def h_damp_h5_correction(
+    nbr_inds: torch.Tensor,
+    nbr_diff_vecs: torch.Tensor,
+    nbr_dists: torch.Tensor,
+    charges: torch.Tensor,
+    hubbard_u: torch.Tensor,
+    atomtypes: torch.Tensor,
+    cutoff: float,
+    calculate_forces: int,
+    calculate_dq: int,
+    h_damp_exp: Optional[float] = None,
+    h5_params: Optional[Dict] = None,
+) -> Tuple[float, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Compute the energy / force / CoulPot correction from H-damping or H5.
+
+    This function mirrors ``ewald_real_screening`` exactly, computing J0
+    twice — once without damping (undamped, matching what ``ewald_real_screening``
+    already computed) and once with damping — and returns the *difference*
+    (damped − undamped) as an additive correction.
+
+    Returns (energy_corr, force_corr, dq_corr) already multiplied by
+    ``CONV_FACTOR``.
+    """
+    KECONST = 14.3996437701414
+    EV_TO_HA = 1.0 / 27.211386245988
+    ANG_TO_BOHR = 1.0 / 0.52917721067
+    device = nbr_dists.device
+    dtype = nbr_dists.dtype
+
+    one = torch.tensor(1.0, dtype=dtype, device=device)
+    zero = torch.tensor(0.0, dtype=dtype, device=device)
+    DUMMY_NBR_IND = -1
+    mask = (nbr_inds != DUMMY_NBR_IND) & (nbr_dists <= cutoff)
+    MAGR = torch.where(mask, nbr_dists, one)
+    MAGR2 = MAGR * MAGR
+
+    TFACT = 16.0 / (5.0 * KECONST)
+
+    # ── Replicate the full ewald_real_screening computation ──────────────
+    # We rebuild J0 (undamped) and J0_damped, then return the difference.
+    # This guarantees bit-for-bit consistency with ewald_real_screening.
+    same_element_mask = mask & (atomtypes.unsqueeze(1) == atomtypes[nbr_inds])
+    different_element_mask = mask & ~same_element_mask
+
+    TI = torch.where(mask, TFACT * hubbard_u.unsqueeze(1) * mask, one)
+    TI2 = TI * TI
+    TI3 = TI2 * TI
+    TI4 = TI2 * TI2
+    TI6 = TI4 * TI2
+
+    SSA = TI
+    SSB = TI3 / 48.0
+    SSC = 3.0 * TI2 / 16.0
+    SSD = 11.0 * TI / 16.0
+    SSE = 1.0
+
+    EXPTI = torch.exp(-TI * MAGR)
+
+    # ── J0_undamped (same as ewald_real_screening) ───────────────────────
+    # We only need the screening part (γ subtracted from erfc/r).
+    # Since we're computing the *difference*, the erfc/r terms cancel.
+    # So we only need the γ values and their force contributions.
+
+    # Same-element γ
+    gamma_same = EXPTI * (SSB * MAGR2 + SSC * MAGR + SSD + SSE / MAGR)
+
+    # Different-element γ
+    TJ = torch.where(
+        different_element_mask,
+        TFACT * hubbard_u[nbr_inds] * different_element_mask,
+        one,
+    )
+    TJ2 = TJ * TJ
+    TJ4 = TJ2 * TJ2
+    TJ6 = TJ4 * TJ2
+    EXPTJ = torch.exp(-TJ * MAGR)
+    TI2MTJ2 = TI2 - TJ2
+    TI2MTJ2 = torch.where(different_element_mask, TI2MTJ2, one)
+    SA = TI
+    SB = EXPTI * TJ4 * TI / 2.0 / TI2MTJ2 / TI2MTJ2
+    SC = EXPTI * (TJ6 - 3.0 * TJ4 * TI2) / TI2MTJ2 / TI2MTJ2 / TI2MTJ2
+    SD = TJ
+    SE = EXPTJ * TI4 * TJ / 2.0 / TI2MTJ2 / TI2MTJ2
+    SF = EXPTJ * (-(TI6 - 3.0 * TI4 * TJ2)) / TI2MTJ2 / TI2MTJ2 / TI2MTJ2
+    gamma_diff = (SB - SC / MAGR) + (SE - SF / MAGR)
+
+    # ── H-damping: identify affected pairs ───────────────────────────────
+    is_H_I = atomtypes == 1
+    is_H_J_lookup = is_H_I[nbr_inds.clamp(min=0)]
+    is_H_I_exp = is_H_I.unsqueeze(1).expand_as(nbr_inds)
+
+    # ── Build J0_undamped and J0_damped (screening part only) ────────────
+    # J0 = erfc/r - γ   ⟹  correction = J0_damped - J0_undamped = γ_undamped - γ_damped
+    # (erfc/r cancels in the difference)
+    J0_undamped = torch.zeros_like(MAGR)
+    J0_undamped[same_element_mask] = gamma_same[same_element_mask]
+    J0_undamped[different_element_mask] = gamma_diff[different_element_mask]
+
+    J0_damped = J0_undamped.clone()
+
+    _apply_h5 = False
+
+    if h_damp_exp is not None:
+        h_mask = mask & (is_H_I_exp | is_H_J_lookup)
+        if h_mask.any():
+            Ui_au = hubbard_u.unsqueeze(1).expand_as(nbr_inds)[h_mask] * EV_TO_HA
+            Uj_au = hubbard_u[nbr_inds.clamp(min=0)][h_mask] * EV_TO_HA
+            r_au = MAGR[h_mask] * ANG_TO_BOHR
+            rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
+            D = torch.exp(rTmp * r_au**2)
+            # γ_damped = γ * D
+            J0_damped[h_mask] = J0_undamped[h_mask] * D
+
+    elif h5_params is not None:
+        _h5_r_scaling = h5_params.get("r_scaling", 0.714)
+        _h5_w_scaling = h5_params.get("w_scaling", 0.25)
+        _h5_scaling = h5_params.get("h5_scaling", _H5_DEFAULT_SCALING)
+        _vdw_H_ang = _VDW_RADII_PM.get(1, 120) * 0.01
+
+        h5_mask_all = mask & (is_H_I_exp ^ is_H_J_lookup)
+        if h5_mask_all.any():
+            heavy_Z = torch.where(
+                is_H_I_exp[h5_mask_all],
+                atomtypes[nbr_inds.clamp(min=0)][h5_mask_all],
+                atomtypes.unsqueeze(1).expand_as(nbr_inds)[h5_mask_all],
+            )
+            k_XH_all = torch.zeros(int(h5_mask_all.sum()), dtype=dtype, device=device)
+            sumVdW_all = torch.zeros_like(k_XH_all)
+            for z_heavy, k_val in _h5_scaling.items():
+                z_mask = heavy_Z == z_heavy
+                if z_mask.any():
+                    vdw_heavy_ang = _VDW_RADII_PM.get(z_heavy, -1) * 0.01
+                    if vdw_heavy_ang > 0:
+                        k_XH_all[z_mask] = k_val
+                        sumVdW_all[z_mask] = _vdw_H_ang + vdw_heavy_ang
+            active = k_XH_all > 0.0
+            if active.any():
+                _apply_h5 = True
+                r_h5 = MAGR[h5_mask_all][active]
+                k_h5 = k_XH_all[active]
+                svdw = sumVdW_all[active]
+                r0 = _h5_r_scaling * svdw
+                cc = _h5_w_scaling * svdw * _GAUSS_WIDTH_FACTOR
+                gauss = k_h5 * torch.exp(-0.5 * (r_h5 - r0) ** 2 / cc**2)
+
+                g = J0_undamped[h5_mask_all][active]
+                # γ_H5 = γ*(1+G) - G/r
+                g_damped = g * (1.0 + gauss) - gauss / r_h5
+
+                idx_full = torch.where(h5_mask_all.flatten())[0]
+                idx_active = idx_full[active]
+                J0_damped.view(-1)[idx_active] = g_damped
+
+    # ── DeltaJ0 = γ_undamped - γ_damped ─────────────────────────────────
+    # ewald_real_screening computed: J0 = erfc/r - γ_undamped
+    # correct J0 should be:          J0 = erfc/r - γ_damped
+    # correction = (erfc/r - γ_damped) - (erfc/r - γ_undamped) = γ_undamped - γ_damped
+    DeltaJ0 = J0_undamped - J0_damped
+
+    # ── Energy correction: (1/2) Σ q_i ΔJ0 q_j ─────────────────────────
+    energy_corr = (
+        torch.sum(charges[:, None] * DeltaJ0 * charges[nbr_inds.clamp(min=0)] * mask)
+        / 2.0
+    )
+
+    # ── CoulPot (dq) correction ──────────────────────────────────────────
+    dq_corr = None
+    if calculate_dq:
+        dq_corr = torch.sum(DeltaJ0 * charges[nbr_inds.clamp(min=0)] * mask, dim=1)
+
+    # ── Force correction ─────────────────────────────────────────────────
+    # Mirror ewald_real_screening force assembly exactly.
+    # ewald_real_screening computes three FORCE contributions:
+    #   1. erfc/r part:      FORCE = -sum(qq * CA/MAGR * DC)
+    #   2. same-elem γ:      FORCE += +sum(qq * [-dγ/dr] * DC)
+    #   3. diff-elem γ:      FORCE += +sum(qq * [-dγ/dr] * DC)
+    # The erfc/r part cancels in the difference.  So the correction force is:
+    #   F_corr = [γ_undamped force terms] - [γ_damped force terms]
+    # which equals sum(qq * (-dγ_undamped/dr + dγ_damped/dr) * DC)
+    force_corr = None
+    if calculate_forces:
+        # Ensure nbr_diff_vecs is (N, K, 3)
+        if nbr_diff_vecs.shape[0] == 3:
+            nbr_diff_vecs = torch.transpose(nbr_diff_vecs, 0, 2).contiguous()
+            nbr_diff_vecs = torch.transpose(nbr_diff_vecs, 0, 1).contiguous()
+        DC = torch.where(mask.unsqueeze(2), nbr_diff_vecs / MAGR.unsqueeze(2), zero)
+
+        # --- Undamped force (same as ewald_real_screening terms 2+3) ---
+        # Same-element screening force contribution (from ewald_real_screening):
+        #   +sum(qq * EXPTI * [(1/r² - 2*SSB*r - SSC) + SSA*(SSB*r²+SSC*r+SSD+1/r)] * DC)
+        FORCE_undamped = torch.sum(
+            (
+                (charges[:, None] * charges[nbr_inds.clamp(min=0)] * EXPTI)
+                * (
+                    (
+                        torch.where(same_element_mask, SSE / MAGR2, zero)
+                        - 2.0 * SSB * MAGR
+                        - SSC
+                    )
+                    + SSA
+                    * (
+                        SSB * MAGR2
+                        + SSC * MAGR
+                        + SSD
+                        + torch.where(same_element_mask, SSE / MAGR, zero)
+                    )
+                )
+            ).unsqueeze(2)
+            * DC
+            * same_element_mask.unsqueeze(2),
+            dim=1,
+        )
+        # Different-element screening force contribution:
+        FORCE_undamped = FORCE_undamped + torch.sum(
+            (
+                charges[:, None]
+                * charges[nbr_inds.clamp(min=0)]
+                * (
+                    (
+                        SA * (SB - torch.where(different_element_mask, SC / MAGR, zero))
+                        - torch.where(different_element_mask, SC / MAGR2, zero)
+                    )
+                    + (
+                        SD * (SE - torch.where(different_element_mask, SF / MAGR, zero))
+                        - torch.where(different_element_mask, SF / MAGR2, zero)
+                    )
+                )
+            ).unsqueeze(2)
+            * DC
+            * different_element_mask.unsqueeze(2),
+            dim=1,
+        )
+
+        # --- Damped force: recompute screening with damping applied ---
+        if h_damp_exp is not None:
+            h_mask = mask & (is_H_I_exp | is_H_J_lookup)
+            Ui_au_full = hubbard_u.unsqueeze(1).expand_as(nbr_inds) * EV_TO_HA
+            Uj_au_full = hubbard_u[nbr_inds.clamp(min=0)] * EV_TO_HA
+            r_au_full = MAGR * ANG_TO_BOHR
+            rTmp_full = -((0.5 * (Ui_au_full + Uj_au_full)) ** h_damp_exp)
+            D_full = torch.where(h_mask, torch.exp(rTmp_full * r_au_full**2), one)
+            Dprime_ang_full = torch.where(
+                h_mask,
+                2.0 * rTmp_full * r_au_full * D_full * ANG_TO_BOHR,
+                zero,
+            )  # dD/dr in 1/Å
+
+            # Damped same-element: γ_d = γ*D, so the force term becomes:
+            #   qq * [γ'*D + γ*D'] * DC   (product rule on γ*D)
+            # But ewald_real_screening computes it using the expanded form.
+            # We mimic: for damped, the EXPTI*tmp becomes EXPTI*tmp*D,
+            # and its derivative via product rule.
+            # Simplest: F_damped_same = F_undamped_same * D + qq * γ * D' * DC
+            #
+            # Actually, to be perfectly safe, we compute:
+            #   FORCE_damped_same = sum(qq * (-dγ_d/dr) * DC)
+            # where γ_d = γ*D, so -dγ_d/dr = -(γ'*D + γ*D') = -γ'*D - γ*D'
+            # The undamped term was: -dγ/dr = -γ'
+            # Factor: -dγ_d/dr = (-dγ/dr)*D + (-γ)*D' = (-dγ/dr)*D - γ*D'
+
+            # For same-element screening force, the "(-dγ/dr)" part is what
+            # ewald_real_screening computes.  We can factor:
+            #   F_damped = F_undamped * D  +  sum(qq * (-γ) * D' * DC)
+
+            FORCE_damped_same = torch.sum(
+                (
+                    (charges[:, None] * charges[nbr_inds.clamp(min=0)] * EXPTI)
+                    * (
+                        (
+                            torch.where(same_element_mask, SSE / MAGR2, zero)
+                            - 2.0 * SSB * MAGR
+                            - SSC
+                        )
+                        + SSA
+                        * (
+                            SSB * MAGR2
+                            + SSC * MAGR
+                            + SSD
+                            + torch.where(same_element_mask, SSE / MAGR, zero)
+                        )
+                    )
+                    * torch.where(h_mask & same_element_mask, D_full, one)
+                ).unsqueeze(2)
+                * DC
+                * same_element_mask.unsqueeze(2),
+                dim=1,
+            )
+            # Add the γ * D' contribution:
+            FORCE_damped_same = FORCE_damped_same + torch.sum(
+                (
+                    charges[:, None]
+                    * charges[nbr_inds.clamp(min=0)]
+                    * (-gamma_same)
+                    * torch.where(h_mask, Dprime_ang_full, zero)
+                ).unsqueeze(2)
+                * DC
+                * same_element_mask.unsqueeze(2),
+                dim=1,
+            )
+
+            # For different-element: same approach
+            FORCE_damped_diff = torch.sum(
+                (
+                    charges[:, None]
+                    * charges[nbr_inds.clamp(min=0)]
+                    * (
+                        (
+                            SA
+                            * (
+                                SB
+                                - torch.where(different_element_mask, SC / MAGR, zero)
+                            )
+                            - torch.where(different_element_mask, SC / MAGR2, zero)
+                        )
+                        + (
+                            SD
+                            * (
+                                SE
+                                - torch.where(different_element_mask, SF / MAGR, zero)
+                            )
+                            - torch.where(different_element_mask, SF / MAGR2, zero)
+                        )
+                    )
+                    * torch.where(h_mask & different_element_mask, D_full, one)
+                ).unsqueeze(2)
+                * DC
+                * different_element_mask.unsqueeze(2),
+                dim=1,
+            )
+            FORCE_damped_diff = FORCE_damped_diff + torch.sum(
+                (
+                    charges[:, None]
+                    * charges[nbr_inds.clamp(min=0)]
+                    * (-gamma_diff)
+                    * torch.where(h_mask, Dprime_ang_full, zero)
+                ).unsqueeze(2)
+                * DC
+                * different_element_mask.unsqueeze(2),
+                dim=1,
+            )
+
+            FORCE_damped = FORCE_damped_same + FORCE_damped_diff
+
+        elif _apply_h5:
+            # H5: γ_H5 = γ*(1+G) - G/r
+            # dγ_H5/dr = γ'*(1+G) + γ*G' - (G'/r - G/r²)
+            # -dγ_H5/dr = -γ'*(1+G) - γ*G' + G'/r - G/r²
+            # The difference vs undamped (-dγ/dr = -γ'):
+            #   Δ(-dγ/dr) = [-γ'*(1+G) - γ*G' + G'/r - G/r²] - [-γ']
+            #             = -γ'*G - γ*G' + G'/r - G/r²
+            # This is complex; for safety we compute FORCE_damped from scratch
+
+            # Build G and G' as full (N,K) arrays, zero where not active
+            G_full = torch.zeros_like(MAGR)
+            Gp_full = torch.zeros_like(MAGR)
+            if _apply_h5:
+                # Reconstruct from saved h5 data
+                _h5_r_scaling2 = h5_params.get("r_scaling", 0.714)
+                _h5_w_scaling2 = h5_params.get("w_scaling", 0.25)
+                _h5_scaling2 = h5_params.get("h5_scaling", _H5_DEFAULT_SCALING)
+                _vdw_H_ang2 = _VDW_RADII_PM.get(1, 120) * 0.01
+
+                h5_mask_all2 = mask & (is_H_I_exp ^ is_H_J_lookup)
+                heavy_Z2 = torch.where(
+                    is_H_I_exp[h5_mask_all2],
+                    atomtypes[nbr_inds.clamp(min=0)][h5_mask_all2],
+                    atomtypes.unsqueeze(1).expand_as(nbr_inds)[h5_mask_all2],
+                )
+                k_XH2 = torch.zeros(int(h5_mask_all2.sum()), dtype=dtype, device=device)
+                svdw2 = torch.zeros_like(k_XH2)
+                for z_h, k_v in _h5_scaling2.items():
+                    zm = heavy_Z2 == z_h
+                    if zm.any():
+                        vdw_h = _VDW_RADII_PM.get(z_h, -1) * 0.01
+                        if vdw_h > 0:
+                            k_XH2[zm] = k_v
+                            svdw2[zm] = _vdw_H_ang2 + vdw_h
+                active2 = k_XH2 > 0.0
+                if active2.any():
+                    r_h5_2 = MAGR[h5_mask_all2][active2]
+                    r0_2 = _h5_r_scaling2 * svdw2[active2]
+                    cc_2 = _h5_w_scaling2 * svdw2[active2] * _GAUSS_WIDTH_FACTOR
+                    gauss2 = k_XH2[active2] * torch.exp(
+                        -0.5 * (r_h5_2 - r0_2) ** 2 / cc_2**2
+                    )
+                    dgauss2 = -gauss2 * (r_h5_2 - r0_2) / cc_2**2
+
+                    idx_f = torch.where(h5_mask_all2.flatten())[0]
+                    idx_a = idx_f[active2]
+                    G_full.view(-1)[idx_a] = gauss2
+                    Gp_full.view(-1)[idx_a] = dgauss2
+
+            # h5_active_mask marks pairs where G_full != 0
+            h5_active_mask = G_full.abs() > 0.0
+
+            # For H5 pairs: force term is -dγ_H5/dr * DC
+            #   = [-γ'*(1+G) - γ*G' + G'/r - G/r²] * DC
+            # For non-H5 pairs: force term is -dγ/dr * DC (same as undamped)
+            # So the damped force = undamped force (for non-H5) + H5 force (for H5)
+
+            # Same-element: no H5 (H5 is exactly-one-H → always diff element)
+            FORCE_damped = FORCE_undamped.clone()
+            # Note: same-element is not affected by H5.
+
+            # Different-element H5 correction:
+            # extra_force = sum(qq * [-γ'*G - γ*G' + G'/r - G/r²] * DC) for H5 pairs
+            h5_diff_mask = h5_active_mask & different_element_mask
+            if h5_diff_mask.any():
+                # Undamped -dγ/dr for diff element is what's already in FORCE_undamped
+                # We need to ADD the extra H5 terms:
+                #   undamped: -γ'  →  damped: -γ'*(1+G) - γ*G' + G'/r - G/r²
+                #   extra = -γ'*G - γ*G' + G'/r - G/r²
+                FORCE_h5_extra = torch.sum(
+                    (
+                        charges[:, None]
+                        * charges[nbr_inds.clamp(min=0)]
+                        * (
+                            # The "undamped" diff-elem force kernel = (-dγ/dr)
+                            # We need extra = (-dγ/dr)*G + (-γ)*G' + G'/r - G/r²
+                            (
+                                (
+                                    SA
+                                    * (
+                                        SB
+                                        - torch.where(
+                                            different_element_mask, SC / MAGR, zero
+                                        )
+                                    )
+                                    - torch.where(
+                                        different_element_mask, SC / MAGR2, zero
+                                    )
+                                )
+                                + (
+                                    SD
+                                    * (
+                                        SE
+                                        - torch.where(
+                                            different_element_mask, SF / MAGR, zero
+                                        )
+                                    )
+                                    - torch.where(
+                                        different_element_mask, SF / MAGR2, zero
+                                    )
+                                )
+                            )
+                            * G_full
+                            + (-gamma_diff) * Gp_full
+                            + torch.where(
+                                h5_diff_mask, Gp_full / MAGR - G_full / MAGR2, zero
+                            )
+                        )
+                    ).unsqueeze(2)
+                    * DC
+                    * h5_diff_mask.unsqueeze(2),
+                    dim=1,
+                )
+                FORCE_damped = FORCE_damped + FORCE_h5_extra
+        else:
+            FORCE_damped = FORCE_undamped
+
+        # force_corr = FORCE_undamped - FORCE_damped
+        # In ewald_real_screening: FORCE += screening terms (positive addition)
+        # The screening terms are (-dγ/dr) summed.  The correction should
+        # add the undamped screening and subtract the damped screening.
+        # undamped screening was already applied → we correct by (damped - undamped)
+        # Wait — ewald_real_screening already added +(-dγ_undamped/dr).
+        # We want it to have been +(-dγ_damped/dr).
+        # So correction = [+(-dγ_damped/dr)] - [+(-dγ_undamped/dr)] = FORCE_damped - FORCE_undamped
+        force_corr = (FORCE_damped - FORCE_undamped).T  # (N,3) → (3,N)
+
+    # Apply CONV_FACTOR (same as calculate_PME_ewald does for the base terms)
+    energy_corr = energy_corr * CONV_FACTOR
+    if dq_corr is not None:
+        dq_corr = dq_corr * CONV_FACTOR
+    if force_corr is not None:
+        force_corr = force_corr * CONV_FACTOR
+
+    return energy_corr, force_corr, dq_corr
 
 
 def ewald_real_matrix(

@@ -59,11 +59,11 @@ def prepare_structure(device):
         "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
         "cutoff": 10.0,  # Coulomb cutoff
         "h0_cutoff": 8.0,  # Coulomb cutoff
-        "graph_cutoff": 5.0,  # Graph cutoff
+        "graph_cutoff": 4.0,  # Graph cutoff
         "PME_order": 4,  # Ignored for FULL coulomb method
         "SCF_MAX_ITER": 100,  # Maximum number of _scf iterations
         "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
-        "SCF_ALPHA": 0.06,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
+        "SCF_ALPHA": 0.1,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
         "KRYLOV_MAXRANK": 10,  # Maximum Krylov subspace rank
         "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in _scf
         "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD _scf
@@ -76,13 +76,17 @@ def prepare_structure(device):
     # filename = 'COORD_8WATER.xyz'            # Solvated acetylacetone and glycine molecules in H20, Na, Cl
     # cell = torch.tensor([30.0, 30.0, 30.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
-    # filename = "water_30.xyz"  # Solvated acetylacetone and glycine molecules in H20, Na, Cl)
-    # cell = torch.tensor([35.0, 35.0, 35.0], device=device)  # Simulation box size in Angstroms. Only cubic boxes supported for now.
-
-    filename = "RDX_1K.xyz"
+    filename = (
+        "water_30.xyz"  # Solvated acetylacetone and glycine molecules in H20, Na, Cl)
+    )
     cell = torch.tensor(
-        [22.886, 21.222, 26.312], device=device
+        [35.0, 35.0, 35.0], device=device
     )  # Simulation box size in Angstroms. Only cubic boxes supported for now.
+
+    # filename = "RDX_1K.xyz"
+    # cell = torch.tensor(
+    #     [22.886, 21.222, 26.312], device=device
+    # )  # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
     const = Constants(
         filename,
@@ -117,10 +121,11 @@ def init_processes(backend):
     # choose device for collectives
     if backend == "nccl":
         device = torch.device(f"cuda:{LOCAL_RANK}")
+        torch.cuda.set_device(device)
     else:
         device = torch.device("cpu")
 
-    nparts = 1
+    nparts = 8
     structure, dftorch_params = prepare_structure(device)
     if dftorch_params["cutoff"] < dftorch_params["graph_cutoff"]:
         raise ValueError(
@@ -168,7 +173,7 @@ def init_processes(backend):
             nl_init.cpu().numpy(),
             dftorch_params["graph_cutoff"],
             MAX_DEG,
-            structure.LBox.cpu().numpy(),  # important that LBOX is not a cell
+            structure.cell.diag().cpu().numpy(),  # important that LBOX is not a cell
         )
         parts = graph_partition(
             structure,

@@ -302,7 +302,6 @@ def ewald_real_space_vectorized(
     # where r₀ = s_r·(rVdW_X + rVdW_H), c = s_w·(rVdW_X + rVdW_H)·gaussWidthFactor
     # Mutually exclusive with h_damp_exp (DFTB+ convention).
     _apply_h5 = False
-    print(h5_params, h_damp_exp)
     if h5_params is not None and h_damp_exp is not None:
         import warnings
 

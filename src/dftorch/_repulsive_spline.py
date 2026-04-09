@@ -283,15 +283,15 @@ def get_repulsion_energy_batch(
 
     # ── spline gradient (Horner, Ha/Bohr) ────────────────────────────
     # now, it's Ha/Bohr
-    a = coeffs
-    dpoly = 5.0 * a[:, 5]
-    dpoly = dpoly * dx + 4.0 * a[:, 4]
-    dpoly = dpoly * dx + 3.0 * a[:, 3]
-    dpoly = dpoly * dx + 2.0 * a[:, 2]
-    dVr_spline = dpoly * dx + a[:, 1]  # Ha/Bohr
+    dpoly = 5.0 * coeffs[:, 5]
+    dpoly = dpoly * dx + 4.0 * coeffs[:, 4]
+    dpoly = dpoly * dx + 3.0 * coeffs[:, 3]
+    dpoly = dpoly * dx + 2.0 * coeffs[:, 2]
+    dVr_spline = dpoly * dx + coeffs[:, 1]  # Ha/Bohr
 
     # ── exponential gradient (Ha/Bohr) ───────────────────────────────
-    dVr_exp = -a[:, 0] * torch.exp(exp_arg)
+    a_exp = close_exp_tensor[sel_IJ]  # (P, 3)
+    dVr_exp = -a_exp[:, 0] * torch.exp(exp_arg)
 
     # ── select per pair ───────────────────────────────────────────────
     dVr_dR = torch.where(use_exp, dVr_exp, dVr_spline)

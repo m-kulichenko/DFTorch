@@ -10,7 +10,10 @@ __pycache__/
 experiments/*.ipynb
 experiments/*.xyz
 experiments/*.pqr
+
 !experiments/1_tutorial.ipynb
+!experiments/2_tutorial_freq.ipynb
+
 **/.ipynb_checkpoints/
 personal_github
 /experiments/sk_orig/ptbp/complete_set/

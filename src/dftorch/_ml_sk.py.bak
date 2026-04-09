@@ -1,0 +1,616 @@
+"""
+ML-based Slater-Koster integral prediction module.
+
+Provides a drop-in replacement for tabulated cubic-spline SKF coefficients
+using a trained SKGraphNet model.  The function ``ml_bond_integrals``
+evaluates all 10 SK channels (and their radial derivatives) for every
+neighbor pair in a single batched forward pass through the GNN, and
+packs the results into a fake ``coeffs_tensor`` that the existing
+``Slater_Koster_Pair_SKF_vectorized`` routine can consume without
+modification.
+
+Usage
+-----
+In ``H0_and_S_vectorized`` (or its batch variant), replace the spline
+look-up by calling::
+
+    coeffs_ml, idx_ml, dx_ml = ml_bond_integrals(
+        ml_model, ml_Z_to_idx, TYPE,
+        neighbor_I, neighbor_J,
+        dR_mskd, r_cut_dict,
+        const, device,
+    )
+
+and then pass ``coeffs_ml``, ``idx_ml``, ``dx_ml`` instead of
+``coeffs_tensor``, ``idx``, ``dx`` to the two
+``Slater_Koster_Pair_SKF_vectorized`` calls (for SH_shift=0 and 1).
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+try:
+    from torch_geometric.nn import TransformerConv, global_add_pool
+    from torch_geometric.data import Data, Batch
+
+    _HAS_PYG = True
+except ImportError:
+    _HAS_PYG = False
+
+
+# ── Channel ordering (same as in _bond_integral.py) ──────────────────────
+# Within each 10-channel block the layout is:
+#   0: dd_sigma, 1: dd_pi, 2: dd_delta,
+#   3: pd_sigma, 4: pd_pi,
+#   5: pp_sigma, 6: pp_pi,
+#   7: sd_sigma,
+#   8: sp_sigma,
+#   9: ss_sigma
+# Block 0 = Hamiltonian, Block 1 = Overlap  →  total 20 channels.
+#
+# The ML model's training data uses the same ordering via
+# ``parse_channel_name`` which maps (is_H, l1, l2, bond) → row in the
+# all_rows table.  We enumerate channels as (l1, l2, bond) tuples
+# and assign each the canonical index above.
+
+_CHANNEL_MAP: dict[tuple[int, int, int], int] = {
+    #  (l1, l2, bond): index inside a 10-channel block
+    (2, 2, 0): 0,  # dd_sigma
+    (2, 2, 1): 1,  # dd_pi
+    (2, 2, 2): 2,  # dd_delta
+    (1, 2, 0): 3,  # pd_sigma
+    (1, 2, 1): 4,  # pd_pi
+    (1, 1, 0): 5,  # pp_sigma
+    (1, 1, 1): 6,  # pp_pi
+    (0, 2, 0): 7,  # sd_sigma
+    (0, 1, 0): 8,  # sp_sigma
+    (0, 0, 0): 9,  # ss_sigma
+}
+
+# Inverse: index → (l1, l2, bond)
+_INDEX_TO_CHANNEL = {v: k for k, v in _CHANNEL_MAP.items()}
+
+
+# ── Model definition (must match the notebook exactly) ───────────────────
+class SKGraphNet(nn.Module):
+    """
+    Dual-head GNN for Slater-Koster integrals (Hamiltonian + Overlap).
+
+    Architecture
+    ------------
+    * Shared backbone: Embedding → Linear → N × TransformerConv (residual +
+      LayerNorm + SiLU)
+    * Symmetric readout: ``global_add_pool`` over 2-node graphs
+    * Two MLP heads: ``head_H`` (Hamiltonian) and ``head_S`` (Overlap)
+
+    The model predicts *bare* integral values; a cosine cutoff is applied
+    externally::
+
+        V = V_bare × ½(1 + cos(π r / r_cut))
+    """
+
+    def __init__(
+        self,
+        n_species: int,
+        embed_dim: int = 8,
+        hidden: int = 64,
+        n_conv: int = 3,
+        n_heads: int = 4,
+    ):
+        super().__init__()
+        if not _HAS_PYG:
+            raise ImportError(
+                "torch_geometric is required for SKGraphNet. "
+                "Install it with: pip install torch_geometric"
+            )
+        self.embed = nn.Embedding(n_species, embed_dim)
+
+        node_in = embed_dim + 3  # embed(Z) + one_hot(l)
+        edge_dim = 4  # r_norm(1) + bond_oh(3)
+
+        self.node_proj = nn.Linear(node_in, hidden)
+
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for _ in range(n_conv):
+            self.convs.append(
+                TransformerConv(
+                    hidden,
+                    hidden // n_heads,
+                    heads=n_heads,
+                    edge_dim=edge_dim,
+                    dropout=0.0,
+                )
+            )
+            self.norms.append(nn.LayerNorm(hidden))
+
+        def _make_head():
+            head = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.SiLU(),
+                nn.Linear(hidden, 1),
+            )
+            nn.init.zeros_(head[-1].bias)
+            nn.init.normal_(head[-1].weight, std=0.01)
+            return head
+
+        self.head_H = _make_head()
+        self.head_S = _make_head()
+
+    def forward(self, batch):
+        """Return ``(pred_H, pred_S)`` each of shape ``(B,)``."""
+        x = torch.cat([self.embed(batch.z), batch.l_oh], dim=-1)
+        x = self.node_proj(x)
+        for conv, norm in zip(self.convs, self.norms):
+            x = x + conv(x, batch.edge_index, batch.edge_attr)
+            x = norm(x)
+            x = F.silu(x)
+        g = global_add_pool(x, batch.batch)
+        return self.head_H(g).squeeze(-1), self.head_S(g).squeeze(-1)
+
+
+# ── Helper: build PyG batch ──────────────────────────────────────────────
+def _build_pyg_batch(
+    Z1_idx: torch.Tensor,
+    Z2_idx: torch.Tensor,
+    l1_oh: torch.Tensor,
+    l2_oh: torch.Tensor,
+    bond_oh: torch.Tensor,
+    r_norm: torch.Tensor,
+) -> "Batch":
+    """Construct a PyG ``Batch`` of 2-node graphs from flat tensors."""
+    B = Z1_idx.shape[0]
+    device = Z1_idx.device
+    z = torch.stack([Z1_idx, Z2_idx], dim=1).reshape(-1)
+    l_oh = torch.stack([l1_oh, l2_oh], dim=1).reshape(-1, 3)
+    base = torch.arange(B, device=device) * 2
+    src = torch.cat([base, base + 1])
+    dst = torch.cat([base + 1, base])
+    edge_index = torch.stack([src, dst])
+    edge_feat = torch.cat([r_norm, bond_oh], dim=-1)
+    edge_attr = edge_feat.repeat(2, 1)
+    batch_vec = torch.arange(B, device=device).repeat_interleave(2)
+    return Batch(z=z, l_oh=l_oh, edge_index=edge_index, edge_attr=edge_attr, batch=batch_vec)
+
+
+# ── Load a trained model ─────────────────────────────────────────────────
+def load_ml_sk_model(
+    path: str | Path,
+    device: torch.device | str = "cpu",
+) -> Tuple[SKGraphNet, dict, int]:
+    """Load a saved SKGraphNet checkpoint.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the ``.pt`` checkpoint file.
+    device : torch.device or str
+        Device to load the model onto.
+
+    Returns
+    -------
+    model : SKGraphNet
+        The model in ``eval()`` mode.
+    Z_to_idx : dict
+        Mapping from atomic number Z to model embedding index.
+    n_species : int
+        Number of species the model was trained on.
+    """
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    cfg = checkpoint["model_config"]
+    n_species = checkpoint["n_species"]
+    model = SKGraphNet(
+        n_species,
+        embed_dim=cfg["embed_dim"],
+        hidden=cfg["hidden"],
+        n_conv=cfg["n_conv"],
+        n_heads=cfg["n_heads"],
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(torch.get_default_dtype())   # match DFTB dtype (float64)
+    model.eval()
+    Z_to_idx = checkpoint["Z_to_idx"]
+    return model, Z_to_idx, n_species
+
+
+# ── Core: evaluate ML bond integrals for all pairs ───────────────────────
+@torch.no_grad()
+
+def build_pair_type_rcut(skfpath: str, TYPE: torch.Tensor, const) -> torch.Tensor:
+    """Build per-pair-type r_cut tensor by reading SKF file headers.
+
+    The training code computes r_cut_ang = npts * dr * BOHR_TO_ANG for each
+    pair type.  This function replicates that by reading only the first line
+    of each SKF file.
+
+    Parameters
+    ----------
+    skfpath : str
+        Path to the SKF directory (e.g. 'sk_orig/3ob-3-1/').
+    TYPE : torch.Tensor
+        Atom type indices for the structure (used to enumerate pair types).
+    const : object
+        Constants container (needs const.label).
+
+    Returns
+    -------
+    pair_type_rcut : torch.Tensor, shape (n_pair_types,)
+        Per-pair-type cutoff in Angstrom.
+    """
+    import os
+    from ._bond_integral import ordered_pairs_from_TYPE
+
+    BOHR_TO_ANG = 0.52917721
+
+    _, _, label_list = ordered_pairs_from_TYPE(TYPE)
+    n_pt = len(label_list)
+    rcut = torch.zeros(n_pt, dtype=torch.float64)
+
+    for i, pair_label in enumerate(label_list):
+        skf_file = os.path.join(skfpath, f"{pair_label}.skf")
+        if os.path.isfile(skf_file):
+            with open(skf_file) as f:
+                hdr = f.readline().replace(",", " ").split()
+            dr = float(hdr[0])
+            npts = int(hdr[1])
+            rcut[i] = npts * dr * BOHR_TO_ANG
+        else:
+            rcut[i] = 10.0  # fallback
+    return rcut
+
+
+def ml_bond_integrals(
+    model: SKGraphNet,
+    Z_to_idx: dict,
+    TYPE: torch.Tensor,
+    neighbor_I: torch.Tensor,
+    neighbor_J: torch.Tensor,
+    IJ_pair_type: torch.Tensor,
+    JI_pair_type: torch.Tensor,
+    dR_mskd: torch.Tensor,
+    R_orb: torch.Tensor,
+    const,
+    device: torch.device | str = "cpu",
+    r_cut_default: float = 10.0,
+    R_tensor: torch.Tensor = None,
+    pair_type_rcut: torch.Tensor = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Evaluate all 10 SK channels (H and S) for every neighbor pair.
+
+    The function constructs a fake ``coeffs_tensor`` where each pair is
+    its own "pair type" and each pair's "spline interval" index is 0.
+    The four cubic coefficients ``[a0, a1, 0, 0]`` encode the ML-predicted
+    value (``a0``) and radial derivative (``a1``) so that the downstream
+    spline evaluator ``a0 + a1*dx`` (with ``dx=0``) gives the correct
+    value and derivative.
+
+    Parameters
+    ----------
+    model : SKGraphNet
+        A trained dual-head model in eval mode.
+    Z_to_idx : dict
+        ``{Z: embedding_index}`` from training.
+    TYPE : torch.Tensor, shape (Nats,)
+        Atomic-number type tensor for the structure.
+    neighbor_I, neighbor_J : torch.Tensor, shape (P,)
+        Atom indices for the pair list (already masked for valid neighbors).
+    IJ_pair_type, JI_pair_type : torch.Tensor, shape (P,)
+        Original pair-type indices (used only for sizing; not used for
+        ML prediction).
+    dR_mskd : torch.Tensor, shape (P,)
+        Pair distances in Angstrom.
+    R_orb : torch.Tensor, shape (Nr,)
+        Radial grid (needed only for bookkeeping of the original interface).
+    const : object
+        Constants container — must provide ``const.n_orb``.
+    device : torch.device or str
+        Device for computation.
+    r_cut_default : float
+        Default cutoff in Angstrom if not available from SKF files.
+
+    Returns
+    -------
+    ml_HS_IJ : torch.Tensor, shape (P, 20)
+        ML-predicted values (in eV) for the IJ direction.
+        Channels 0-9: H integrals, 10-19: S integrals.
+    ml_HS_IJ_dR : torch.Tensor, shape (P, 20)
+        Radial derivatives d(value)/dR in eV/Ang for IJ direction.
+    ml_HS_JI : torch.Tensor, shape (P, 20)
+        ML-predicted values (in eV) for the JI (reverse) direction.
+    ml_HS_JI_dR : torch.Tensor, shape (P, 20)
+        Radial derivatives d(value)/dR in eV/Ang for JI direction.
+    """
+    BOHR_TO_ANG = 0.52917721
+
+    P = dR_mskd.shape[0]
+    dtype = dR_mskd.dtype
+
+    # Atom types (atomic numbers) for each pair
+    Z_I = TYPE[neighbor_I]  # (P,)
+    Z_J = TYPE[neighbor_J]  # (P,)
+
+    # Orbital counts for each pair atom
+    n_orb_I = const.n_orb[Z_I]  # (P,)  1, 4, or 9
+    n_orb_J = const.n_orb[Z_J]  # (P,)
+
+    # Max angular momentum: n_orb=1 → l_max=0(s), n_orb=4 → l_max=1(p), n_orb=9 → l_max=2(d)
+    l_max_I = torch.zeros_like(n_orb_I)
+    l_max_I[n_orb_I == 4] = 1
+    l_max_I[n_orb_I == 9] = 2
+    l_max_J = torch.zeros_like(n_orb_J)
+    l_max_J[n_orb_J == 4] = 1
+    l_max_J[n_orb_J == 9] = 2
+
+    # dR_mskd and R_orb are already in Angstrom (coordinates read in Ang,
+    # R_orb grid converted to Ang in _bond_integral.py)
+    r_ang = dR_mskd  # already Angstrom  (P,)
+
+    # Determine r_cut per pair (in Angstrom).
+    # Each SKF pair type has a different cutoff: r_cut = npts * dr * BOHR_TO_ANG.
+    # If a per-pair-type r_cut lookup is available (from reading SKF headers),
+    # use it; otherwise fall back to R_orb[-1].
+    if pair_type_rcut is not None:
+        r_cut_tensor = pair_type_rcut.to(IJ_pair_type.device)[IJ_pair_type]  # (P,) per-pair r_cut in Å
+    elif R_tensor is not None:
+        # Approximate: use max nonzero R_tensor entry per pair type.
+        # Note: R_tensor has +50 padding, so this overestimates by ~8%.
+        n_pt = R_tensor.shape[0]
+        pt_rcut = torch.zeros(n_pt, dtype=dtype, device=dR_mskd.device)
+        for pt_i in range(n_pt):
+            nz = R_tensor[pt_i].nonzero(as_tuple=True)[0]
+            pt_rcut[pt_i] = R_tensor[pt_i, nz[-1]].item() if len(nz) > 0 else R_orb[-1].item()
+        r_cut_tensor = pt_rcut[IJ_pair_type]
+    else:
+        r_cut_ang = R_orb[-1].item()  # fallback: single global cutoff
+        r_cut_tensor = torch.full((P,), r_cut_ang, dtype=dtype, device=dR_mskd.device)
+
+    # Cosine cutoff
+    cos_cut = 0.5 * (1.0 + torch.cos(math.pi * r_ang / r_cut_tensor))
+    cos_cut = cos_cut.clamp(min=0.0)
+
+    # d(cos_cut)/dR  (R in Angstrom, so derivative is w.r.t. Angstrom)
+    dcos_cut_dr_ang = -0.5 * math.pi / r_cut_tensor * torch.sin(
+        math.pi * r_ang / r_cut_tensor
+    )
+    dcos_cut_dR = dcos_cut_dr_ang  # derivative w.r.t. Angstrom
+
+    # ── Enumerate all (channel, pair) queries ────────────────────────────
+    # For each pair we need channels whose l1 ≤ l_max_I and l2 ≤ l_max_J.
+    # We build flat lists of (pair_idx, channel_idx, Z1_idx, Z2_idx, l1, l2, bond, r, r_cut).
+
+    pair_indices = []
+    channel_indices = []
+    Z1_idx_list = []
+    Z2_idx_list = []
+    l1_list = []
+    l2_list = []
+    bond_list = []
+
+    for ch_idx, (l1, l2, bond) in _INDEX_TO_CHANNEL.items():
+        # Which pairs have both atoms with sufficient angular momentum?
+        mask = (l_max_I >= l1) & (l_max_J >= l2)
+        if not mask.any():
+            continue
+        idxs = mask.nonzero(as_tuple=True)[0]
+        n = idxs.shape[0]
+        pair_indices.append(idxs)
+        channel_indices.append(torch.full((n,), ch_idx, dtype=torch.long, device=device))
+        Z1_idx_list.append(
+            torch.tensor(
+                [Z_to_idx.get(int(Z_I[k].item()), 0) for k in idxs],
+                dtype=torch.long,
+                device=device,
+            )
+        )
+        Z2_idx_list.append(
+            torch.tensor(
+                [Z_to_idx.get(int(Z_J[k].item()), 0) for k in idxs],
+                dtype=torch.long,
+                device=device,
+            )
+        )
+        l1_list.append(torch.full((n,), l1, dtype=torch.long, device=device))
+        l2_list.append(torch.full((n,), l2, dtype=torch.long, device=device))
+        bond_list.append(torch.full((n,), bond, dtype=torch.long, device=device))
+
+    # Concatenate all queries
+    all_pair_idx = torch.cat(pair_indices)      # (Q,)
+    all_ch_idx = torch.cat(channel_indices)     # (Q,)
+    all_Z1_idx = torch.cat(Z1_idx_list)         # (Q,)
+    all_Z2_idx = torch.cat(Z2_idx_list)         # (Q,)
+    all_l1 = torch.cat(l1_list)                  # (Q,)
+    all_l2 = torch.cat(l2_list)                  # (Q,)
+    all_bond = torch.cat(bond_list)              # (Q,)
+
+    Q = all_pair_idx.shape[0]
+
+    # Build model input tensors (model is in default dtype, matching DFTB)
+    all_r_ang = r_ang[all_pair_idx]              # (Q,)
+    all_r_cut = r_cut_tensor[all_pair_idx]       # (Q,)
+    all_r_norm = (all_r_ang / all_r_cut).unsqueeze(1)  # (Q, 1)
+    all_l1_oh = F.one_hot(all_l1, num_classes=3).to(dtype)   # (Q, 3)
+    all_l2_oh = F.one_hot(all_l2, num_classes=3).to(dtype)   # (Q, 3)
+    all_bond_oh = F.one_hot(all_bond, num_classes=3).to(dtype)  # (Q, 3)
+
+    # -- Chunked forward pass with autograd derivatives -----------------
+    # 1 fwd + 1 bwd per chunk instead of 3 fwd passes (FD).
+    CHUNK = 2048
+
+    pred_H = torch.empty(Q, dtype=dtype, device=dR_mskd.device)
+    pred_S = torch.empty(Q, dtype=dtype, device=dR_mskd.device)
+    dH_dR  = torch.empty(Q, dtype=dtype, device=dR_mskd.device)
+    dS_dR  = torch.empty(Q, dtype=dtype, device=dR_mskd.device)
+
+    for start in range(0, Q, CHUNK):
+        end = min(start + CHUNK, Q)
+        sl = slice(start, end)
+
+        z1 = all_Z1_idx[sl];  z2 = all_Z2_idx[sl]
+        l1o = all_l1_oh[sl];  l2o = all_l2_oh[sl]
+        bo  = all_bond_oh[sl]
+
+        # r_a requires grad so autograd can differentiate through the model
+        r_a = all_r_ang[sl].detach().clone().requires_grad_(True)
+        r_c = all_r_cut[sl]
+        r_n = (r_a / r_c).unsqueeze(1)
+
+        b = _build_pyg_batch(z1, z2, l1o, l2o, bo, r_n).to(device)
+        H_raw, S_raw = model(b)
+
+        cc  = cos_cut[all_pair_idx[sl]]
+        dcc = dcos_cut_dR[all_pair_idx[sl]]
+
+        dH_raw_dr, = torch.autograd.grad(
+            H_raw, r_a, grad_outputs=torch.ones_like(H_raw),
+            retain_graph=True, create_graph=False,
+        )
+        dS_raw_dr, = torch.autograd.grad(
+            S_raw, r_a, grad_outputs=torch.ones_like(S_raw),
+            create_graph=False,
+        )
+
+        pred_H[sl] = (H_raw * cc).detach().to(dR_mskd.device)
+        pred_S[sl] = (S_raw * cc).detach().to(dR_mskd.device)
+        dH_dR[sl]  = (dH_raw_dr * cc + H_raw.detach() * dcc).detach().to(dR_mskd.device)
+        dS_dR[sl]  = (dS_raw_dr * cc + S_raw.detach() * dcc).detach().to(dR_mskd.device)
+
+    # ── Unit conversion ────────────────────────────────────────────────
+    # The ML model was trained on raw SKF column values (Hartree for both
+    # H and S channels).  However, the spline-based coeffs_tensor stores
+    # all 20 columns multiplied by HA_TO_EV = 27.21138625 (see
+    # _bond_integral.read_skf_table).  The downstream SK rotation code
+    # and the ``S = S / 27.21138625`` post-processing in _h0ands.py
+    # expect this eV convention.  We therefore scale all ML predictions
+    # (values and derivatives) by HA_TO_EV before packing.
+    HA_TO_EV = 27.21138625
+    pred_H *= HA_TO_EV
+    pred_S *= HA_TO_EV
+    dH_dR  *= HA_TO_EV
+    dS_dR  *= HA_TO_EV
+
+    # ── Pack into direct (P, 20) tensors ────────────────────────────────
+    # ml_HS_IJ[p, ch] = value for pair p, channel ch (0..9 H, 10..19 S), in eV
+    # ml_HS_IJ_dR[p, ch] = d(value)/dR in eV/Ang
+    ml_HS_IJ = torch.zeros((P, 20), dtype=dtype, device=dR_mskd.device)
+    ml_HS_IJ_dR = torch.zeros((P, 20), dtype=dtype, device=dR_mskd.device)
+
+    # Scatter IJ H channels (0..9)
+    ml_HS_IJ[all_pair_idx, all_ch_idx] = pred_H
+    ml_HS_IJ_dR[all_pair_idx, all_ch_idx] = dH_dR
+    # Scatter IJ S channels (10..19)
+    ml_HS_IJ[all_pair_idx, all_ch_idx + 10] = pred_S
+    ml_HS_IJ_dR[all_pair_idx, all_ch_idx + 10] = dS_dR
+
+    # ── Build JI direction (swap atoms) ──────────────────────────────────
+    ji_pair_indices = []
+    ji_channel_indices = []
+    ji_Z1_idx_list = []
+    ji_Z2_idx_list = []
+    ji_l1_list = []
+    ji_l2_list = []
+    ji_bond_list = []
+
+    for ch_idx, (l1v, l2v, bond_v) in _INDEX_TO_CHANNEL.items():
+        # For JI direction: swap atoms -> l1=l2v, l2=l1v, Z1=Z_J, Z2=Z_I
+        mask = (l_max_J >= l1v) & (l_max_I >= l2v)
+        if not mask.any():
+            continue
+        idxs = mask.nonzero(as_tuple=True)[0]
+        n = idxs.shape[0]
+        ji_pair_indices.append(idxs)
+        ji_channel_indices.append(
+            torch.full((n,), ch_idx, dtype=torch.long, device=device)
+        )
+        ji_Z1_idx_list.append(
+            torch.tensor(
+                [Z_to_idx.get(int(Z_J[k].item()), 0) for k in idxs],
+                dtype=torch.long, device=device,
+            )
+        )
+        ji_Z2_idx_list.append(
+            torch.tensor(
+                [Z_to_idx.get(int(Z_I[k].item()), 0) for k in idxs],
+                dtype=torch.long, device=device,
+            )
+        )
+        ji_l1_list.append(torch.full((n,), l1v, dtype=torch.long, device=device))
+        ji_l2_list.append(torch.full((n,), l2v, dtype=torch.long, device=device))
+        ji_bond_list.append(torch.full((n,), bond_v, dtype=torch.long, device=device))
+
+    ml_HS_JI = torch.zeros((P, 20), dtype=dtype, device=dR_mskd.device)
+    ml_HS_JI_dR = torch.zeros((P, 20), dtype=dtype, device=dR_mskd.device)
+
+    if ji_pair_indices:
+        ji_all_pair_idx = torch.cat(ji_pair_indices)
+        ji_all_ch_idx = torch.cat(ji_channel_indices)
+        ji_all_Z1_idx = torch.cat(ji_Z1_idx_list)
+        ji_all_Z2_idx = torch.cat(ji_Z2_idx_list)
+        ji_all_l1 = torch.cat(ji_l1_list)
+        ji_all_l2 = torch.cat(ji_l2_list)
+        ji_all_bond = torch.cat(ji_bond_list)
+
+        Q_ji = ji_all_pair_idx.shape[0]
+        ji_r_ang = r_ang[ji_all_pair_idx]
+        ji_r_cut = r_cut_tensor[ji_all_pair_idx]
+        ji_l1_oh = F.one_hot(ji_all_l1, num_classes=3).to(dtype)
+        ji_l2_oh = F.one_hot(ji_all_l2, num_classes=3).to(dtype)
+        ji_bond_oh = F.one_hot(ji_all_bond, num_classes=3).to(dtype)
+
+        ji_pred_H = torch.empty(Q_ji, dtype=dtype, device=dR_mskd.device)
+        ji_pred_S = torch.empty(Q_ji, dtype=dtype, device=dR_mskd.device)
+        ji_dH_dR  = torch.empty(Q_ji, dtype=dtype, device=dR_mskd.device)
+        ji_dS_dR  = torch.empty(Q_ji, dtype=dtype, device=dR_mskd.device)
+
+        for start in range(0, Q_ji, CHUNK):
+            end = min(start + CHUNK, Q_ji)
+            sl = slice(start, end)
+
+            z1 = ji_all_Z1_idx[sl]; z2 = ji_all_Z2_idx[sl]
+            l1o = ji_l1_oh[sl]; l2o = ji_l2_oh[sl]
+            bo = ji_bond_oh[sl]
+
+            r_a = ji_r_ang[sl].detach().clone().requires_grad_(True)
+            r_c = ji_r_cut[sl]
+            r_n = (r_a / r_c).unsqueeze(1)
+
+            b = _build_pyg_batch(z1, z2, l1o, l2o, bo, r_n).to(device)
+            H_raw, S_raw = model(b)
+
+            cc  = cos_cut[ji_all_pair_idx[sl]]
+            dcc = dcos_cut_dR[ji_all_pair_idx[sl]]
+
+            dH_raw_dr, = torch.autograd.grad(
+                H_raw, r_a, grad_outputs=torch.ones_like(H_raw),
+                retain_graph=True, create_graph=False,
+            )
+            dS_raw_dr, = torch.autograd.grad(
+                S_raw, r_a, grad_outputs=torch.ones_like(S_raw),
+                create_graph=False,
+            )
+
+            ji_pred_H[sl] = (H_raw * cc).detach().to(dR_mskd.device)
+            ji_pred_S[sl] = (S_raw * cc).detach().to(dR_mskd.device)
+            ji_dH_dR[sl]  = (dH_raw_dr * cc + H_raw.detach() * dcc).detach().to(dR_mskd.device)
+            ji_dS_dR[sl]  = (dS_raw_dr * cc + S_raw.detach() * dcc).detach().to(dR_mskd.device)
+
+        # Unit conversion Hartree -> eV
+        ji_pred_H *= HA_TO_EV
+        ji_pred_S *= HA_TO_EV
+        ji_dH_dR  *= HA_TO_EV
+        ji_dS_dR  *= HA_TO_EV
+
+        # Scatter JI H channels (0..9)
+        ml_HS_JI[ji_all_pair_idx, ji_all_ch_idx] = ji_pred_H
+        ml_HS_JI_dR[ji_all_pair_idx, ji_all_ch_idx] = ji_dH_dR
+        # Scatter JI S channels (10..19)
+        ml_HS_JI[ji_all_pair_idx, ji_all_ch_idx + 10] = ji_pred_S
+        ml_HS_JI_dR[ji_all_pair_idx, ji_all_ch_idx + 10] = ji_dS_dR
+
+    return ml_HS_IJ, ml_HS_IJ_dR, ml_HS_JI, ml_HS_JI_dR

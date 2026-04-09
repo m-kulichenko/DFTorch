@@ -484,6 +484,8 @@ def kernel_update_lr(
                 screening=1,
                 calculate_forces=0,
                 calculate_dq=1,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
             )
         else:  # Direct Coulomb case
             d_CoulPot = C @ v
@@ -690,6 +692,8 @@ def kernel_update_lr_os(
                 screening=1,
                 calculate_forces=0,
                 calculate_dq=1,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
             )
         else:  # Direct Coulomb case
             d_CoulPot = C @ v_atomic
@@ -784,6 +788,7 @@ def kernel_update_lr_batch(
     CALPHA: torch.Tensor = None,
     dU_dq_gathered: Optional[torch.Tensor] = None,
     gbsa=None,
+    thirdorder=None,
 ) -> torch.Tensor:
     """
     Preconditioned low-rank Krylov update for _scf charge mixing.
@@ -878,9 +883,27 @@ def kernel_update_lr_batch(
         else:  # Direct Coulomb case
             d_CoulPot = torch.bmm(C[active_mask], v.unsqueeze(-1)).squeeze(-1)
 
-        # Add GBSA Born shift response (linear in v)
+        # Add GBSA Born shift response (linear in v, vectorised)
         if gbsa is not None:
-            d_CoulPot = d_CoulPot + gbsa.get_shifts(v)
+            # gbsa is a GBSABatch object — extract active born_mat rows
+            active_born = gbsa.born_mat[active_mask]  # (B_active, N, N)
+            active_sasa = gbsa.sasa[active_mask]  # (B_active, N)
+            hb = gbsa._hbond_strength  # (N,)
+            shift_v = 2.0 * active_sasa * hb.unsqueeze(0) * v  # (B_active, N)
+            shift_v = shift_v + torch.bmm(active_born, v.unsqueeze(-1)).squeeze(-1)
+            d_CoulPot = d_CoulPot + shift_v
+
+        # Add full DFTB3 off-diagonal linearized shift response
+        if thirdorder is not None:
+            # Subset gamma matrices for active batch elements
+            active_g3ab = thirdorder.gamma3ab[active_mask]  # (B_active, N, N)
+            active_g3ba = thirdorder.gamma3ba[active_mask]  # (B_active, N, N)
+            q_active = q[active_mask]  # (B_active, N)
+            g3ab_v = torch.bmm(active_g3ab, v.unsqueeze(-1)).squeeze(-1)
+            g3ab_q = torch.bmm(active_g3ab, q_active.unsqueeze(-1)).squeeze(-1)
+            dt1 = 2.0 * (g3ab_v * q_active + g3ab_q * v)
+            dt2 = 2.0 * torch.bmm(active_g3ba, (q_active * v).unsqueeze(-1)).squeeze(-1)
+            d_CoulPot = d_CoulPot + (1.0 / 3.0) * (dt1 + dt2)
 
         dq = calc_dq_batch(
             Hubbard_U_gathered[active_mask],

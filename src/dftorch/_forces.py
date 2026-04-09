@@ -1,7 +1,7 @@
 import torch
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect Ftot
 def Forces(
     H: torch.Tensor,
     Z: torch.Tensor,
@@ -218,7 +218,7 @@ def Forces(
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_spin(
     D: torch.Tensor,
     dS: torch.Tensor,
@@ -257,7 +257,7 @@ def forces_spin(
     return FSspinA / 2
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def Forces_PME(
     H: torch.Tensor,
     Z: torch.Tensor,
@@ -465,7 +465,7 @@ def Forces_PME(
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_shadow(
     H: torch.Tensor,
     Z: torch.Tensor,
@@ -689,7 +689,7 @@ def forces_shadow(
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_shadow_pme(
     H: torch.Tensor,
     Z: torch.Tensor,

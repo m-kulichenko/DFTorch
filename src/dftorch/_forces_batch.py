@@ -1,7 +1,7 @@
 import torch
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_batch(
     H: torch.Tensor,
     Z: torch.Tensor,
@@ -24,6 +24,7 @@ def forces_batch(
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
     thirdorder_shift: torch.Tensor = None,
+    solvation_shift: torch.Tensor = None,
 ):
     """
     Compute atomic forces for a DFTB-like total energy expression in gas phase
@@ -144,6 +145,8 @@ def forces_batch(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B, N)
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
     if thirdorder_shift is not None:
         CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)
@@ -215,7 +218,7 @@ def forces_batch(
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 
-@torch.compile
+# @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_shadow_batch(
     H: torch.Tensor,
     Z: torch.Tensor,
@@ -239,6 +242,7 @@ def forces_shadow_batch(
     dU_dq: torch.Tensor = None,
     verbose: bool = False,
     thirdorder_shift: torch.Tensor = None,
+    solvation_shift: torch.Tensor = None,
 ):
     """
     Computes atomic forces from a DFTB-like total energy expression.
@@ -368,6 +372,8 @@ def forces_shadow_batch(
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = torch.bmm(C, n.unsqueeze(-1)).squeeze(-1)  # (B, N)
+    if solvation_shift is not None:
+        CoulPot = CoulPot + solvation_shift
     if thirdorder_shift is not None:
         CoulPot = CoulPot + thirdorder_shift
     FScoul = torch.zeros((batch_size, 3, Nats), dtype=dtype, device=device)

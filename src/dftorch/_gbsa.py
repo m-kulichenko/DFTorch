@@ -12,7 +12,6 @@ Vectorized implementation -- all O(N^2) pair loops replaced by tensor ops.
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 
@@ -434,12 +433,12 @@ class GBSA:
     species : (N,) Atomic numbers (Z).
     device  : torch.device
     param_file : str   Path to DFTB+ GBSA parameter file.
-    alpb       : bool  Enable ALPB correction (default True).
+    alpb       : bool  Enable ALPB correction (default False).
     alpha_alpb : float ALPB alpha parameter (default 0.571412).
     """
 
     def __init__(
-        self, coords, species, device, param_file, alpb=True, alpha_alpb=0.571412
+        self, coords, species, device, param_file, alpb=False, alpha_alpb=0.571412
     ):
         self.device = device
         self.nAtom = coords.shape[0]
@@ -1231,12 +1230,281 @@ class GBSA:
         gradient += rad3.unsqueeze(1) * (vec @ aDeriv.T)
 
 
+# ===================================================================
+# Batched GBSA wrapper (stacks per-structure state for vectorized ops)
+# ===================================================================
+
+
+class GBSABatch:
+    """Batched wrapper around a list of per-structure GBSA objects.
+
+    Stacks the geometry-dependent internal tensors so that shift, energy,
+    and gradient operations can be performed with batched matrix ops
+    (``torch.bmm``, ``torch.einsum`` with a batch dim, etc.) instead of
+    Python for-loops over batch elements.
+
+    All public methods accept and return tensors with a leading batch
+    dimension *B*.
+
+    Parameters
+    ----------
+    gbsa_list : list[GBSA]
+        One GBSA object per batch element (already constructed).
+    """
+
+    def __init__(self, gbsa_list: list):
+        self.B = len(gbsa_list)
+        self._list = gbsa_list  # keep originals for rebuild
+        g0 = gbsa_list[0]
+        self.device = g0.device
+        self.N = g0.nAtom
+
+        # --- Stack geometry-dependent state into (B, ...) tensors ---
+        self.born_mat = torch.stack([g.born_mat for g in gbsa_list])  # (B,N,N)
+        self.sasa = torch.stack([g.sasa for g in gbsa_list])  # (B,N)
+        self.dsasa_dr = torch.stack([g.dsasa_dr for g in gbsa_list])  # (B,N,N,3)
+        self.born_rad = torch.stack([g.born_rad for g in gbsa_list])  # (B,N)
+        self.dbrdr = torch.stack([g.dbrdr for g in gbsa_list])  # (B,N,N,3)
+        self.coords = torch.stack([g.coords for g in gbsa_list])  # (B,N,3)
+
+        # --- Per-atom params (identical across batch — take from first) ---
+        self.vdw_rad = g0.vdw_rad  # (N,)
+        self.surf_tension = g0.surf_tension  # (N,)
+        self.hbond_str = g0.hbond_str  # (N,)
+        self.probe_radius = g0.probe_radius  # scalar
+        self.keps = g0.keps  # scalar
+        self.alpbet = g0.alpbet  # scalar
+        self.free_energy_shift = g0.free_energy_shift  # scalar
+
+    @classmethod
+    def from_single(cls, gbsa_single, batch_size):
+        """Create a GBSABatch by replicating a single GBSA object B times.
+
+        This avoids the expensive per-structure Born radii / SASA / Born matrix
+        computation when the geometry is nearly identical across batch elements
+        (e.g. finite-difference Hessian displacements of ~1e-4 Å).
+
+        Parameters
+        ----------
+        gbsa_single : GBSA
+            A single pre-computed GBSA object (reference geometry).
+        batch_size : int
+            Number of batch elements.
+        """
+        obj = cls.__new__(cls)
+        obj.B = batch_size
+        obj._list = [gbsa_single] * batch_size
+        obj.device = gbsa_single.device
+        obj.N = gbsa_single.nAtom
+
+        # Expand (N,...) → (B,N,...) by repeating the same reference data
+        obj.born_mat = (
+            gbsa_single.born_mat.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+        )
+        obj.sasa = gbsa_single.sasa.unsqueeze(0).expand(batch_size, -1).contiguous()
+        obj.dsasa_dr = (
+            gbsa_single.dsasa_dr.unsqueeze(0)
+            .expand(batch_size, -1, -1, -1)
+            .contiguous()
+        )
+        obj.born_rad = (
+            gbsa_single.born_rad.unsqueeze(0).expand(batch_size, -1).contiguous()
+        )
+        obj.dbrdr = (
+            gbsa_single.dbrdr.unsqueeze(0).expand(batch_size, -1, -1, -1).contiguous()
+        )
+        obj.coords = (
+            gbsa_single.coords.unsqueeze(0).expand(batch_size, -1, -1).contiguous()
+        )
+
+        # Per-atom params (identical)
+        obj.vdw_rad = gbsa_single.vdw_rad
+        obj.surf_tension = gbsa_single.surf_tension
+        obj.hbond_str = gbsa_single.hbond_str
+        obj.probe_radius = gbsa_single.probe_radius
+        obj.keps = gbsa_single.keps
+        obj.alpbet = gbsa_single.alpbet
+        obj.free_energy_shift = gbsa_single.free_energy_shift
+        return obj
+
+    # ---- helpers ----
+    @property
+    def _sasa_rad2(self):
+        return (self.vdw_rad + self.probe_radius) ** 2  # (N,)
+
+    @property
+    def _hbond_strength(self):
+        return self.hbond_str / self._sasa_rad2  # (N,)
+
+    # ─── SCF interface ────────────────────────────────────────────────
+
+    def get_shifts(self, q):
+        """Born shift for SCC.  q: (B, N) → shift: (B, N)."""
+        hb = self._hbond_strength  # (N,)
+        shift = 2.0 * self.sasa * hb.unsqueeze(0) * q  # (B,N)
+        shift = shift + torch.bmm(
+            self.born_mat,
+            q.unsqueeze(-1),  # (B,N,N) @ (B,N,1)
+        ).squeeze(-1)
+        return shift  # (B,N)
+
+    def get_shifts_single(self, q_single, idx):
+        """Shift for a single batch element (used in Krylov active-mask path).
+        q_single: (N,), idx: int → (N,)."""
+        return self._list[idx].get_shifts(q_single)
+
+    def get_energies(self, q):
+        """Returns e_gb (B,), e_sasa (B,)."""
+        shift = self.get_shifts(q)  # (B,N)
+        e_gb = 0.5 * (shift * q).sum(dim=1)  # (B,)
+        e_sasa = (self.surf_tension.unsqueeze(0) * self.sasa).sum(
+            dim=1
+        ) + self.free_energy_shift  # (B,)
+        return e_gb, e_sasa
+
+    # ─── Gradient interface ───────────────────────────────────────────
+
+    def get_sasa_gradients(self, q):
+        """SASA force.  q: (B,N) → (B,N,3) eV/Å."""
+        sasa_rad2 = self._sasa_rad2  # (N,)
+        weight = (
+            self.surf_tension.unsqueeze(0)
+            + (self.hbond_str / sasa_rad2).unsqueeze(0) * q**2
+        )  # (B,N)
+        # dsasa_dr: (B, N_i, N_k, 3)
+        # result[b,k,c] = -Σ_i weight[b,i] * dsasa_dr[b,i,k,c]
+        grad = -torch.einsum("bi,bikc->bkc", weight, self.dsasa_dr)  # (B,N,3)
+        return grad
+
+    def get_born_gradients(self, q):
+        """Born energy force.  q: (B,N) → (B,N,3) eV/Å."""
+        B, N = self.B, self.N
+        a = self.born_rad  # (B,N)
+        ke = KE
+
+        # Diagonal contribution to dE/d(born_rad)
+        dEdbr = -0.5 * self.keps * ke * q**2 / a**2  # (B,N)
+
+        # Upper-triangle pair indices (same for all batch elements)
+        I, J = torch.triu_indices(N, N, offset=1, device=self.device)  # noqa: E741
+
+        coords = self.coords  # (B,N,3)
+        vec = coords[:, I] - coords[:, J]  # (B,P,3)
+        r2 = (vec * vec).sum(dim=-1)  # (B,P)
+        qq = q[:, I] * q[:, J]  # (B,P)
+        aa = a[:, I] * a[:, J]  # (B,P)
+        dd = 0.25 * r2 / aa  # (B,P)
+        expd = torch.exp(-dd)  # (B,P)
+        fgb2 = r2 + aa * expd  # (B,P)
+        dfgb = torch.sqrt(fgb2)  # (B,P)
+        dfgb3 = 1.0 / (dfgb * fgb2)  # (B,P)
+
+        # Direct gradient dE/dr
+        ap_coeff = (1.0 - 0.25 * expd) * dfgb3 * self.keps * ke  # (B,P)
+        dG = (ap_coeff * qq).unsqueeze(-1) * vec  # (B,P,3)
+
+        grad = torch.zeros(B, N, 3, dtype=torch.float64, device=self.device)
+        # scatter via index_add_ per batch  — use expand trick
+        I_exp = I.unsqueeze(0).expand(B, -1)  # (B,P)
+        J_exp = J.unsqueeze(0).expand(B, -1)  # (B,P)
+        for c in range(3):
+            grad[:, :, c].scatter_add_(1, I_exp, -dG[:, :, c])
+            grad[:, :, c].scatter_add_(1, J_exp, dG[:, :, c])
+
+        # Chain rule through born radii
+        bp_coeff = -0.5 * expd * (1.0 + dd) * dfgb3 * self.keps * ke  # (B,P)
+        dEdbr.scatter_add_(1, I_exp, a[:, J] * bp_coeff * qq)
+        dEdbr.scatter_add_(1, J_exp, a[:, I] * bp_coeff * qq)
+
+        # grad += einsum("bi,bikc->bkc", dEdbr, dbrdr)
+        grad = grad + torch.einsum("bi,bikc->bkc", dEdbr, self.dbrdr)
+
+        if self.alpbet > 0.0:
+            self._add_aDet_gradient_batch(q, grad)
+
+        return -grad  # (B,N,3)
+
+    def _add_aDet_gradient_batch(self, q, gradient):
+        """ALPB aDet gradient — batched."""
+        for b in range(self.B):
+            self._list[b]._add_aDet_gradient(q[b], gradient[b])
+
+    # ─── Shadow (XL-BOMD) variants ────────────────────────────────────
+
+    def get_shadow_shifts(self, n):
+        """Shadow Born shift.  n: (B,N) → (B,N)."""
+        return self.get_shifts(n)
+
+    def get_shadow_energies(self, q, n):
+        """Shadow solvation energies.  Returns e_gb (B,), e_sasa (B,)."""
+        shift = self.get_shifts(n)  # (B,N)
+        e_gb = 0.5 * ((2.0 * q - n) * shift).sum(dim=1)  # (B,)
+        e_sasa = (self.surf_tension.unsqueeze(0) * self.sasa).sum(
+            dim=1
+        ) + self.free_energy_shift  # (B,)
+        return e_gb, e_sasa
+
+    def get_shadow_sasa_gradients(self, q, n):
+        """Shadow SASA force.  q,n: (B,N) → (B,N,3)."""
+        sasa_rad2 = self._sasa_rad2
+        weight = (
+            self.surf_tension.unsqueeze(0)
+            + (self.hbond_str / sasa_rad2).unsqueeze(0) * (2.0 * q - n) * n
+        )
+        return -torch.einsum("bi,bikc->bkc", weight, self.dsasa_dr)
+
+    def get_shadow_born_gradients(self, q, n):
+        """Shadow Born gradient.  q,n: (B,N) → (B,N,3)."""
+        B, N = self.B, self.N
+        a = self.born_rad
+        ke = KE
+        p = 2.0 * q - n
+
+        dEdbr = -0.5 * self.keps * ke * p * n / a**2
+
+        I, J = torch.triu_indices(N, N, offset=1, device=self.device)  # noqa: E741
+        coords = self.coords
+        vec = coords[:, I] - coords[:, J]
+        r2 = (vec * vec).sum(dim=-1)
+        pn_sym = 0.5 * (p[:, I] * n[:, J] + n[:, I] * p[:, J])
+        aa = a[:, I] * a[:, J]
+        dd = 0.25 * r2 / aa
+        expd = torch.exp(-dd)
+        fgb2 = r2 + aa * expd
+        dfgb = torch.sqrt(fgb2)
+        dfgb3 = 1.0 / (dfgb * fgb2)
+
+        ap_coeff = (1.0 - 0.25 * expd) * dfgb3 * self.keps * ke
+        dG = (ap_coeff * pn_sym).unsqueeze(-1) * vec
+
+        grad = torch.zeros(B, N, 3, dtype=torch.float64, device=self.device)
+        I_exp = I.unsqueeze(0).expand(B, -1)
+        J_exp = J.unsqueeze(0).expand(B, -1)
+        for c in range(3):
+            grad[:, :, c].scatter_add_(1, I_exp, -dG[:, :, c])
+            grad[:, :, c].scatter_add_(1, J_exp, dG[:, :, c])
+
+        bp_coeff = -0.5 * expd * (1.0 + dd) * dfgb3 * self.keps * ke
+        dEdbr.scatter_add_(1, I_exp, a[:, J] * bp_coeff * pn_sym)
+        dEdbr.scatter_add_(1, J_exp, a[:, I] * bp_coeff * pn_sym)
+
+        grad = grad + torch.einsum("bi,bikc->bkc", dEdbr, self.dbrdr)
+
+        if self.alpbet > 0.0:
+            self._add_shadow_aDet_gradient_batch(q, n, grad)
+
+        return -grad
+
+    def _add_shadow_aDet_gradient_batch(self, q, n, gradient):
+        """Shadow ALPB aDet gradient — batched."""
+        for b in range(self.B):
+            self._list[b]._add_shadow_aDet_gradient(q[b], n[b], gradient[b])
+
+
 # ---------------------------------------------------------------------------
 # Convenience function for ESDriver
 # ---------------------------------------------------------------------------
-def create_gbsa(
-    structure, device, solvent="water", param_file=None, solvation_model="alpb"
-):
+def create_gbsa(structure, device, param_file=None, solvation_model="gbsa"):
     """Create a GBSA/ALPB object from a DFTorch Structure.
 
     Parameters
@@ -1245,14 +1513,11 @@ def create_gbsa(
         DFTorch Structure object.
     device : torch.device
         Device for tensors.
-    solvent : str
-        Solvent name (used for auto-discovery of parameter files).
     param_file : str or None
-        Explicit path to parameter file.  If None, auto-discovered from
-        the SK directory using *solvation_model* and *solvent*.
+        Explicit path to parameter file.
     solvation_model : str
-        ``"alpb"`` (default) — Analytical Linearized Poisson-Boltzmann.
-        ``"gbsa"`` — plain Generalized Born + SASA (no ALPB correction).
+        ``"alpb"`` — Analytical Linearized Poisson-Boltzmann.
+        ``"gbsa"`` (default) — plain Generalized Born + SASA (no ALPB correction).
         The choice determines (a) which parameter file is loaded when
         *param_file* is None, and (b) whether the ALPB correction term
         is applied.  The two models use **different** fitted parameters
@@ -1269,24 +1534,8 @@ def create_gbsa(
     species = structure.TYPE
 
     if param_file is None:
-        if hasattr(structure, "SK_path"):
-            sk_dir = structure.SK_path
-        else:
-            sk_dir = None
-        if sk_dir is not None:
-            # Search for the matching parameter file (alpb or gbsa)
-            candidate = os.path.join(
-                sk_dir,
-                "solvation",
-                f"param_{solvation_model}_{solvent.lower()}.txt",
-            )
-            if os.path.isfile(candidate):
-                param_file = candidate
-
-    if param_file is None:
         raise ValueError(
             f"Could not find {solvation_model.upper()} parameter file for "
-            f"solvent '{solvent}'. Please provide param_file explicitly via "
             f"dftorch_params['solvent_param_file']."
         )
 

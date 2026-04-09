@@ -27,6 +27,7 @@ def H0_and_S_vectorized(
     coeffs_tensor: torch.Tensor,
     verbose: bool = False,
     store_stress_metadata: object = None,
+    ml_model_data: object = None,
 ):
     """
     Build one-electron Hamiltonian H0, overlap S, their Cartesian derivatives,
@@ -194,9 +195,26 @@ def H0_and_S_vectorized(
         )
     start_time4 = time.perf_counter()
 
-    idx = torch.searchsorted(R_orb, dR_mskd, right=True) - 1
-    idx = torch.clamp(idx, 0, len(R_orb))
-    dx = dR_mskd - R_orb[idx]
+    # ── Choose between spline-based (default) and ML-based SK integrals ──
+    _ml_ctx = None
+    if ml_model_data is not None:
+        _ml_ctx = {
+            "model": ml_model_data["model"],
+            "TYPE": TYPE,
+            "neighbor_I": neighbor_I,
+            "neighbor_J": neighbor_J,
+            "dR_mskd": dR_mskd,
+        }
+        if verbose:
+            print("  Using ML model for SK integrals (lazy per-call)")
+
+    # Spline grid lookup (used in spline mode; in ML mode _get_val_dR ignores these)
+    idx_use = torch.searchsorted(R_orb, dR_mskd, right=True) - 1
+    idx_use = torch.clamp(idx_use, 0, len(R_orb))
+    dx_use = dR_mskd - R_orb[idx_use]
+    coeffs_tensor_use = coeffs_tensor
+    IJ_use = IJ_pair_type
+    JI_use = JI_pair_type
 
     if verbose:
         print("  t <SKF> {:.1f} s\n".format(time.perf_counter() - start_time4))
@@ -221,15 +239,16 @@ def H0_and_S_vectorized(
         pair_mask_YH,
         pair_mask_YX,
         pair_mask_YY,
-        dx,
-        idx,
-        IJ_pair_type,
-        JI_pair_type,
-        coeffs_tensor,
+        dx_use,
+        idx_use,
+        IJ_use,
+        JI_use,
+        coeffs_tensor_use,
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
         0,
+        ml_ctx=_ml_ctx,
     )
 
     H0 = H0.reshape(HDIM, HDIM)
@@ -259,15 +278,16 @@ def H0_and_S_vectorized(
         pair_mask_YH,
         pair_mask_YX,
         pair_mask_YY,
-        dx,
-        idx,
-        IJ_pair_type,
-        JI_pair_type,
-        coeffs_tensor,
+        dx_use,
+        idx_use,
+        IJ_use,
+        JI_use,
+        coeffs_tensor_use,
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
         1,
+        ml_ctx=_ml_ctx,
     )
 
     S = S.reshape(HDIM, HDIM) / 27.21138625
@@ -286,9 +306,9 @@ def H0_and_S_vectorized(
         Rab_mskd = torch.stack((Rab_X[nn_mask], Rab_Y[nn_mask], Rab_Z[nn_mask]), dim=-1)
         store_stress_metadata._stress_metadata = {
             "Rab_mskd": Rab_mskd,  # (P, 3) bond vectors
-            "IJ_pair_type": IJ_pair_type,  # (P,) long
-            "JI_pair_type": JI_pair_type,  # (P,) long
-            "idx": idx,  # (P,) long — spline interval
+            "IJ_pair_type": IJ_use,  # (P,) long
+            "JI_pair_type": JI_use,  # (P,) long
+            "idx": idx_use,  # (P,) long — spline interval
             "i0": H_INDEX_START[neighbor_I],  # (P,) long — AO offset of atom I
             "j0": H_INDEX_START[neighbor_J],  # (P,) long — AO offset of atom J
             "n_orb_I": const.n_orb[TYPE[neighbor_I]].to(torch.uint8),  # (P,) uint8
