@@ -565,7 +565,6 @@ class MDXL:
         self.n_1 = self.n_0
         self.n_0 = self.n
 
-
         n_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
         n_spin_atom.scatter_add_(
             1, self.shell_to_atom.unsqueeze(0).expand(2, -1), self.n
@@ -675,10 +674,8 @@ class MDXL:
             self.dU_dq_gathered,
             dftorch_params.get("SHARED_MU", False),
             dftorch_params["DELTA_SCF"],
-            dftorch_params, 
+            dftorch_params,
         )
-        # ── GBSA implicit solvation: rebuild for new geometry ────────────
-        if dftorch_params.get("solvent", None) is not None:
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
         if dftorch_params.get("solvent_param_file", None) is not None:
             structure.gbsa = create_gbsa(
