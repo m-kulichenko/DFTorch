@@ -565,22 +565,12 @@ class MDXL:
         self.n_1 = self.n_0
         self.n_0 = self.n
 
-        n_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
-        n_spin_atom.scatter_add_(
-            1, self.shell_to_atom.unsqueeze(0).expand(2, -1), self.n
-        )  # atom-resolved
-
-        n_tot_atom = torch.zeros_like(structure.RX)
-        n_tot_atom.scatter_add_(
-            0, self.shell_to_atom, self.n.sum(dim=0)
-        )  # atom-resolved
-        n_net_spin_sr = self.n[0] - self.n[1]
         # ── OS: compute atom-resolved charges from shell-resolved n ──────
         if self._os:
             n_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
             n_spin_atom.scatter_add_(
                 1, self.shell_to_atom.unsqueeze(0).expand(2, -1), self.n
-            )
+            )  # atom-resolved
             n_tot_atom = torch.zeros_like(structure.RX)
             n_tot_atom.scatter_add_(0, self.shell_to_atom, self.n.sum(dim=0))
             n_net_spin_sr = self.n[0] - self.n[1]
@@ -640,42 +630,44 @@ class MDXL:
             disps = None
             dists = None
 
-        H_spin = get_h_spin(
-            structure.TYPE,
-            n_net_spin_sr,
-            self.const.w,
-            structure.n_shells_per_atom,
-            structure.shell_types,
-        )
-        (
-            structure.q_spin_sr,
-            structure.H,
-            structure.Hcoul,
-            structure.D,
-            structure.Dorth,
-            Q,
-            e,
-            structure.f,
-            structure.mu0,
-        ) = calc_q_os(
-            structure.H0,
-            H_spin,
-            self.Hubbard_U_gathered,
-            n_tot_atom[self.atom_ids],
-            CoulPot[self.atom_ids],
-            structure.S,
-            structure.Z,
-            structure.Te,
-            structure.Nocc,
-            structure.Znuc,
-            self.atom_ids,
-            self.atom_ids_sr,
-            structure.el_per_shell,
-            self.dU_dq_gathered,
-            dftorch_params.get("SHARED_MU", False),
-            dftorch_params["DELTA_SCF"],
-            dftorch_params,
-        )
+        # ── DELTA_SCF initial diagonalisation (open-shell only) ──────────
+        if self._os and dftorch_params.get("DELTA_SCF", False):
+            H_spin = get_h_spin(
+                structure.TYPE,
+                n_net_spin_sr,
+                self.const.w,
+                structure.n_shells_per_atom,
+                structure.shell_types,
+            )
+            (
+                structure.q_spin_sr,
+                structure.H,
+                structure.Hcoul,
+                structure.D,
+                structure.Dorth,
+                Q,
+                e,
+                structure.f,
+                structure.mu0,
+            ) = calc_q_os(
+                structure.H0,
+                H_spin,
+                self.Hubbard_U_gathered,
+                n_tot_atom[self.atom_ids],
+                CoulPot[self.atom_ids],
+                structure.S,
+                structure.Z,
+                structure.Te,
+                structure.Nocc,
+                structure.Znuc,
+                self.atom_ids,
+                self.atom_ids_sr,
+                structure.el_per_shell,
+                self.dU_dq_gathered,
+                dftorch_params.get("SHARED_MU", False),
+                dftorch_params["DELTA_SCF"],
+                dftorch_params,
+            )
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
         if dftorch_params.get("solvent_param_file", None) is not None:
             structure.gbsa = create_gbsa(
@@ -1010,6 +1002,9 @@ class MDXL:
                 structure.Nats,
                 self.const,
                 structure.TYPE,
+                net_spin_sr=n_net_spin_sr,
+                n_shells_per_atom=structure.n_shells_per_atom,
+                shell_types=structure.shell_types,
             )
             structure.f_tot = structure.f_tot + structure.f_spin
             structure.e_tot = (

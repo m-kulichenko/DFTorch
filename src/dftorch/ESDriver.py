@@ -299,6 +299,7 @@ class ESDriver(torch.nn.Module):
                     structure.KK,
                     structure.D,
                     structure.Q,
+                    structure.e,
                     structure.q_spin_atom,
                     structure.q_tot_atom,
                     structure.q_spin_sr,
@@ -361,10 +362,10 @@ class ESDriver(torch.nn.Module):
                     const.w,
                     structure.n_shells_per_atom,
                 )
-                #print(f"GS charges: {structure.q}")
+                # print(f"GS charges: {structure.q}")
 
                 if self.dftorch_params.get("DELTA_SCF", False):
-                    #print("detecting delta SCF calculation")
+                    # print("detecting delta SCF calculation")
                     (
                         structure.H,
                         structure.Hcoul,
@@ -380,7 +381,7 @@ class ESDriver(torch.nn.Module):
                         structure.mu0,
                         structure.e_coul_tmp,
                         structure.f_coul,
-                       structure.dq_p1,
+                        structure.dq_p1,
                     ) = delta_scf_x_os(
                         structure.el_per_shell,
                         structure.shell_types,
@@ -414,8 +415,7 @@ class ESDriver(torch.nn.Module):
                     )
 
                     structure.q = structure.q_tot_atom
-                    #print(f"ES charges: {structure.q}")
-
+                    # print(f"ES charges: {structure.q}")
 
                     H_spin = get_h_spin(
                         structure.TYPE,
@@ -437,7 +437,6 @@ class ESDriver(torch.nn.Module):
                         structure.n_shells_per_atom,
                     )
 
-
             else:  # closed-shell
                 (
                     structure.H,
@@ -446,6 +445,7 @@ class ESDriver(torch.nn.Module):
                     structure.KK,
                     structure.D,
                     structure.Q,
+                    structure.e,
                     structure.q,
                     structure.f,
                     structure.mu0,
@@ -629,6 +629,9 @@ class ESDriver(torch.nn.Module):
                     structure.Nats,
                     const,
                     structure.TYPE,
+                    net_spin_sr=structure.net_spin_sr,
+                    n_shells_per_atom=structure.n_shells_per_atom,
+                    shell_types=structure.shell_types,
                 )
 
                 structure.f_tot = structure.f_tot + structure.f_spin
@@ -1398,6 +1401,8 @@ class ESDriverBatch(torch.nn.Module):
                 structure.Hdipole,
                 structure.KK,
                 structure.D,
+                structure.Q,
+                structure.e,
                 structure.q,
                 structure.f,
                 structure.mu0,

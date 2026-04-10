@@ -226,9 +226,20 @@ def forces_spin(
     Nats: int,
     const,
     TYPE: torch.Tensor,
+    net_spin_sr: torch.Tensor = None,
+    n_shells_per_atom: torch.Tensor = None,
+    shell_types: torch.Tensor = None,
 ):
-    """ """
-    # Efield = 0.3*torch.tensor([-.3,0.4,0.0], device=Rx.device).T
+    """Compute spin contribution to atomic forces.
+
+    When ``const.w`` is a 1-D tensor (scalar spin constant per element),
+    the original atom-resolved formula is used.  When ``const.w`` is a
+    3-D tensor (shell-resolved W matrix, i.e. ``magnetic_hubbard_ldep=True``),
+    the per-orbital spin potential mu_orb is built from *net_spin_sr* and W,
+    and the force is evaluated as
+
+        F_A = -1/2 * sum_{mu,nu} DeltaD_{mu,nu} * dS_{mu,nu}/dR_A * (mu_mu + mu_nu)
+    """
     dtype = q_spin_atom.dtype
     device = q_spin_atom.device
 
@@ -239,21 +250,74 @@ def forces_spin(
         torch.arange(len(n_orbitals_per_atom), device=device), n_orbitals_per_atom
     )  # Generate atom index for each orbital
 
-    net_spin = q_spin_atom[0] - q_spin_atom[1]
-    FSspinA = torch.zeros((3, Nats), dtype=dtype, device=device)
-    factor = (net_spin * const.w[TYPE]) * 2
+    # tmp = (D_up - D_down) * dS  — shape (3, Norb, Norb)
     tmp = (
         (torch.tensor([[[1]], [[-1]]], device=device) * D).unsqueeze(1)
         * dS.unsqueeze(0)
     ).sum(0)
-    dS_times_D = tmp * factor[atom_ids].unsqueeze(-1)
-    dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)  # sum of elements in each row
-    FSspinA.scatter_add_(
-        1, atom_ids.expand(3, -1), dDS_XYZ_row_sum
-    )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
-    dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
-    FSspinA.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
 
+    w = const.w[TYPE]
+
+    if w.dim() == 1:
+        # --- scalar W per atom (original code path) ---
+        net_spin = q_spin_atom[0] - q_spin_atom[1]
+        factor = (net_spin * w) * 2  # (Nats,)
+        dS_times_D = tmp * factor[atom_ids].unsqueeze(-1)
+
+        FSspinA = torch.zeros((3, Nats), dtype=dtype, device=device)
+        dDS_XYZ_row_sum = torch.sum(dS_times_D, dim=2)
+        FSspinA.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum)
+        dDS_XYZ_col_sum = torch.sum(dS_times_D, dim=1)
+        FSspinA.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
+        return FSspinA / 2
+
+    # --- shell-resolved W matrix (magnetic_hubbard_ldep = True) ---
+    # Build per-orbital spin potential mu_orb, mirroring get_h_spin logic.
+    n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=device)
+    n_orb_per_shell_global = n_orb_per_shell[shell_types]
+    mu_sr = torch.zeros(
+        n_shells_per_atom.sum(), dtype=dtype, device=device
+    )  # per-shell mu
+
+    # s atoms (1 shell)
+    mask1 = n_shells_per_atom == 1
+    if mask1.any():
+        w_tmp = w[mask1][:, 0:1, 0:1]
+        mask_sh = mask1.repeat_interleave(n_shells_per_atom)
+        q_tmp = net_spin_sr[mask_sh].view(-1, 1)
+        mu_sr[mask_sh] = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+
+    # sp atoms (2 shells)
+    mask2 = n_shells_per_atom == 2
+    if mask2.any():
+        w_tmp = w[mask2][:, 0:2, 0:2]
+        mask_sh = mask2.repeat_interleave(n_shells_per_atom)
+        q_tmp = net_spin_sr[mask_sh].view(-1, 2)
+        mu_sr[mask_sh] = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+
+    # spd atoms (3 shells)
+    mask3 = n_shells_per_atom == 3
+    if mask3.any():
+        w_tmp = w[mask3][:, 0:3, 0:3]
+        mask_sh = mask3.repeat_interleave(n_shells_per_atom)
+        q_tmp = net_spin_sr[mask_sh].view(-1, 3)
+        mu_sr[mask_sh] = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+
+    # Expand shell mu to orbital mu
+    mu_orb = mu_sr.repeat_interleave(n_orb_per_shell_global)  # (Norb,)
+
+    # F_A = -1/2 * sum_{mu in A, nu} DeltaD * dS * (mu_mu + mu_nu)
+    #      + 1/2 * sum_{nu in A, mu} DeltaD * dS * (mu_mu + mu_nu)
+    # Combined factor matrix: (mu_mu + mu_nu)
+    mu_row = mu_orb.unsqueeze(-1)  # (Norb, 1)
+    mu_col = mu_orb.unsqueeze(-2)  # (1, Norb)
+    combined = tmp * (mu_row + mu_col)  # (3, Norb, Norb)
+
+    FSspinA = torch.zeros((3, Nats), dtype=dtype, device=device)
+    dDS_XYZ_row_sum = torch.sum(combined, dim=2)
+    FSspinA.scatter_add_(1, atom_ids.expand(3, -1), dDS_XYZ_row_sum)
+    dDS_XYZ_col_sum = torch.sum(combined, dim=1)
+    FSspinA.scatter_add_(1, atom_ids.expand(3, -1), -dDS_XYZ_col_sum)
     return FSspinA / 2
 
 
