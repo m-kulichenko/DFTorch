@@ -509,19 +509,32 @@ class ESDriver(torch.nn.Module):
                 structure.e_elec_tot + structure.e_repulsion + structure.e_spin
             )
 
-            # --- GBSA solvation energy (differentiable) ---
+            # --- GBSA solvation energy ---
             if structure.gbsa is not None:
-                coords_ang = torch.stack(
-                    [structure.RX, structure.RY, structure.RZ], dim=1
-                )
-                structure.e_solv = structure.gbsa.get_energy_differentiable(
-                    coords_ang,
-                    structure.q,
-                )
-                # Keep non-differentiable e_gb / e_sasa for_ reporting
                 e_gb, e_sasa = structure.gbsa.get_energies(structure.q)
                 structure.e_gb = e_gb
                 structure.e_sasa = e_sasa
+
+                if self.dftorch_params.get("gbsa_differentiable", False):
+                    # Differentiable path: recomputes Born radii, Born
+                    # matrix and SASA with autograd ops.  Enables
+                    # backprop through coordinates but allocates O(N²)
+                    # and O(N·G·N) intermediates — may OOM on large
+                    # systems.
+                    coords_ang = torch.stack(
+                        [structure.RX, structure.RY, structure.RZ], dim=1
+                    )
+                    structure.e_solv = structure.gbsa.get_energy_differentiable(
+                        coords_ang,
+                        structure.q,
+                    )
+                else:
+                    # Non-differentiable path: uses pre-computed Born
+                    # matrix and SASA from the GBSA constructor.
+                    # Analytical gradients are still available via
+                    # calc_forces → get_born_gradients / get_sasa_gradients.
+                    structure.e_solv = e_gb + e_sasa
+
                 structure.e_tot = structure.e_tot + structure.e_solv
             else:
                 structure.e_gb = 0.0
@@ -1465,7 +1478,7 @@ class ESDriverBatch(torch.nn.Module):
                     # Fast path: use pre-computed Born matrix + SASA (no recompute)
                     e_gb, e_sasa = structure.gbsa_batch.get_energies(structure.q)
                     structure.e_solv = e_gb + e_sasa  # (B,)
-                else:
+                elif self.dftorch_params.get("gbsa_differentiable", False):
                     # Full differentiable path: recomputes geometry for autograd
                     coords_batch = torch.stack(
                         [structure.RX, structure.RY, structure.RZ], dim=2
@@ -1478,6 +1491,10 @@ class ESDriverBatch(torch.nn.Module):
                             )
                         )
                     structure.e_solv = torch.stack(e_solv_list)
+                else:
+                    # Non-differentiable path (default)
+                    e_gb, e_sasa = structure.gbsa_batch.get_energies(structure.q)
+                    structure.e_solv = e_gb + e_sasa  # (B,)
                 structure.e_tot = structure.e_tot + structure.e_solv
             else:
                 structure.e_solv = torch.zeros(structure.batch_size, device=self.device)

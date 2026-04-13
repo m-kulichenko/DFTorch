@@ -26,45 +26,131 @@ def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
-ATOMIC_NUMBER_TO_SYMBOL = {
-    1: "H",
-    2: "He",
-    3: "Li",
-    4: "Be",
-    5: "B",
-    6: "C",
-    7: "N",
-    8: "O",
-    9: "F",
-    10: "Ne",
-    11: "Na",
-    12: "Mg",
-    13: "Al",
-    14: "Si",
-    15: "P",
-    16: "S",
-    17: "Cl",
-    18: "Ar",
-    19: "K",
-    20: "Ca",
-    21: "Sc",
-    22: "Ti",
-    23: "V",
-    24: "Cr",
-    25: "Mn",
-    26: "Fe",
-    27: "Co",
-    28: "Ni",
-    29: "Cu",
-    30: "Zn",
-    35: "Br",
-    53: "I",
+SYMBOL_TO_NUMBER = {
+    "H": 1,
+    "He": 2,
+    "Li": 3,
+    "Be": 4,
+    "B": 5,
+    "C": 6,
+    "N": 7,
+    "O": 8,
+    "F": 9,
+    "Ne": 10,
+    "Na": 11,
+    "Mg": 12,
+    "Al": 13,
+    "Si": 14,
+    "P": 15,
+    "S": 16,
+    "Cl": 17,
+    "Ar": 18,
+    "K": 19,
+    "Ca": 20,
+    "Sc": 21,
+    "Ti": 22,
+    "V": 23,
+    "Cr": 24,
+    "Mn": 25,
+    "Fe": 26,
+    "Co": 27,
+    "Ni": 28,
+    "Cu": 29,
+    "Zn": 30,
+    "Ga": 31,
+    "Ge": 32,
+    "As": 33,
+    "Se": 34,
+    "Br": 35,
+    "Kr": 36,
+    "Rb": 37,
+    "Sr": 38,
+    "Y": 39,
+    "Zr": 40,
+    "Nb": 41,
+    "Mo": 42,
+    "Tc": 43,
+    "Ru": 44,
+    "Rh": 45,
+    "Pd": 46,
+    "Ag": 47,
+    "Cd": 48,
+    "In": 49,
+    "Sn": 50,
+    "Sb": 51,
+    "Te": 52,
+    "I": 53,
+    "Xe": 54,
+    "Cs": 55,
+    "Ba": 56,
+    "La": 57,
+    "Ce": 58,
+    "Pr": 59,
+    "Nd": 60,
+    "Pm": 61,
+    "Sm": 62,
+    "Eu": 63,
+    "Gd": 64,
+    "Tb": 65,
+    "Dy": 66,
+    "Ho": 67,
+    "Er": 68,
+    "Tm": 69,
+    "Yb": 70,
+    "Lu": 71,
+    "Hf": 72,
+    "Ta": 73,
+    "W": 74,
+    "Re": 75,
+    "Os": 76,
+    "Ir": 77,
+    "Pt": 78,
+    "Au": 79,
+    "Hg": 80,
+    "Tl": 81,
+    "Pb": 82,
+    "Bi": 83,
+    "Po": 84,
+    "At": 85,
+    "Rn": 86,
+    "Fr": 87,
+    "Ra": 88,
+    "Ac": 89,
+    "Th": 90,
+    "Pa": 91,
+    "U": 92,
+    "Np": 93,
+    "Pu": 94,
+    "Am": 95,
+    "Cm": 96,
+    "Bk": 97,
+    "Cf": 98,
+    "Es": 99,
+    "Fm": 100,
+    "Md": 101,
+    "No": 102,
+    "Lr": 103,
+    "Rf": 104,
+    "Db": 105,
+    "Sg": 106,
+    "Bh": 107,
+    "Hs": 108,
+    "Mt": 109,
+    "Ds": 110,
+    "Rg": 111,
+    "Cn": 112,
+    "Nh": 113,
+    "Fl": 114,
+    "Mc": 115,
+    "Lv": 116,
+    "Ts": 117,
+    "Og": 118,
 }
+# Reverse lookup for the PDB/XYZ writer: atomic number → element symbol
+NUMBER_TO_SYMBOL = {v: k for k, v in SYMBOL_TO_NUMBER.items()}
 
 
-def write_pdb_frame(
-    filename, structure, cell=None, step=0, etot=None, temp=None, mode="a"
-):
+def write_pdb_frame(filename, structure, cell=None, step=0, comment="", mode="a"):
     """
     Append one MD frame to a PDB trajectory file.
     Each frame is wrapped in MODEL/ENDMDL records — readable by PyMOL, VMD, Chimera.
@@ -79,8 +165,8 @@ def write_pdb_frame(
         - shape (3,3)  for triclinic lattice vectors
         Written as CRYST1 if given.
     step      : int            MD step number
-    etot      : float|None     total energy in eV — written as REMARK
-    temp      : float|None     temperature in K   — written as REMARK
+    comment   : str            free-form metadata string — written as REMARK,
+                               identical to the XYZ comment line content
     mode      : str            'w' for first frame, 'a' to append
     """
     with open(filename, mode) as f:
@@ -93,13 +179,8 @@ def write_pdb_frame(
                 f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1\n"
             )
 
-        # REMARK — metadata
-        remark = f"Step={step}"
-        if etot is not None:
-            remark += f"  Etot={etot:.6f} eV"
-        if temp is not None:
-            remark += f"  T={temp:.2f} K"
-        f.write(f"REMARK  {remark}\n")
+        # REMARK — same content as the XYZ comment line: "Step {step}, {comment}"
+        f.write(f"REMARK  Step {step}, {comment}\n")
 
         # MODEL record
         f.write(f"MODEL     {step:>8d}\n")
@@ -110,7 +191,7 @@ def write_pdb_frame(
             y = structure.RY[i].item()
             z = structure.RZ[i].item()
             raw = structure.TYPE[i].item()
-            symbol = ATOMIC_NUMBER_TO_SYMBOL.get(int(raw), "X")
+            symbol = NUMBER_TO_SYMBOL.get(int(raw), "X")
 
             # strict PDB ATOM fixed-format columns
             f.write(
@@ -176,62 +257,6 @@ def read_xyz(files, sort=True):
     """
     reads xyz structure from a list (files) of files names
     """
-    element_dict = {
-        "H": 1,
-        "He": 2,
-        "Li": 3,
-        "Be": 4,
-        "B": 5,
-        "C": 6,
-        "N": 7,
-        "O": 8,
-        "F": 9,
-        "Ne": 10,
-        "Na": 11,
-        "Mg": 12,
-        "Al": 13,
-        "Si": 14,
-        "P": 15,
-        "S": 16,
-        "Cl": 17,
-        "Ar": 18,
-        "K": 19,
-        "Ca": 20,
-        "Sc": 21,
-        "Ti": 22,
-        "V": 23,
-        "Cr": 24,
-        "Mn": 25,
-        "Fe": 26,
-        "Co": 27,
-        "Ni": 28,
-        "Cu": 29,
-        "Zn": 30,
-        "Ga": 31,
-        "Ge": 32,
-        "As": 33,
-        "Se": 34,
-        "Br": 35,
-        "Kr": 36,
-        "Rb": 37,
-        "Sr": 38,
-        "Y": 39,
-        "Zr": 40,
-        "Nb": 41,
-        "Mo": 42,
-        "Tc": 43,
-        "Ru": 44,
-        "Rh": 45,
-        "Pd": 46,
-        "Ag": 47,
-        "Cd": 48,
-        "In": 49,
-        "Sn": 50,
-        "Sb": 51,
-        "Te": 52,
-        "I": 53,
-        "Xe": 54,
-    }
 
     COORDINATES = []
     for file in files:
@@ -259,7 +284,7 @@ def read_xyz(files, sort=True):
             else:
                 coords.append(
                     [
-                        element_dict[lines[i].split()[0]],
+                        SYMBOL_TO_NUMBER[lines[i].split()[0]],
                         float(lines[i].split()[1]),
                         float(lines[i].split()[2]),
                         float(lines[i].split()[3]),
@@ -277,62 +302,6 @@ def read_xyz(files, sort=True):
 
 
 # ── Element-symbol → atomic-number lookup (covers Z = 1–54) ──────────
-_SYMBOL_TO_Z = {
-    "H": 1,
-    "He": 2,
-    "Li": 3,
-    "Be": 4,
-    "B": 5,
-    "C": 6,
-    "N": 7,
-    "O": 8,
-    "F": 9,
-    "Ne": 10,
-    "Na": 11,
-    "Mg": 12,
-    "Al": 13,
-    "Si": 14,
-    "P": 15,
-    "S": 16,
-    "Cl": 17,
-    "Ar": 18,
-    "K": 19,
-    "Ca": 20,
-    "Sc": 21,
-    "Ti": 22,
-    "V": 23,
-    "Cr": 24,
-    "Mn": 25,
-    "Fe": 26,
-    "Co": 27,
-    "Ni": 28,
-    "Cu": 29,
-    "Zn": 30,
-    "Ga": 31,
-    "Ge": 32,
-    "As": 33,
-    "Se": 34,
-    "Br": 35,
-    "Kr": 36,
-    "Rb": 37,
-    "Sr": 38,
-    "Y": 39,
-    "Zr": 40,
-    "Nb": 41,
-    "Mo": 42,
-    "Tc": 43,
-    "Ru": 44,
-    "Rh": 45,
-    "Pd": 46,
-    "Ag": 47,
-    "Cd": 48,
-    "In": 49,
-    "Sn": 50,
-    "Sb": 51,
-    "Te": 52,
-    "I": 53,
-    "Xe": 54,
-}
 
 
 def read_pdb(files, sort=True):
@@ -401,7 +370,7 @@ def read_pdb(files, sort=True):
             # Capitalize properly: first upper, rest lower
             elem = elem[0].upper() + elem[1:].lower() if len(elem) > 1 else elem.upper()
 
-            z_num = _SYMBOL_TO_Z.get(elem)
+            z_num = SYMBOL_TO_NUMBER.get(elem)
             if z_num is None:
                 raise ValueError(
                     f"Unknown element '{elem}' in {file}, line: {line.rstrip()}"

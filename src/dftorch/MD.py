@@ -484,8 +484,7 @@ class MDXL:
                 structure,
                 structure.cell,
                 step=md_step,
-                etot=Energ,
-                temp=Temperature,
+                comment=comm_string,
                 mode="a",
             )
 

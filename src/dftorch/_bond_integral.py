@@ -64,6 +64,9 @@ symbol_to_number: Final[dict[str, int]] = {
     "Te": 52,
     "I": 53,
     "Xe": 54,
+    "Cs": 55,
+    "Ba": 56,
+    "La": 57,
 }
 
 _CHANNELS: Final[list[str]] = [
