@@ -15,7 +15,7 @@ from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
 from dftorch._spin import get_spin_energy, get_h_spin
 from ._stress import get_total_stress_analytical
 from ._gbsa import create_gbsa, GBSABatch
-#from ._dftd3 import create_dftd3
+from ._dftd3 import create_dftd3
 from ._thirdorder import create_thirdorder, ThirdOrderBatch
 
 
