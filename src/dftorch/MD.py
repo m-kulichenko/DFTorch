@@ -629,6 +629,29 @@ class MDXL:
             disps = None
             dists = None
 
+        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
+        if dftorch_params.get("solvent_param_file", None) is not None:
+            structure.gbsa = create_gbsa(
+                structure,
+                structure.device,
+                param_file=dftorch_params.get("solvent_param_file", None),
+                solvation_model=dftorch_params.get("solvation_model", "gbsa"),
+            )
+            # Born shift uses extrapolated charges n (shadow Hamiltonian)
+            solv_n = n_tot_atom if self._os else self.n
+            solv_shift = structure.gbsa.get_shadow_shifts(solv_n)
+            CoulPot = CoulPot + solv_shift
+        else:
+            structure.gbsa = None
+            solv_shift = None
+
+        # ── Full off-diagonal DFTB3: add third-order shift to CoulPot ────
+        if structure.thirdorder is not None:
+            to_n = n_tot_atom if self._os else self.n
+            CoulPot = CoulPot + structure.thirdorder.get_shifts(to_n)
+
+
+        # ── Diagonalise & compute charges ────────────────────────────────
         # ── DELTA_SCF initial diagonalisation (open-shell only) ──────────
         if self._os and dftorch_params.get("DELTA_SCF", False):
             H_spin = get_h_spin(
@@ -667,29 +690,20 @@ class MDXL:
                 dftorch_params["DELTA_SCF"],
                 dftorch_params,
             )
-        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
-        if dftorch_params.get("solvent_param_file", None) is not None:
-            structure.gbsa = create_gbsa(
-                structure,
-                structure.device,
-                param_file=dftorch_params.get("solvent_param_file", None),
-                solvation_model=dftorch_params.get("solvation_model", "gbsa"),
+
+
+            structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
+            q_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
+            q_spin_atom.scatter_add_(
+                1,
+                self.shell_to_atom.unsqueeze(0).expand(2, -1),
+                structure.q_spin_sr,
             )
-            # Born shift uses extrapolated charges n (shadow Hamiltonian)
-            solv_n = n_tot_atom if self._os else self.n
-            solv_shift = structure.gbsa.get_shadow_shifts(solv_n)
-            CoulPot = CoulPot + solv_shift
-        else:
-            structure.gbsa = None
-            solv_shift = None
-
-        # ── Full off-diagonal DFTB3: add third-order shift to CoulPot ────
-        if structure.thirdorder is not None:
-            to_n = n_tot_atom if self._os else self.n
-            CoulPot = CoulPot + structure.thirdorder.get_shifts(to_n)
-
-        # ── Diagonalise & compute charges ────────────────────────────────
-        if self._os:
+            q_tot_atom = torch.zeros_like(structure.RX)
+            q_tot_atom.scatter_add_(
+                0, self.shell_to_atom, structure.q_spin_sr.sum(dim=0)
+            )
+        elif self._os:
             H_spin = get_h_spin(
                 structure.TYPE,
                 n_net_spin_sr,

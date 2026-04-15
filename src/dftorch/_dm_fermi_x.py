@@ -379,7 +379,6 @@ def nonaufbau_constraints(
         raise ValueError("target excited state required for deltaSCF (SINGLET OR TRIPLET currently supported)")
         
 
-
     # Final adjustment of occupation
     # P0 = v@(torch.diag_embed(f)@v.T)
     # Build density matrix P0 = V diag(f) V^T without forming diag explicitly
