@@ -44,6 +44,7 @@ def fermi_prt(
     # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
     mu1 = (X.diagonal().sum() / (dN_dmu + (1.0 - mask))) * mask
+    print(mu1)
     X = X - torch.diag_embed(diag) * mu1
     # dpdmu = -diag
 
@@ -95,9 +96,19 @@ def fermi_prt_batch(
     #     mu1 = X.diagonal().sum() / dN_dmu
     #     X = X - torch.diag_embed(diag) * mu1
 
-    # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
-    mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
-    mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
+
+    if mu0.dim() == 0:
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
+        mu1 = ((X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((dN_dmu[0] + (1.0 - mask)) + (dN_dmu[1] + (1.0 - mask)))) * mask
+    else:
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
+        mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
+
+
+    print(mu1)       
+
     X = X - torch.diag_embed(diag) * mu1.unsqueeze(-1).unsqueeze(-1)
 
     D0 = torch.matmul(Q, torch.matmul(torch.diag_embed(fe), Q.transpose(-1, -2)))
