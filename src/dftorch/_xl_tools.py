@@ -1,7 +1,10 @@
 import torch
 
 
-from ._fermi_prt import Canon_DM_PRT, fermi_prt, fermi_prt_batch  # noqa: F401
+from ._fermi_prt import (
+    fermi_prt_D1_only,
+    fermi_prt_batch_D1_only,
+)  # noqa: F401
 from ._dm_fermi_x import (
     dm_fermi_x,
     dm_fermi_x_os,  # noqa: F401
@@ -9,7 +12,7 @@ from ._dm_fermi_x import (
     dm_fermi_x_os_shared,
     nonaufbau_constraints,
 )
-from ._spin import get_h_spin
+from ._spin import get_h_spin_diag
 from typing import Any, Optional, Tuple, Dict
 
 
@@ -157,7 +160,6 @@ def calc_q_os(
         * torch.tensor([[[1]], [[-1]]], device=H_spin.device)
     )
 
-
     if shared_mu:
         Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
@@ -166,7 +168,7 @@ def calc_q_os(
         Dorth, Q, e, f, mu0 = dm_fermi_x_os(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
         )
-    #print(mu0)
+    # print(mu0)
 
     if deltaSCF:
         mu_0 = mu0
@@ -179,9 +181,8 @@ def calc_q_os(
             dftorch_params["DELTA_SCF_SMEARING"],
         )
 
-
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
-    DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
+    DS = (D * S.transpose(-1, -2)).sum(dim=-1)  # O(n²) diagonal extraction
 
     q_sr = -0.5 * el_per_shell.unsqueeze(0).expand(2, -1)
     q_sr.scatter_add_(
@@ -307,11 +308,11 @@ def calc_dq(
     d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0))
 
     H1_orth = Z.T @ d_Hcoul @ Z
-    # First-order density response (canonical Fermi PRT)
-    # _, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
-    _, D1 = fermi_prt(H1_orth, Te, Q, e, mu0)
+    # First-order density response (D1 only — skip D0 to save 2 matmuls)
+    D1 = fermi_prt_D1_only(H1_orth, Te, Q, e, mu0)
     D1 = Z @ D1 @ Z.T
-    D1S = 2 * torch.diag(D1 @ S)
+    # O(n²) diagonal extraction instead of O(n³) full matmul
+    D1S = 2 * (D1 * S.T).sum(dim=1)
     # dq (atomic) from AO response
     dq = torch.zeros(Nats, dtype=S.dtype, device=S.device)
     dq.scatter_add_(0, atom_ids, D1S)
@@ -352,11 +353,11 @@ def calc_dq_batch(
     d_Hcoul = 0.5 * (d_Hcoul_diag.unsqueeze(-1) * S + S * d_Hcoul_diag.unsqueeze(-2))
 
     H1_orth = torch.matmul(Z.transpose(-1, -2), torch.matmul(d_Hcoul, Z))
-    # First-order density response (canonical Fermi PRT)
-    _, D1 = fermi_prt_batch(H1_orth, Te, Q, e, mu0)
+    # First-order density response (D1 only — skip D0 to save 2 matmuls)
+    D1 = fermi_prt_batch_D1_only(H1_orth, Te, Q, e, mu0)
     D1 = torch.matmul(Z, torch.matmul(D1, Z.transpose(-1, -2)))
-    tmp = torch.matmul(D1, S)
-    D1S = 2 * tmp.diagonal(dim1=-2, dim2=-1)
+    # O(n²) diagonal extraction instead of O(n³) full matmul
+    D1S = 2 * (D1 * S.transpose(-1, -2)).sum(dim=-1)
     # dq (atomic) from AO response
     dq = torch.zeros(batch_size, Nats, dtype=S.dtype, device=S.device)
     dq.scatter_add_(1, atom_ids, D1S)
@@ -642,6 +643,27 @@ def kernel_update_lr_os(
     q_atomic = torch.zeros_like(RX)
     q_atomic.scatter_add_(0, shell_to_atom, q.sum(dim=0))
 
+    spin_sign = torch.tensor([1.0, -1.0], device=S.device).view(2, 1)
+
+    # ── Precompute fused eigenvector transform W = Z @ Q ─────────────────
+    # Fuses the four-matmul chain  Q.T @ Z.T @ dH @ Z @ Q  into  W.T @ dH @ W
+    # and the back-transform  Z @ Q @ X @ Q.T @ Z.T  into  W @ X @ W.T
+    W = torch.matmul(Z.unsqueeze(0).expand(2, -1, -1), Q)  # (2, n_orb, n_orb)
+    SW = torch.matmul(S.unsqueeze(0).expand(2, -1, -1), W)  # (2, n_orb, n_orb)
+
+    # Susceptibility kernel χ_ij (depends only on eigenvalues, constant in Krylov loop)
+    kB = 8.61739e-5
+    beta = 1.0 / (kB * Te)
+    fe = 1.0 / (torch.exp(beta * (e - mu0.unsqueeze(-1))) + 1.0)  # (2, n_orb)
+    de = e[:, :, None] - e[:, None, :]  # (2, n_orb, n_orb)
+    chi = torch.empty_like(de)
+    off = de.abs() > 1e-12
+    chi[off] = (fe[:, :, None] - fe[:, None, :])[off] / de[off]
+    f_diag = -beta * fe * (1.0 - fe)  # (2, n_orb)
+    chi[~off] = f_diag.unsqueeze(1).expand_as(de)[~off]
+    f_diag_sum = f_diag.sum(dim=1)  # (2,) — for μ1 conservation
+    # ─────────────────────────────────────────────────────────────────────
+
     while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
         # Normalize current direction
         norm_dr = torch.norm(dr)
@@ -707,7 +729,8 @@ def kernel_update_lr_os(
             d_CoulPot = d_CoulPot + thirdorder.get_dshifts_dq(q_atomic, v_atomic)
         # ─────────────────────────────────────────────────────────────────────
 
-        H_spin = get_h_spin(TYPE, v_net_spin, w, n_shells_per_atom, shell_types)
+        # Compute spin potential as a vector (avoid building full n_orb×n_orb H_spin matrix)
+        mu_spin = get_h_spin_diag(TYPE, v_net_spin, w, n_shells_per_atom, shell_types)
 
         d_Hcoul_diag = Hubbard_U[atom_ids] * v_atomic[atom_ids] + d_CoulPot[atom_ids]
         # ── DFTB3: linearized response of diagonal third-order term ───────────
@@ -719,18 +742,30 @@ def kernel_update_lr_os(
             )
         # ─────────────────────────────────────────────────────────────────────
 
-        d_Hcoul = 0.5 * (
-            d_Hcoul_diag.unsqueeze(1) * S + S * d_Hcoul_diag.unsqueeze(0)
-        ) + 0.5 * S * H_spin.unsqueeze(0).expand(2, -1, -1) * torch.tensor(
-            [[[1]], [[-1]]], device=H_spin.device
-        )
+        # Combine Coulomb + spin into effective diagonal per spin channel
+        # spin-up: d_Hcoul_diag + mu_spin,  spin-down: d_Hcoul_diag - mu_spin
+        eff_diag = d_Hcoul_diag.unsqueeze(0) + spin_sign * mu_spin.unsqueeze(
+            0
+        )  # (2, n_orb)
 
-        H1_orth = Z.T @ d_Hcoul @ Z
-        # First-order density response (canonical Fermi PRT)
-        # _, D1 = Canon_DM_PRT(H1_orth, structure.Te, Q, e, mu0, 10)
-        _, D1 = fermi_prt_batch(H1_orth, Te, Q, e, mu0)
-        D1 = Z @ D1 @ Z.T
-        D1S = 1 * torch.diagonal(torch.matmul(D1, S), dim1=-2, dim2=-1)
+        # ── Fused forward transform: W.T @ dH @ W via row-scaling ────────
+        # dH = 0.5*(diag(d)@S + S@diag(d)), so W.T@dH@W = 0.5*(A + A.T)
+        # where A = (d*W).T @ (S@W),  with S@W = SW precomputed
+        Wd = eff_diag.unsqueeze(-1) * W  # (2, n_orb, n_orb) row-scaling O(n²)
+        A = torch.matmul(Wd.transpose(-1, -2), SW)  # 1 batched matmul
+        QH1Q = 0.5 * (A + A.transpose(-1, -2))
+
+        # ── Response in eigenbasis (chi precomputed) ──────────────────────
+        X = chi * QH1Q
+        mu1_mask = (torch.abs(f_diag_sum) > 1e-12).to(S.dtype)
+        mu1 = (
+            X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (f_diag_sum + (1.0 - mu1_mask))
+        ) * mu1_mask
+        X = X - torch.diag_embed(f_diag) * mu1.unsqueeze(-1).unsqueeze(-1)
+
+        # ── Fused backward: D1S = diag(W @ X @ W.T @ S) = row-dot(W@X, SW) ─
+        WX = torch.matmul(W, X)  # 1 batched matmul
+        D1S = (WX * SW).sum(dim=-1)  # (2, n_orb), O(n²)
         # dq (atomic) from AO response
         dq = torch.zeros(2, n_shells_per_atom.sum(), dtype=S.dtype, device=S.device)
         dq.scatter_add_(

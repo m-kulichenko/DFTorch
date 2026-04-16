@@ -541,7 +541,7 @@ def generate_candidates_v2(cell_inds: Tensor, cells: Tensor, all_shifts: list):
     return candid_ids
 
 
-@torch.compile(dynamic=True)
+@torch.compiler.disable  # data-dependent output shape (argwhere)
 def create_sparse_neighbor_list(
     coords: Tensor, lattice_lengths: Tensor, candid_ids: Tensor, cutoff: float
 ):
@@ -559,7 +559,7 @@ def create_sparse_neighbor_list(
     return torch.stack((source, target))
 
 
-@torch.compile(dynamic=True)
+@torch.compiler.disable  # data-dependent output shape (max_occupancy slice)
 def create_dense_neighbor_list(
     coords: Tensor, lattice_lengths: Tensor, candid_ids: Tensor, cutoff: float
 ):
@@ -587,7 +587,7 @@ def create_dense_neighbor_list(
     return out_idx[:, :max_occupancy]
 
 
-@torch.compile(dynamic=True)
+@torch.compiler.disable  # data-dependent output shape (max_occupancy slice)
 def create_dense_neighbor_list_triton(candid_ids: Tensor, nbr_counts: Tensor):
     """
     Create ELLPACK based dense neighbor list
@@ -600,7 +600,7 @@ def create_dense_neighbor_list_triton(candid_ids: Tensor, nbr_counts: Tensor):
     return candid_ids[:, :max_occupancy]
 
 
-@torch.compile(dynamic=True)
+@torch.compiler.disable  # data-dependent output shape (argwhere)
 def create_sparse_neighbor_list_triton(candid_ids: Tensor, nbr_counts: Tensor):
     """
     Create COO based sparse neighbor list
