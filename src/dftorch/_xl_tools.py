@@ -645,6 +645,25 @@ def kernel_update_lr_os(
 
     spin_sign = torch.tensor([1.0, -1.0], device=S.device).view(2, 1)
 
+    # ── Precompute fused eigenvector transform W = Z @ Q ─────────────────
+    # Fuses the four-matmul chain  Q.T @ Z.T @ dH @ Z @ Q  into  W.T @ dH @ W
+    # and the back-transform  Z @ Q @ X @ Q.T @ Z.T  into  W @ X @ W.T
+    W = torch.matmul(Z.unsqueeze(0).expand(2, -1, -1), Q)  # (2, n_orb, n_orb)
+    SW = torch.matmul(S.unsqueeze(0).expand(2, -1, -1), W)  # (2, n_orb, n_orb)
+
+    # Susceptibility kernel χ_ij (depends only on eigenvalues, constant in Krylov loop)
+    kB = 8.61739e-5
+    beta = 1.0 / (kB * Te)
+    fe = 1.0 / (torch.exp(beta * (e - mu0.unsqueeze(-1))) + 1.0)  # (2, n_orb)
+    de = e[:, :, None] - e[:, None, :]  # (2, n_orb, n_orb)
+    chi = torch.empty_like(de)
+    off = de.abs() > 1e-12
+    chi[off] = (fe[:, :, None] - fe[:, None, :])[off] / de[off]
+    f_diag = -beta * fe * (1.0 - fe)  # (2, n_orb)
+    chi[~off] = f_diag.unsqueeze(1).expand_as(de)[~off]
+    f_diag_sum = f_diag.sum(dim=1)  # (2,) — for μ1 conservation
+    # ─────────────────────────────────────────────────────────────────────
+
     while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
         # Normalize current direction
         norm_dr = torch.norm(dr)
@@ -728,16 +747,25 @@ def kernel_update_lr_os(
         eff_diag = d_Hcoul_diag.unsqueeze(0) + spin_sign * mu_spin.unsqueeze(
             0
         )  # (2, n_orb)
-        d_Hcoul = 0.5 * (
-            eff_diag.unsqueeze(2) * S + S * eff_diag.unsqueeze(1)
-        )  # (2, n_orb, n_orb)
 
-        H1_orth = torch.matmul(Z.transpose(-1, -2), torch.matmul(d_Hcoul, Z))
-        # First-order density response (D1 only — skip D0 to save 2 matmuls)
-        D1 = fermi_prt_batch_D1_only(H1_orth, Te, Q, e, mu0)
-        D1 = torch.matmul(Z, torch.matmul(D1, Z.transpose(-1, -2)))
-        # O(n²) diagonal extraction instead of O(n³) full matmul
-        D1S = (D1 * S.transpose(-1, -2)).sum(dim=-1)
+        # ── Fused forward transform: W.T @ dH @ W via row-scaling ────────
+        # dH = 0.5*(diag(d)@S + S@diag(d)), so W.T@dH@W = 0.5*(A + A.T)
+        # where A = (d*W).T @ (S@W),  with S@W = SW precomputed
+        Wd = eff_diag.unsqueeze(-1) * W  # (2, n_orb, n_orb) row-scaling O(n²)
+        A = torch.matmul(Wd.transpose(-1, -2), SW)  # 1 batched matmul
+        QH1Q = 0.5 * (A + A.transpose(-1, -2))
+
+        # ── Response in eigenbasis (chi precomputed) ──────────────────────
+        X = chi * QH1Q
+        mu1_mask = (torch.abs(f_diag_sum) > 1e-12).to(S.dtype)
+        mu1 = (
+            X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (f_diag_sum + (1.0 - mu1_mask))
+        ) * mu1_mask
+        X = X - torch.diag_embed(f_diag) * mu1.unsqueeze(-1).unsqueeze(-1)
+
+        # ── Fused backward: D1S = diag(W @ X @ W.T @ S) = row-dot(W@X, SW) ─
+        WX = torch.matmul(W, X)  # 1 batched matmul
+        D1S = (WX * SW).sum(dim=-1)  # (2, n_orb), O(n²)
         # dq (atomic) from AO response
         dq = torch.zeros(2, n_shells_per_atom.sum(), dtype=S.dtype, device=S.device)
         dq.scatter_add_(
