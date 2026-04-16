@@ -62,6 +62,61 @@ def get_h_spin(TYPE, net_spin, w, n_shells_per_atom, shell_types):
     return H_spin
 
 
+def get_h_spin_diag(TYPE, net_spin, w, n_shells_per_atom, shell_types):
+    """Return the spin potential as a vector (diagonal), avoiding the full n_orb×n_orb matrix.
+
+    The full H_spin matrix (MU + NU) has the property that when used as
+    0.5 * S * (MU + NU), it equals 0.5 * (mu[:,None]*S + S*mu[None,:]),
+    i.e. the same diagonal-broadcast form as the Coulomb shift. So we only
+    need the vector mu, not the outer sum.
+    """
+    n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
+    n_orb_per_shell_global = n_orb_per_shell[shell_types]
+    mu = 0.0 * torch.zeros_like(n_shells_per_atom.repeat_interleave(n_shells_per_atom))
+
+    # s atoms
+    mask_tmp1 = n_shells_per_atom == 1
+    if w.dim() == 1:
+        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
+            (1, 1), device=net_spin.device
+        )
+    else:
+        w_tmp = w[TYPE[mask_tmp1]][:, 0:1, 0:1]
+    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
+    q_tmp = net_spin[mask_tmp].view(-1, 1)
+    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+    mu[mask_tmp] = spin_term_tmp
+
+    # sp atoms
+    mask_tmp1 = n_shells_per_atom == 2
+    if w.dim() == 1:
+        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
+            (2, 2), device=net_spin.device
+        )
+    else:
+        w_tmp = w[TYPE[mask_tmp1]][:, 0:2, 0:2]
+    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
+    q_tmp = net_spin[mask_tmp].view(-1, 2)
+    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+    mu[mask_tmp] = spin_term_tmp
+
+    # spd atoms
+    mask_tmp1 = n_shells_per_atom == 3
+    if w.dim() == 1:
+        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
+            (3, 3), device=net_spin.device
+        )
+    else:
+        w_tmp = w[TYPE[mask_tmp1]][:, 0:3, 0:3]
+    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
+    q_tmp = net_spin[mask_tmp].view(-1, 3)
+    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
+    mu[mask_tmp] = spin_term_tmp
+
+    mu = mu.repeat_interleave(n_orb_per_shell_global)
+    return mu  # (n_orb,) vector
+
+
 # @torch.compile
 def get_spin_energy(TYPE, net_spin, w, n_shells_per_atom):
 
