@@ -101,7 +101,12 @@ def fermi_prt_batch_D1_only(
     X = chi * QH1Q
     dN_dmu = diag.sum(dim=1)
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
-    mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
+    if mu0.dim() == 0: # check if mu0 is shared. If so, calc shared response in mu1
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mu1 = ( (X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((dN_dmu[0] + (1.0 - mask)) + (dN_dmu[1] + (1.0 - mask)))) * mask
+    else:
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
     X = X - torch.diag_embed(diag) * mu1.unsqueeze(-1).unsqueeze(-1)
     return torch.matmul(Q, torch.matmul(X, Q.transpose(-1, -2)))
 
@@ -148,10 +153,17 @@ def fermi_prt_batch(
     # if torch.abs(dN_dmu) > 1e-15:
     #     mu1 = X.diagonal().sum() / dN_dmu
     #     X = X - torch.diag_embed(diag) * mu1
+    if mu0.dim() == 0: # check if mu0 is shared. If so, calc shared response in mu1
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
+        mu1 = ((X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((dN_dmu[0] + (1.0 - mask)) + (dN_dmu[1] + (1.0 - mask)))) * mask
+    else:
+        # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
+        mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
+        mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
 
-    # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
-    mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
-    mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
+
+
     X = X - torch.diag_embed(diag) * mu1.unsqueeze(-1).unsqueeze(-1)
 
     D0 = torch.matmul(Q, torch.matmul(torch.diag_embed(fe), Q.transpose(-1, -2)))

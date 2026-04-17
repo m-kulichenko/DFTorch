@@ -168,8 +168,6 @@ def calc_q_os(
         Dorth, Q, e, f, mu0 = dm_fermi_x_os(
             Z.T @ H @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
         )
-    # print(mu0)
-
     if deltaSCF:
         mu_0 = mu0
         Dorth, Q, e, f, mu0 = nonaufbau_constraints(
@@ -758,9 +756,14 @@ def kernel_update_lr_os(
         # ── Response in eigenbasis (chi precomputed) ──────────────────────
         X = chi * QH1Q
         mu1_mask = (torch.abs(f_diag_sum) > 1e-12).to(S.dtype)
-        mu1 = (
-            X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (f_diag_sum + (1.0 - mu1_mask))
-        ) * mu1_mask
+        if mu0.dim() == 0: # check if shared chemical potential. If so, calc mu1 combined response.
+            mu1 = (
+                 (X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((f_diag_sum[0] + (1.0 - mu1_mask)) + (f_diag_sum[1] + (1.0 - mu1_mask)))
+            ) * mu1_mask
+        else:
+            mu1 = (
+                X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (f_diag_sum + (1.0 - mu1_mask))
+            ) * mu1_mask
         X = X - torch.diag_embed(f_diag) * mu1.unsqueeze(-1).unsqueeze(-1)
 
         # ── Fused backward: D1S = diag(W @ X @ W.T @ S) = row-dot(W@X, SW) ─
