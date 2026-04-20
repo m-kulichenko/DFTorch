@@ -308,11 +308,13 @@ def read_pdb(files, sort=True):
     """
     Read geometry from PDB files.
 
-    Parses ATOM / HETATM records for coordinates and element symbols.
+    Parses ATOM / HETATM records for coordinates and element symbols,
+    and CRYST1 records for the unit cell.
     Returns arrays in the same format as :func:`read_xyz` so that
     ``Structure`` can consume them interchangeably::
 
         species, coordinates = read_pdb(["system.pdb"])
+        species, coordinates, cell = read_pdb(["system.pdb"])
 
     Parameters
     ----------
@@ -328,6 +330,9 @@ def read_pdb(files, sort=True):
         Atomic numbers.
     COORDINATES : ndarray, shape (nfiles, natoms, 3), float64
         Cartesian coordinates in **Angstrom**.
+    cell : ndarray, shape (3, 3), float64 or None
+        Cartesian cell matrix from the CRYST1 record (row-vector convention),
+        or *None* if no CRYST1 record is present.
 
     Notes
     -----
@@ -338,12 +343,45 @@ def read_pdb(files, sort=True):
         selection metadata from REMARK headers use :func:`read_pdb_remarks`.
     """
     COORDINATES = []
+    cell_matrix = None
     for file in files:
         with open(file) as f:
             lines = f.readlines()
 
         coords = []
         for line in lines:
+            # --- CRYST1 record: unit cell parameters ---
+            if line.startswith("CRYST1") and cell_matrix is None:
+                a = float(line[6:15])
+                b = float(line[15:24])
+                c = float(line[24:33])
+                alpha = float(line[33:40])
+                beta = float(line[40:47])
+                gamma = float(line[47:54])
+                ar, br, gr = np.radians([alpha, beta, gamma])
+                cos_a, cos_b, cos_g = np.cos(ar), np.cos(br), np.cos(gr)
+                sin_g = np.sin(gr)
+                cell_matrix = np.array(
+                    [
+                        [a, 0.0, 0.0],
+                        [b * cos_g, b * sin_g, 0.0],
+                        [
+                            c * cos_b,
+                            c * (cos_a - cos_b * cos_g) / sin_g,
+                            c
+                            * np.sqrt(
+                                1
+                                - cos_a**2
+                                - cos_b**2
+                                - cos_g**2
+                                + 2 * cos_a * cos_b * cos_g
+                            )
+                            / sin_g,
+                        ],
+                    ],
+                    dtype=np.float64,
+                )
+
             record = line[:6].strip()
             if record not in ("ATOM", "HETATM"):
                 continue
@@ -390,7 +428,7 @@ def read_pdb(files, sort=True):
     SPECIES = COORDINATES[:, :, 0].astype(int)
     COORDINATES = COORDINATES[:, :, 1:4]
 
-    return SPECIES, COORDINATES
+    return SPECIES, COORDINATES, cell_matrix
 
 
 def read_pdb_remarks(file):

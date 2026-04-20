@@ -31,8 +31,11 @@ class Constants(torch.nn.Module):
         self.mass = torch.nn.Parameter(mass, requires_grad=False)
 
         if isinstance(file, str):
-            _reader = read_pdb if file.lower().endswith(".pdb") else read_xyz
-            species, _ = _reader([file], sort=False)  # Input coordinate file
+            if file.lower().endswith(".pdb"):
+                species, _, _ = read_pdb([file], sort=False)  # Input coordinate file
+            else:
+                species, _ = read_xyz([file], sort=False)  # Input coordinate file
+
         else:
             species, _ = read_xyz(file, sort=False)  # Input coordinate file
         TYPE = torch.tensor(species.flatten())

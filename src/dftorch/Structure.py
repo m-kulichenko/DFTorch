@@ -79,7 +79,9 @@ class Structure(torch.nn.Module):
         self.req_grad_cell = req_grad_cell
         if species is None or coordinates is None:
             if file is not None and file.lower().endswith(".pdb"):
-                species, coordinates = read_pdb([file], sort=False)
+                species, coordinates, pdb_cell = read_pdb([file], sort=False)
+                if cell is None and pdb_cell is not None:
+                    cell = pdb_cell
             else:
                 species, coordinates = read_xyz(
                     [file], sort=False
@@ -332,7 +334,7 @@ class StructureBatch(torch.nn.Module):
         self.batch_size = len(file)
         # Auto-detect PDB vs XYZ from first file extension
         if file and isinstance(file[0], str) and file[0].lower().endswith(".pdb"):
-            species, coordinates = read_pdb(file, sort=False)
+            species, coordinates, _ = read_pdb(file, sort=False)
         else:
             species, coordinates = read_xyz(file, sort=False)  # Input coordinate file
         self.TYPE = torch.tensor(species, dtype=torch.int64, device=device)

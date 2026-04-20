@@ -12,6 +12,7 @@ from .Constants import Constants
 from .Structure import Structure, StructureBatch
 from .ESDriver import ESDriver, ESDriverBatch
 from .MD import MDXL, MDXLBatch, MDXLOS
+from .Optimizer import GeoOpt
 from ._stress import (
     get_electronic_stress_analytical,
     get_total_stress_analytical,
@@ -30,6 +31,7 @@ __all__ = [
     "StructureBatch",
     "ESDriver",
     "ESDriverBatch",
+    "GeoOpt",
     "MDXL",
     "MDXLBatch",
     "MDXLOS",
