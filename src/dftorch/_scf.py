@@ -1482,7 +1482,8 @@ def delta_scf_x_os(
             if it == dftorch_params["SCF_MAX_ITER"]:
                 print("Did not converge")
 
-        f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
+
+        #f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2))) # supersedes non-aufbau contraint if calculated, at least in appearance
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)

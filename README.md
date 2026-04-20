@@ -61,4 +61,4 @@ from dftorch import (
 All other modules are internal implementation details and may change.
 
 ## Authors
- M. Kulichenko, A.M.N. Niklasson
+ M. Kulichenko, A.P. Baldo, A.M.N. Niklasson

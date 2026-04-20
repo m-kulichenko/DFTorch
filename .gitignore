@@ -13,6 +13,7 @@ experiments/*.pqr
 
 !experiments/1_tutorial.ipynb
 !experiments/2_tutorial_freq.ipynb
+!experiments/3_tutorial_deltaSCF.ipynb
 
 **/.ipynb_checkpoints/
 personal_github
@@ -35,3 +36,4 @@ experiments/md_trj.xyz.pdb
 experiments/md_trj.xyz.pdb
 *.pdb
 *.pdb
+build/
