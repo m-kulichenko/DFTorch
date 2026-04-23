@@ -81,12 +81,11 @@ def get_repulsion_energy(
             Rcut,
             Nats,
             const,
-            upper_tri_only=True,
-            remove_self_neigh=False,
             min_image_only=True,
             verbose=verbose,
         )
     )
+
     Rab_X = nnRx - RX.unsqueeze(-1)
     Rab_Y = nnRy - RY.unsqueeze(-1)
     Rab_Z = nnRz - RZ.unsqueeze(-1)

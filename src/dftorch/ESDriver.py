@@ -85,7 +85,6 @@ class ESDriver(torch.nn.Module):
             structure.Nats,
             const,
             upper_tri_only=False,
-            remove_self_neigh=False,
             verbose=verbose,
         )
 
@@ -162,12 +161,12 @@ class ESDriver(torch.nn.Module):
             # Get full Coulomb matrix. In principle we do not need an explicit representation of the Coulomb matrix C!
             (
                 _,
-                nndist,
+                _,
                 nnRx,
                 nnRy,
                 nnRz,
                 nnType,
-                nnStruct,
+                _,
                 _,
                 neighbor_I,
                 neighbor_J,
@@ -183,7 +182,6 @@ class ESDriver(torch.nn.Module):
                 structure.Nats,
                 const,
                 upper_tri_only=False,
-                remove_self_neigh=False,
                 verbose=verbose,
             )
 
@@ -252,12 +250,10 @@ class ESDriver(torch.nn.Module):
 
             del (
                 _,
-                nndist,
                 nnRx,
                 nnRy,
                 nnRz,
                 nnType,
-                nnStruct,
                 neighbor_I,
                 neighbor_J,
                 IJ_pair_type,

@@ -450,7 +450,6 @@ def get_coulomb_stress_real(
             Nats,
             const,
             upper_tri_only=False,
-            remove_self_neigh=False,
         )
     )
 

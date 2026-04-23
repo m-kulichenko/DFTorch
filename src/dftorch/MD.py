@@ -531,32 +531,33 @@ class MDXL:
         tic2_1 = time.perf_counter()
 
         # ── H0 + S build & charge extrapolation ─────────────────────────
-        if self._os and ResErr > 0.05:
-            # OS divergence guard: fall back to full SCF
-            self.es_driver(structure, self.const, do_scf=True)
-            self.n = structure.q_spin_sr.clone()
-            self.n_5 = self.n
-            self.n_4 = self.n
-            self.n_3 = self.n
-            self.n_2 = self.n
-            self.n_1 = self.n
-            self.n_0 = self.n
-        else:
-            self.es_driver(structure, self.const, do_scf=False)
-            self.n = (
-                2 * self.n_0
-                - self.n_1
-                - self.kappa * self.K0Res
-                + self.alpha
-                * (
-                    self.C0 * self.n_0
-                    + self.C1 * self.n_1
-                    + self.C2 * self.n_2
-                    + self.C3 * self.n_3
-                    + self.C4 * self.n_4
-                    + self.C5 * self.n_5
-                )
+        # if self._os and ResErr > 0.05:
+        #     # OS divergence guard: fall back to full SCF
+        #     self.es_driver(structure, self.const, do_scf=True)
+        #     self.n = structure.q_spin_sr.clone()
+        #     self.n_5 = self.n
+        #     self.n_4 = self.n
+        #     self.n_3 = self.n
+        #     self.n_2 = self.n
+        #     self.n_1 = self.n
+        #     self.n_0 = self.n
+        # else:
+        self.es_driver(structure, self.const, do_scf=False)
+        self.n = (
+            2 * self.n_0
+            - self.n_1
+            - self.kappa * self.K0Res
+            + self.alpha
+            * (
+                self.C0 * self.n_0
+                + self.C1 * self.n_1
+                + self.C2 * self.n_2
+                + self.C3 * self.n_3
+                + self.C4 * self.n_4
+                + self.C5 * self.n_5
             )
+        )
+
         self.n_5 = self.n_4
         self.n_4 = self.n_3
         self.n_3 = self.n_2
@@ -650,7 +651,6 @@ class MDXL:
             to_n = n_tot_atom if self._os else self.n
             CoulPot = CoulPot + structure.thirdorder.get_shifts(to_n)
 
-
         # ── Diagonalise & compute charges ────────────────────────────────
         # ── DELTA_SCF initial diagonalisation (open-shell only) ──────────
         if self._os and dftorch_params.get("DELTA_SCF", False):
@@ -690,7 +690,6 @@ class MDXL:
                 dftorch_params["DELTA_SCF"],
                 dftorch_params,
             )
-
 
             structure.net_spin_sr = structure.q_spin_sr[0] - structure.q_spin_sr[1]
             q_spin_atom = torch.zeros_like(structure.RX.unsqueeze(0).expand(2, -1))
