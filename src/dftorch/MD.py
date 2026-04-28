@@ -1404,7 +1404,7 @@ class MDXLBatch:
         # Generate atom index for_ each orbital
         counts = structure.n_orbitals_per_atom  # shape (B, N)
         cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
-        total_orbs = int(cum_counts[0, -1].item())
+        total_orbs = structure.H0.shape[-1]
         r = torch.arange(total_orbs, device=counts.device).expand(
             counts.size(0), -1
         )  # (B, total_orbs)

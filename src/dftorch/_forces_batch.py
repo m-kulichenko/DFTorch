@@ -130,7 +130,7 @@ def forces_batch(
     device = H.device
     counts = n_orbitals_per_atom  # shape (B, N)
     cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
-    total_orbs = int(cum_counts[0, -1].item())
+    total_orbs = H.shape[-1]
     r = torch.arange(total_orbs, device=counts.device).expand(
         counts.size(0), -1
     )  # (B, total_orbs)
@@ -361,7 +361,7 @@ def forces_shadow_batch(
     device = H.device
     counts = n_orbitals_per_atom  # shape (B, N)
     cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
-    total_orbs = int(cum_counts[0, -1].item())
+    total_orbs = H.shape[-1]
     r = torch.arange(total_orbs, device=counts.device).expand(
         counts.size(0), -1
     )  # (B, total_orbs)

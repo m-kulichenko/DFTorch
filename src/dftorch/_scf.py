@@ -65,8 +65,8 @@ class _AndersonMixer:
         inputs correctly by computing per-element DIIS coefficients when
         the input has a leading batch dimension.
         """
-        self._q_hist.append(q_in.clone())
-        self._r_hist.append(residual.clone())
+        self._q_hist.append(q_in)
+        self._r_hist.append(residual)
 
         m = len(self._r_hist)
         if m == 1:
@@ -386,7 +386,7 @@ def SCFx(
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
-                        positions.detach().clone(),
+                        positions,
                         q,
                         cell,
                         nbr_inds,
@@ -450,7 +450,7 @@ def SCFx(
                     Hubbard_U,
                     dftorch_params,
                     dftorch_params["KRYLOV_TOL"],
-                    KK.clone(),
+                    KK,
                     Res,
                     q,
                     S,
@@ -479,7 +479,7 @@ def SCFx(
                 K0Res = KK @ Res
                 q = q_old - K0Res
 
-            Ecoul_old = Ecoul.clone()
+            Ecoul_old = Ecoul
             if dftorch_params["coul_method"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
             else:
@@ -747,7 +747,7 @@ def scf_x_os(
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
-                        positions.detach().clone(),
+                        positions,
                         q_tot_atom,
                         cell,
                         nbr_inds,
@@ -820,7 +820,7 @@ def scf_x_os(
                     Hubbard_U,
                     dftorch_params,
                     dftorch_params["KRYLOV_TOL"],
-                    KK.clone(),
+                    KK,
                     Res,
                     q_spin_sr,
                     S,
@@ -860,7 +860,7 @@ def scf_x_os(
             )  # atom-resolved
             net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
 
-            Ecoul_old = Ecoul.clone()
+            Ecoul_old = Ecoul
             if dftorch_params["coul_method"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
             else:
@@ -986,7 +986,7 @@ def SCFx_batch(
     device = H0.device
     counts = n_orbitals_per_atom  # shape (B, N)
     cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
-    total_orbs = int(cum_counts[0, -1].item())
+    total_orbs = H0.shape[-1]
     r = torch.arange(total_orbs, device=counts.device).expand(
         counts.size(0), -1
     )  # (B, total_orbs)
@@ -1111,7 +1111,7 @@ def SCFx_batch(
                     Hubbard_U_gathered,
                     dftorch_params,
                     dftorch_params["KRYLOV_TOL"],
-                    KK.clone(),
+                    KK,
                     Res,
                     q,
                     S,
@@ -1140,7 +1140,7 @@ def SCFx_batch(
                 K0Res = torch.matmul(KK, Res.unsqueeze(-1)).squeeze(-1)
                 q = q_old - K0Res
 
-            Ecoul_old = Ecoul.clone()
+            Ecoul_old = Ecoul
 
             Cq = torch.bmm(C, q.unsqueeze(-1)).squeeze(-1)  # (B,N)
             Ecoul = 0.5 * torch.sum(q * Cq, dim=-1) + 0.5 * torch.sum(
@@ -1362,7 +1362,7 @@ def delta_scf_x_os(
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
-                        positions.detach().clone(),
+                        positions,
                         q_tot_atom,
                         lattice_vecs,
                         nbr_inds,
@@ -1431,7 +1431,7 @@ def delta_scf_x_os(
                     Hubbard_U,
                     dftorch_params,
                     dftorch_params["KRYLOV_TOL"],
-                    KK.clone(),
+                    KK,
                     Res,
                     q_spin_sr,
                     S,
@@ -1463,7 +1463,7 @@ def delta_scf_x_os(
             )  # atom-resolved
             net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
 
-            Ecoul_old = Ecoul.clone()
+            Ecoul_old = Ecoul
             if dftorch_params["coul_method"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
             else:
@@ -1482,8 +1482,7 @@ def delta_scf_x_os(
             if it == dftorch_params["SCF_MAX_ITER"]:
                 print("Did not converge")
 
-
-        #f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2))) # supersedes non-aufbau contraint if calculated, at least in appearance
+        # f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2))) # supersedes non-aufbau contraint if calculated, at least in appearance
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
     DS = 1 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
