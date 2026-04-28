@@ -64,8 +64,6 @@ class Constants(torch.nn.Module):
             UD,
         ) = get_skf_tensors(TYPE, self.skfpath)
 
-        # w = load_spinw_to_tensor(skfpath + '/spinw.txt', device=TYPE.device)
-
         try:
             w_shell = load_spinw_to_matrix(skfpath + "spinw.txt", device=TYPE.device)
             self.w_shell = torch.nn.Parameter(w_shell, requires_grad=False)

@@ -1,5 +1,7 @@
 import torch
 
+from ._tools import _maybe_compile
+
 
 # @torch.compile  # Disabled: stale inductor cache produces incorrect results
 def forces_batch(
@@ -452,3 +454,18 @@ def forces_shadow_batch(
     # Total force
     Ftot = Fband0 + Fcoul + Fdipole + FPulay + FScoul + FSdipole + Frep
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
+
+
+forces_batch_eager = forces_batch
+forces_shadow_batch_eager = forces_shadow_batch
+
+forces_batch = _maybe_compile(
+    forces_batch,
+    fullgraph=False,
+    dynamic=False,
+)
+forces_shadow_batch = _maybe_compile(
+    forces_shadow_batch,
+    fullgraph=False,
+    dynamic=False,
+)

@@ -1,65 +1,52 @@
 import torch
 
+from ._tools import _maybe_compile
 
-# @torch.compile
+
+def _get_shell_spin_potential(TYPE, net_spin, w, n_shells_per_atom):
+
+    n_atoms = TYPE.shape[0]
+    total_shells = net_spin.shape[0]
+    shell_ids = torch.arange(
+        total_shells, device=net_spin.device, dtype=n_shells_per_atom.dtype
+    )
+    atom_ids = torch.arange(
+        n_atoms, device=net_spin.device, dtype=n_shells_per_atom.dtype
+    )
+    shell_to_atom = torch.repeat_interleave(atom_ids, n_shells_per_atom)
+    shell_starts = torch.cumsum(n_shells_per_atom, dim=0) - n_shells_per_atom
+    local_shell_ids = shell_ids - torch.repeat_interleave(
+        shell_starts, n_shells_per_atom
+    )
+    flat_shell_ids = (shell_to_atom * 3 + local_shell_ids).long()
+
+    net_spin_padded = torch.zeros(
+        n_atoms * 3, dtype=net_spin.dtype, device=net_spin.device
+    )
+    net_spin_padded.scatter_add_(0, flat_shell_ids, net_spin)
+    net_spin_padded = net_spin_padded.view(n_atoms, 3)
+
+    if w.dim() == 1:
+        mu_by_atom = w[TYPE] * net_spin_padded.sum(dim=1)
+        return mu_by_atom.gather(0, shell_to_atom.long())
+    else:
+        mu_by_atom = torch.matmul(w[TYPE], net_spin_padded.unsqueeze(-1)).squeeze(-1)
+
+    return mu_by_atom.reshape(-1).gather(0, flat_shell_ids)
+
+
+def _get_shell_spin_energy(lhs_spin, rhs_spin, TYPE, w, n_shells_per_atom):
+    rhs_potential = _get_shell_spin_potential(TYPE, rhs_spin, w, n_shells_per_atom)
+    return 0.5 * torch.sum(lhs_spin * rhs_potential)
+
+
 def get_h_spin(TYPE, net_spin, w, n_shells_per_atom, shell_types):
 
     n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
     n_orb_per_shell_global = n_orb_per_shell[shell_types]
-    mu = 0.0 * torch.zeros_like(n_shells_per_atom.repeat_interleave(n_shells_per_atom))
-
-    # s atoms
-    mask_tmp1 = n_shells_per_atom == 1  #
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (1, 1), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:1, 0:1]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # map atom inds onto orbitals
-    q_tmp = net_spin[mask_tmp].view(-1, 1)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
-    # sp atoms
-    mask_tmp1 = n_shells_per_atom == 2
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (2, 2), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:2, 0:2]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp = net_spin[mask_tmp].view(-1, 2)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
-    # spd atoms
-    mask_tmp1 = n_shells_per_atom == 3
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (3, 3), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:3, 0:3]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp = net_spin[mask_tmp].view(-1, 3)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
+    mu = _get_shell_spin_potential(TYPE, net_spin, w, n_shells_per_atom)
     mu = mu.repeat_interleave(n_orb_per_shell_global)
-    MU = mu.unsqueeze(0).expand(len(mu), -1)
-    NU = mu.unsqueeze(1).expand(-1, len(mu))
-    # H_spin = 0.5 * S * (MU + NU)
-    H_spin = MU + NU
-
-    return H_spin
+    return mu.unsqueeze(0) + mu.unsqueeze(1)
 
 
 def get_h_spin_diag(TYPE, net_spin, w, n_shells_per_atom, shell_types):
@@ -72,158 +59,28 @@ def get_h_spin_diag(TYPE, net_spin, w, n_shells_per_atom, shell_types):
     """
     n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
     n_orb_per_shell_global = n_orb_per_shell[shell_types]
-    mu = 0.0 * torch.zeros_like(n_shells_per_atom.repeat_interleave(n_shells_per_atom))
-
-    # s atoms
-    mask_tmp1 = n_shells_per_atom == 1
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (1, 1), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:1, 0:1]
-    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
-    q_tmp = net_spin[mask_tmp].view(-1, 1)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
-    # sp atoms
-    mask_tmp1 = n_shells_per_atom == 2
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (2, 2), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:2, 0:2]
-    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
-    q_tmp = net_spin[mask_tmp].view(-1, 2)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
-    # spd atoms
-    mask_tmp1 = n_shells_per_atom == 3
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (3, 3), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:3, 0:3]
-    mask_tmp = mask_tmp1.repeat_interleave(n_shells_per_atom)
-    q_tmp = net_spin[mask_tmp].view(-1, 3)
-    spin_term_tmp = (w_tmp * q_tmp.unsqueeze(1)).sum(-1).flatten()
-    mu[mask_tmp] = spin_term_tmp
-
+    mu = _get_shell_spin_potential(TYPE, net_spin, w, n_shells_per_atom)
     mu = mu.repeat_interleave(n_orb_per_shell_global)
     return mu  # (n_orb,) vector
 
 
-# @torch.compile
+get_h_spin_eager = get_h_spin
+get_h_spin_diag_eager = get_h_spin_diag
+get_h_spin = _maybe_compile(get_h_spin)
+get_h_spin_diag = _maybe_compile(get_h_spin_diag)
+
+
 def get_spin_energy(TYPE, net_spin, w, n_shells_per_atom):
-
-    # s atoms
-    mask_tmp1 = n_shells_per_atom == 1  #
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (1, 1), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:1, 0:1]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # map atom inds onto orbitals
-    q_tmp = net_spin[mask_tmp].view(-1, 1)
-    e_spin = (q_tmp.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp.unsqueeze(1)).sum()
-
-    # sp atoms
-    mask_tmp1 = n_shells_per_atom == 2
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (2, 2), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:2, 0:2]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp = net_spin[mask_tmp].view(-1, 2)
-    e_spin = (
-        e_spin
-        + (q_tmp.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp.unsqueeze(1)).sum()
-    )
-
-    # spd atoms
-    mask_tmp1 = n_shells_per_atom == 3
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (3, 3), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:3, 0:3]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp = net_spin[mask_tmp].view(-1, 3)
-    e_spin = (
-        e_spin
-        + (q_tmp.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp.unsqueeze(1)).sum()
-    )
-
-    return 0.5 * e_spin
+    return _get_shell_spin_energy(net_spin, net_spin, TYPE, w, n_shells_per_atom)
 
 
-# @torch.compile
 def get_spin_energy_shadow(TYPE, net_spin, n_net_spin, w, n_shells_per_atom):
 
     diff = 2 * net_spin - n_net_spin
-    # s atoms
-    mask_tmp1 = n_shells_per_atom == 1  #
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (1, 1), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:1, 0:1]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # map atom inds onto orbitals
-    q_tmp1 = diff[mask_tmp].view(-1, 1)
-    q_tmp2 = n_net_spin[mask_tmp].view(-1, 1)
-    e_spin = (q_tmp1.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp2.unsqueeze(1)).sum()
+    return _get_shell_spin_energy(diff, n_net_spin, TYPE, w, n_shells_per_atom)
 
-    # sp atoms
-    mask_tmp1 = n_shells_per_atom == 2
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (2, 2), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:2, 0:2]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp1 = diff[mask_tmp].view(-1, 2)
-    q_tmp2 = n_net_spin[mask_tmp].view(-1, 2)
-    e_spin = (
-        e_spin
-        + (q_tmp1.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp2.unsqueeze(1)).sum()
-    )
 
-    # spd atoms
-    mask_tmp1 = n_shells_per_atom == 3
-    if w.dim() == 1:
-        w_tmp = w[TYPE[mask_tmp1]].unsqueeze(-1).unsqueeze(-1) * torch.ones(
-            (3, 3), device=net_spin.device
-        )
-    else:
-        w_tmp = w[TYPE[mask_tmp1]][:, 0:3, 0:3]
-    mask_tmp = mask_tmp1.repeat_interleave(
-        n_shells_per_atom
-    )  # Generate atom index for each orbital
-    q_tmp1 = diff[mask_tmp].view(-1, 3)
-    q_tmp2 = n_net_spin[mask_tmp].view(-1, 3)
-    e_spin = (
-        e_spin
-        + (q_tmp1.unsqueeze(1).transpose(-1, -2) * w_tmp * q_tmp2.unsqueeze(1)).sum()
-    )
-
-    return 0.5 * e_spin
+get_spin_energy_eager = get_spin_energy
+get_spin_energy_shadow_eager = get_spin_energy_shadow
+get_spin_energy = _maybe_compile(get_spin_energy)
+get_spin_energy_shadow = _maybe_compile(get_spin_energy_shadow)

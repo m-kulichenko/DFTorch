@@ -33,6 +33,8 @@ from typing import Optional
 
 import torch
 
+from ._tools import _maybe_compile
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Low-level helper functions (translated from DFTB+ thirdorder.F90)
@@ -802,6 +804,83 @@ class ThirdOrderBatch:
 
         grad = torch.einsum("bmn,bkmn->bkm", tmp, self.diff_xyz)
         return grad
+
+
+ThirdOrder.get_shifts_eager = ThirdOrder.get_shifts
+ThirdOrder.get_dshifts_dq_eager = ThirdOrder.get_dshifts_dq
+ThirdOrder.get_energy_eager = ThirdOrder.get_energy
+ThirdOrder.get_energy_xlbomd_eager = ThirdOrder.get_energy_xlbomd
+ThirdOrder.get_gradient_dc_eager = ThirdOrder.get_gradient_dc
+ThirdOrder.get_gradient_dc_xlbomd_eager = ThirdOrder.get_gradient_dc_xlbomd
+
+ThirdOrder.get_shifts = _maybe_compile(
+    ThirdOrder.get_shifts,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrder.get_dshifts_dq = _maybe_compile(
+    ThirdOrder.get_dshifts_dq,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrder.get_energy = _maybe_compile(
+    ThirdOrder.get_energy,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrder.get_energy_xlbomd = _maybe_compile(
+    ThirdOrder.get_energy_xlbomd,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrder.get_gradient_dc = _maybe_compile(
+    ThirdOrder.get_gradient_dc,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrder.get_gradient_dc_xlbomd = _maybe_compile(
+    ThirdOrder.get_gradient_dc_xlbomd,
+    fullgraph=False,
+    dynamic=False,
+)
+
+ThirdOrderBatch.get_shifts_eager = ThirdOrderBatch.get_shifts
+ThirdOrderBatch.get_dshifts_dq_eager = ThirdOrderBatch.get_dshifts_dq
+ThirdOrderBatch.get_energy_eager = ThirdOrderBatch.get_energy
+ThirdOrderBatch.get_energy_xlbomd_eager = ThirdOrderBatch.get_energy_xlbomd
+ThirdOrderBatch.get_gradient_dc_eager = ThirdOrderBatch.get_gradient_dc
+ThirdOrderBatch.get_gradient_dc_xlbomd_eager = ThirdOrderBatch.get_gradient_dc_xlbomd
+
+ThirdOrderBatch.get_shifts = _maybe_compile(
+    ThirdOrderBatch.get_shifts,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrderBatch.get_dshifts_dq = _maybe_compile(
+    ThirdOrderBatch.get_dshifts_dq,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrderBatch.get_energy = _maybe_compile(
+    ThirdOrderBatch.get_energy,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrderBatch.get_energy_xlbomd = _maybe_compile(
+    ThirdOrderBatch.get_energy_xlbomd,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrderBatch.get_gradient_dc = _maybe_compile(
+    ThirdOrderBatch.get_gradient_dc,
+    fullgraph=False,
+    dynamic=False,
+)
+ThirdOrderBatch.get_gradient_dc_xlbomd = _maybe_compile(
+    ThirdOrderBatch.get_gradient_dc_xlbomd,
+    fullgraph=False,
+    dynamic=False,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

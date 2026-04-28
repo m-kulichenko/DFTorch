@@ -1,16 +1,25 @@
-import torch
-from ._elements import label, symbol_to_number
-from typing import Tuple, Optional, List
+import os
 import re
+from typing import List, Optional, Tuple
+
+import torch
+
+from ._elements import label, symbol_to_number
+
+
+_COMPILE_ENABLED = os.environ.get("DFTORCH_ENABLE_COMPILE", "0") != "0"
+
+
+def _maybe_compile(fn, fullgraph=False, dynamic=False):
+    if not _COMPILE_ENABLED:
+        return fn
+    return torch.compile(fn, fullgraph=fullgraph, dynamic=dynamic)
+
 
 # IMPORTANT: do not import `dftorch.ewald_pme` (or neighbor_list) at module import
 # time; it can try to load optional Triton backends and emit warnings.
 
 
-# compile options you can tweak:
-# - dynamic=True if matrix size can change between calls
-# - mode="reduce-overhead" or "max-autotune" for more perf after warmup
-@torch.compile
 def fractional_matrix_power_symm(A: torch.Tensor, power: float = -0.5) -> torch.Tensor:
     """
     Compute the fractional matrix power A**power for a (batch of) real symmetric
@@ -57,6 +66,14 @@ def fractional_matrix_power_symm(A: torch.Tensor, power: float = -0.5) -> torch.
 
     # A^p = Q @ diag(d) @ Q^T
     return Q_scaled @ Q.transpose(-2, -1)
+
+
+fractional_matrix_power_symm_eager = fractional_matrix_power_symm
+fractional_matrix_power_symm = _maybe_compile(
+    fractional_matrix_power_symm,
+    fullgraph=False,
+    dynamic=False,
+)
 
 
 def ordered_pairs_from_TYPE(
@@ -209,108 +226,6 @@ def calculate_dist_dips(
     return disps.to(pos_T.dtype), dists.to(pos_T.dtype), nbr_inds
 
 
-def load_spinw_to_tensor(
-    path: str, device: torch.device, max_Z: int = 120
-) -> torch.Tensor:
-    # Initialize tensor: [0] dummy row
-    w_dict = torch.zeros(max_Z, 6, device=device, dtype=torch.float64)
-
-    element = None
-    matrix_rows = []
-
-    # Regex: element header like "H:" or "C:" etc.
-    header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
-
-    def flush_current():
-        nonlocal element, matrix_rows
-        if element is None or not matrix_rows:
-            return
-        sym = element
-        Z = symbol_to_number.get(sym)
-        if Z is None or Z >= max_Z:
-            # Unknown or out of bounds; skip
-            element = None
-            matrix_rows = []
-            return
-
-        # Build matrix
-        mat = torch.tensor(matrix_rows, dtype=torch.float64, device=device)
-        # Expect symmetric square blocks of size 1x1 (s), 2x2 (s,p), or 3x3 (s,p,d)
-        if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
-            # Skip malformed entries
-            element = None
-            matrix_rows = []
-            return
-
-        n = mat.shape[0]
-        # Map to [ss, sp, sd, pp, pd, dd]
-        # Default zeros; fill what is available
-        vals = torch.zeros(6, dtype=torch.float64, device=device)
-
-        if n == 1:
-            # [s] -> ss
-            vals[0] = mat[0, 0]  # ss
-        elif n == 2:
-            # [[ss, sp],
-            #  [sp, pp]]
-            vals[0] = mat[0, 0]  # ss
-            vals[1] = mat[0, 1]  # sp
-            vals[3] = mat[1, 1]  # pp
-            # sd, pd, dd remain 0
-        elif n == 3:
-            # [[ss, sp, sd],
-            #  [sp, pp, pd],
-            #  [sd, pd, dd]]
-            vals[0] = mat[0, 0]  # ss
-            vals[1] = mat[0, 1]  # sp
-            vals[2] = mat[0, 2]  # sd
-            vals[3] = mat[1, 1]  # pp
-            vals[4] = mat[1, 2]  # pd
-            vals[5] = mat[2, 2]  # dd
-        else:
-            # Larger blocks are not expected; take upper-tri entries up to 6 in s,p,d order
-            # ss, sp, sd, pp, pd, dd from positions (0,0),(0,1),(0,2),(1,1),(1,2),(2,2) if available
-            idxs = [(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]
-            for k, (i, j) in enumerate(idxs):
-                if i < n and j < n:
-                    vals[k] = mat[i, j]
-
-        w_dict[Z, :] = vals
-
-        # Reset
-        element = None
-        matrix_rows = []
-
-    with open(path, "r") as f:
-        for line in f:
-            line = line.rstrip("\n")
-            # Empty line -> possible separator
-            if not line.strip():
-                if matrix_rows:
-                    flush_current()
-                continue
-
-            m = header_re.match(line)
-            if m:
-                # New element header; flush previous
-                flush_current()
-                element = m.group(1)
-                matrix_rows = []
-                continue
-
-            # Data row: numbers separated by whitespace
-            if element is not None:
-                nums = line.split()
-                # Convert to floats
-                row = [float(x) for x in nums]
-                matrix_rows.append(row)
-
-    # Flush last element
-    flush_current()
-
-    return w_dict * 27.21138625
-
-
 def load_spinw_to_matrix(
     path: str, device: torch.device, max_Z: int = 120
 ) -> torch.Tensor:
@@ -428,102 +343,6 @@ def load_spinw_to_matrix(
     flush()  # last element in file
 
     return W * 27.21138625
-
-
-# def load_spinw_to_matrix(
-#     path: str, device: torch.device, max_Z: int = 120
-# ) -> torch.Tensor:
-#     """
-#     Parse spinw.txt and return per-element 3x3 symmetric matrices.
-#     The matrix layout is:
-#         [[ss, sp, sd],
-#          [sp, pp, pd],
-#          [sd, pd, dd]]
-#     For elements with smaller blocks:
-#       - 1x1: only ss set; others remain 0
-#       - 2x2: ss, sp, pp set; sd, pd, dd remain 0
-#       - 3x3: full matrix set
-#     Missing entries are left as zeros.
-
-#     Returns
-#     -------
-#     W : torch.Tensor, shape (max_Z, 3, 3)
-#         W[Z] is the 3x3 matrix for atomic number Z. Row 0 is dummy.
-#     """
-#     import re
-
-#     W = torch.zeros(max_Z, 3, 3, device=device, dtype=torch.float64)
-
-#     element = None
-#     matrix_rows = []
-
-#     header_re = re.compile(r"^\s*([A-Za-z]{1,2})\s*:\s*$")
-
-#     def flush_current():
-#         nonlocal element, matrix_rows
-#         if element is None or not matrix_rows:
-#             return
-#         sym = element
-#         Z = symbol_to_number.get(sym)
-#         # Skip unknown or out-of-range elements
-#         if Z is None or Z >= max_Z:
-#             element = None
-#             matrix_rows = []
-#             return
-
-#         mat = torch.tensor(matrix_rows, dtype=torch.float64, device=device)
-#         if mat.ndim != 2 or mat.shape[0] != mat.shape[1]:
-#             # Malformed block; skip
-#             element = None
-#             matrix_rows = []
-#             return
-
-#         n = mat.shape[0]
-#         # Fill into a 3x3 accumulator
-#         acc = torch.zeros(3, 3, dtype=torch.float64, device=device)
-
-#         if n >= 1:
-#             acc[0, 0] = mat[0, 0]  # ss
-#         if n >= 2:
-#             acc[0, 1] = mat[0, 1]  # sp
-#             acc[1, 0] = mat[0, 1]
-#             acc[1, 1] = mat[1, 1]  # pp
-#         if n >= 3:
-#             acc[0, 2] = mat[0, 2]  # sd
-#             acc[2, 0] = mat[0, 2]
-#             acc[1, 2] = mat[1, 2]  # pd
-#             acc[2, 1] = mat[1, 2]
-#             acc[2, 2] = mat[2, 2]  # dd
-
-#         W[Z] = acc
-
-#         # Reset
-#         element = None
-#         matrix_rows = []
-
-#     with open(path, "r") as f:
-#         for line in f:
-#             line = line.rstrip("\n")
-#             if not line.strip():
-#                 if matrix_rows:
-#                     flush_current()
-#                 continue
-
-#             m = header_re.match(line)
-#             if m:
-#                 flush_current()
-#                 element = m.group(1)
-#                 matrix_rows = []
-#                 continue
-
-#             if element is not None:
-#                 nums = line.split()
-#                 row = [float(x) for x in nums]
-#                 matrix_rows.append(row)
-
-#     flush_current()
-
-#     return W * 27.21138625
 
 
 def load_hubbard_derivs(

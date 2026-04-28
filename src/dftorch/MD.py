@@ -314,7 +314,7 @@ class MDXL:
         num_steps,
         dt,
         dump_interval=1,
-        traj_filename="md_trj.xyz",
+        traj_filename="md_trj",
     ):
         # Detect open-shell from structure.Nocc:
         # CS: int or 1-element tensor, OS: 2-element tensor [Nocc_alpha, Nocc_beta]
@@ -477,7 +477,9 @@ class MDXL:
                     f"Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, "
                     f"Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV"
                 )
-            write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
+            write_XYZ_trajectory(
+                traj_filename + ".xyz", structure, comm_string, step=md_step
+            )
 
             write_pdb_frame(
                 traj_filename + ".pdb",
@@ -1371,7 +1373,7 @@ class MDXLBatch:
         num_steps,
         dt,
         dump_interval=1,
-        traj_filename="md_trj.xyz",
+        traj_filename="md_trj",
     ):
 
         # Store params for_ barostat (needs them during step)
@@ -1500,7 +1502,9 @@ class MDXLBatch:
 
         if md_step % dump_interval == 100000:
             comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV\n"
-            write_XYZ_trajectory(traj_filename, structure, comm_string, step=md_step)
+            write_XYZ_trajectory(
+                traj_filename + ".xyz", structure, comm_string, step=md_step
+            )
         self.VX = (
             self.VX
             + 0.5 * dt * (self.F2V * structure.f_tot[:, 0] / structure.Mnuc)

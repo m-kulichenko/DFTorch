@@ -33,6 +33,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ._tools import _maybe_compile
+
 # ---------------------------------------------------------------------------
 # Unit conversions  (DFTorch internal: eV / Angstrom)
 # ---------------------------------------------------------------------------
@@ -356,6 +358,17 @@ class SimpleDftD3:
     # Public: energy + forces  (Angstrom / eV)
     # -------------------------------------------------------------------
 
+    def _get_dispersion_analytical(
+        self,
+        coords: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Analytical D3(BJ) dispersion energy and forces in DFTorch units."""
+        coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR
+        e_ha, f_ha = self._compute_analytical_forces_ha(coords_bohr)
+        e_ev = e_ha * HA_TO_EV
+        f_ev_ang = f_ha * (HA_TO_EV * ANG_TO_BOHR)
+        return e_ev, f_ev_ang
+
     def get_dispersion(
         self,
         coords: torch.Tensor,
@@ -383,14 +396,7 @@ class SimpleDftD3:
         if use_autograd:
             return self._get_dispersion_autograd(coords)
 
-        # --- analytical path (default) ---
-        coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR
-        e_ha, f_ha = self._compute_analytical_forces_ha(coords_bohr)
-        e_ev = e_ha * HA_TO_EV
-        # Convert force: Ha/Bohr → eV/Å  =  (Ha→eV) / (Bohr→Å)
-        #   = HA_TO_EV / BOHR_TO_ANG = HA_TO_EV * ANG_TO_BOHR
-        f_ev_ang = f_ha * (HA_TO_EV * ANG_TO_BOHR)
-        return e_ev, f_ev_ang
+        return self._get_dispersion_analytical(coords)
 
     def _get_dispersion_autograd(
         self,
@@ -418,14 +424,21 @@ class SimpleDftD3:
         e_ha = self._compute_energy_ha(coords_bohr)
         return e_ha * HA_TO_EV
 
+    def _get_forces_analytical(self, coords: torch.Tensor) -> torch.Tensor:
+        """Analytical dispersion forces (3, N) in eV/Å."""
+        _, f = self._get_dispersion_analytical(coords)
+        return f
+
     def get_forces(
         self,
         coords: torch.Tensor,
         use_autograd: bool = False,
     ) -> torch.Tensor:
         """Return dispersion forces (3, N) in eV/Å."""
-        _, f = self.get_dispersion(coords, use_autograd=use_autograd)
-        return f
+        if use_autograd:
+            _, f = self.get_dispersion(coords, use_autograd=True)
+            return f
+        return self._get_forces_analytical(coords)
 
     # -------------------------------------------------------------------
     # Batched API  — coords (B, N, 3) in Angstrom
@@ -487,27 +500,11 @@ class SimpleDftD3:
         e_disp_ha = -0.5 * (c6 * dEr * pair_mask).sum(dim=(1, 2))  # (B,)
         return e_disp_ha * HA_TO_EV
 
-    def get_forces_batch(
+    def _get_forces_batch_analytical(
         self,
         coords: torch.Tensor,
-        use_autograd: bool = False,
     ) -> torch.Tensor:
-        """Dispersion forces for a batch of geometries.
-
-        Parameters
-        ----------
-        coords : (B, N, 3) in Angstrom.
-
-        Returns
-        -------
-        f_disp : (B, 3, N) in eV/Å.
-        """
-        if use_autograd:
-            coords_ag = coords.detach().requires_grad_(True)
-            e = self.get_energy_batch(coords_ag)  # (B,)
-            (grad,) = torch.autograd.grad(e.sum(), coords_ag, create_graph=False)
-            return (-grad).permute(0, 2, 1)  # (B,3,N)
-
+        """Analytical batched dispersion forces (B, 3, N) in eV/Å."""
         # Analytical — loop-free over batch via full vectorised path
         N = self.N
         dev = self.device
@@ -588,6 +585,28 @@ class SimpleDftD3:
         # Convert Ha/Bohr → eV/Å
         return f_ha * (HA_TO_EV * ANG_TO_BOHR)
 
+    def get_forces_batch(
+        self,
+        coords: torch.Tensor,
+        use_autograd: bool = False,
+    ) -> torch.Tensor:
+        """Dispersion forces for a batch of geometries.
+
+        Parameters
+        ----------
+        coords : (B, N, 3) in Angstrom.
+
+        Returns
+        -------
+        f_disp : (B, 3, N) in eV/Å.
+        """
+        if use_autograd:
+            coords_ag = coords.detach().requires_grad_(True)
+            e = self.get_energy_batch(coords_ag)  # (B,)
+            (grad,) = torch.autograd.grad(e.sum(), coords_ag, create_graph=False)
+            return (-grad).permute(0, 2, 1)  # (B,3,N)
+        return self._get_forces_batch_analytical(coords)
+
     # -------------------------------------------------------------------
     # Coordination number (exponential counting function, kcn = 16)
     # -------------------------------------------------------------------
@@ -641,6 +660,36 @@ class SimpleDftD3:
 
         c6 = torch.einsum("ir,ijrs,js->ij", gw, self._c6ref, gw)
         return c6
+
+
+SimpleDftD3._compute_energy_ha_eager = SimpleDftD3._compute_energy_ha
+SimpleDftD3._compute_analytical_forces_ha_eager = (
+    SimpleDftD3._compute_analytical_forces_ha
+)
+SimpleDftD3._get_dispersion_analytical_eager = SimpleDftD3._get_dispersion_analytical
+SimpleDftD3.get_dispersion_eager = SimpleDftD3.get_dispersion
+SimpleDftD3.get_energy_eager = SimpleDftD3.get_energy
+SimpleDftD3._get_forces_analytical_eager = SimpleDftD3._get_forces_analytical
+SimpleDftD3.get_forces_eager = SimpleDftD3.get_forces
+SimpleDftD3.get_energy_batch_eager = SimpleDftD3.get_energy_batch
+SimpleDftD3._get_forces_batch_analytical_eager = (
+    SimpleDftD3._get_forces_batch_analytical
+)
+SimpleDftD3.get_forces_batch_eager = SimpleDftD3.get_forces_batch
+
+SimpleDftD3._compute_energy_ha = _maybe_compile(SimpleDftD3._compute_energy_ha)
+SimpleDftD3._compute_analytical_forces_ha = _maybe_compile(
+    SimpleDftD3._compute_analytical_forces_ha
+)
+SimpleDftD3._get_dispersion_analytical = _maybe_compile(
+    SimpleDftD3._get_dispersion_analytical
+)
+SimpleDftD3.get_energy = _maybe_compile(SimpleDftD3.get_energy)
+SimpleDftD3._get_forces_analytical = _maybe_compile(SimpleDftD3._get_forces_analytical)
+SimpleDftD3.get_energy_batch = _maybe_compile(SimpleDftD3.get_energy_batch)
+SimpleDftD3._get_forces_batch_analytical = _maybe_compile(
+    SimpleDftD3._get_forces_batch_analytical
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

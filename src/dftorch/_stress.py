@@ -1,6 +1,9 @@
 from __future__ import annotations
 import math
 import torch
+
+from ._tools import _maybe_compile
+
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
 )
@@ -190,12 +193,11 @@ def _pair_grad_from_sk(
     # The SK function needs neighbor_I / neighbor_J only through
     # H_INDEX_START[neighbor_I/J].  We create identity arrays so that
     # H_INDEX_START_fake[p] == i0[p] and j0[p] respectively.
-    # Instead, we pass i0/j0 directly as neighbor arrays and use
-    # an identity H_INDEX_START of size max(i0.max(), j0.max()) + 1.
-    hs_size = max(i0.max().item(), j0.max().item()) + 1
-    H_INDEX_START_id = torch.arange(hs_size, device=dev, dtype=i0.dtype)
-
     HDIM = stress_weight.shape[0]
+
+    # Instead, we pass i0/j0 directly as neighbor arrays and use
+    # an identity H_INDEX_START over the AO dimension so H_INDEX_START_id[k] == k.
+    H_INDEX_START_id = torch.arange(HDIM, device=dev, dtype=i0.dtype)
 
     _, _, pair_grad = Slater_Koster_Pair_SKF_vectorized(
         HDIM,
@@ -580,9 +582,9 @@ def get_coulomb_stress_kspace(
     g1_norm = torch.norm(RECIPVECS[:, 0])
     g2_norm = torch.norm(RECIPVECS[:, 1])
     g3_norm = torch.norm(RECIPVECS[:, 2])
-    LMAX = int(torch.ceil(torch.tensor(KCUTOFF / g1_norm)).item())
-    MMAX = int(torch.ceil(torch.tensor(KCUTOFF / g2_norm)).item())
-    NMAX = int(torch.ceil(torch.tensor(KCUTOFF / g3_norm)).item())
+    LMAX = int(torch.ceil(KCUTOFF / g1_norm).item())
+    MMAX = int(torch.ceil(KCUTOFF / g2_norm).item())
+    NMAX = int(torch.ceil(KCUTOFF / g3_norm).item())
 
     sigma = torch.zeros((3, 3), dtype=RX.dtype, device=RX.device)
     eye = torch.eye(3, dtype=RX.dtype, device=RX.device)
@@ -826,3 +828,12 @@ def get_total_stress_analytical(
     out["total"] = out["repulsion"] + out["band"] + out["overlap"] + out["coulomb"]
 
     return out
+
+
+get_coulomb_stress_real_eager = get_coulomb_stress_real
+
+get_coulomb_stress_real = _maybe_compile(
+    get_coulomb_stress_real,
+    fullgraph=False,
+    dynamic=False,
+)

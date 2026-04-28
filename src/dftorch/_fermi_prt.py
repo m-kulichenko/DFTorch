@@ -3,14 +3,19 @@ from __future__ import annotations
 
 import torch
 
+from ._tools import _maybe_compile
 
-@torch.compile(fullgraph=False, dynamic=False)
+
+def _mu0_as_tensor(mu0: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    return torch.as_tensor(mu0, dtype=ref.dtype, device=ref.device)
+
+
 def fermi_prt(
     H1: torch.Tensor,
     Te: float,
     Q: torch.Tensor,
     ev: torch.Tensor,
-    mu0: float,
+    mu0: float | torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """First‑order finite‑T density matrix response using Fermi–Dirac kernel (single system).
 
@@ -18,6 +23,7 @@ def fermi_prt(
     """
     kB = 8.61739e-5  # eV/K
     beta = 1 / (kB * Te)
+    mu0 = _mu0_as_tensor(mu0, ev)
 
     QH1Q = Q.T @ H1 @ Q
     fe = 1.0 / (torch.exp(beta * (ev - mu0)) + 1.0)
@@ -52,17 +58,17 @@ def fermi_prt(
     return D0, D1
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def fermi_prt_D1_only(
     H1: torch.Tensor,
     Te: float,
     Q: torch.Tensor,
     ev: torch.Tensor,
-    mu0: float,
+    mu0: float | torch.Tensor,
 ) -> torch.Tensor:
     """First‑order density response D1 only (skips D0). Single system."""
     kB = 8.61739e-5
     beta = 1 / (kB * Te)
+    mu0 = _mu0_as_tensor(mu0, ev)
     QH1Q = Q.T @ H1 @ Q
     fe = 1.0 / (torch.exp(beta * (ev - mu0)) + 1.0)
     de = ev[:, None] - ev[None, :]
@@ -79,7 +85,6 @@ def fermi_prt_D1_only(
     return Q @ X @ Q.T
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def fermi_prt_batch_D1_only(
     H1: torch.Tensor,
     Te: float,
@@ -90,6 +95,7 @@ def fermi_prt_batch_D1_only(
     """First‑order density response D1 only (skips D0). Batched."""
     kB = 8.61739e-5
     beta = 1 / (kB * Te)
+    mu0 = _mu0_as_tensor(mu0, ev)
     QH1Q = torch.matmul(Q.transpose(-1, -2), torch.matmul(H1, Q))
     fe = 1.0 / (torch.exp(beta * (ev - mu0.unsqueeze(-1))) + 1.0)
     de = ev[:, :, None] - ev[:, None, :]
@@ -101,9 +107,11 @@ def fermi_prt_batch_D1_only(
     X = chi * QH1Q
     dN_dmu = diag.sum(dim=1)
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
-    if mu0.dim() == 0: # check if mu0 is shared. If so, calc shared response in mu1
+    if mu0.dim() == 0:  # shared chemical potential across the batched systems
         # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
-        mu1 = ( (X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((dN_dmu[0] + (1.0 - mask)) + (dN_dmu[1] + (1.0 - mask)))) * mask
+        numer = X[:2].diagonal(dim1=-2, dim2=-1).sum()
+        denom = (dN_dmu[:2] * mask[:2]).sum() + (1.0 - mask[:2]).sum()
+        mu1 = (numer / denom).expand_as(dN_dmu)
     else:
         # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
         mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
@@ -111,7 +119,6 @@ def fermi_prt_batch_D1_only(
     return torch.matmul(Q, torch.matmul(X, Q.transpose(-1, -2)))
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def fermi_prt_batch(
     H1: torch.Tensor,
     Te: float,
@@ -130,6 +137,7 @@ def fermi_prt_batch(
     """
     kB = 8.61739e-5  # eV/K
     beta = 1 / (kB * Te)
+    mu0 = _mu0_as_tensor(mu0, ev)
 
     QH1Q = torch.matmul(Q.transpose(-1, -2), torch.matmul(H1, Q))
     fe = 1.0 / (torch.exp(beta * (ev - mu0.unsqueeze(-1))) + 1.0)
@@ -153,22 +161,37 @@ def fermi_prt_batch(
     # if torch.abs(dN_dmu) > 1e-15:
     #     mu1 = X.diagonal().sum() / dN_dmu
     #     X = X - torch.diag_embed(diag) * mu1
-    if mu0.dim() == 0: # check if mu0 is shared. If so, calc shared response in mu1
+    if mu0.dim() == 0:  # shared chemical potential across the batched systems
         # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
         mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
-        mu1 = ((X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((dN_dmu[0] + (1.0 - mask)) + (dN_dmu[1] + (1.0 - mask)))) * mask
+        numer = X[:2].diagonal(dim1=-2, dim2=-1).sum()
+        denom = (dN_dmu[:2] * mask[:2]).sum() + (1.0 - mask[:2]).sum()
+        mu1 = (numer / denom).expand_as(dN_dmu)
     else:
         # Numerically stable μ1: if |dN_dmu| is small, skip the correction.
         mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
         mu1 = (X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (dN_dmu + (1.0 - mask))) * mask
-
-
 
     X = X - torch.diag_embed(diag) * mu1.unsqueeze(-1).unsqueeze(-1)
 
     D0 = torch.matmul(Q, torch.matmul(torch.diag_embed(fe), Q.transpose(-1, -2)))
     D1 = torch.matmul(Q, torch.matmul(X, Q.transpose(-1, -2)))
     return D0, D1
+
+
+fermi_prt_eager = fermi_prt
+fermi_prt_D1_only_eager = fermi_prt_D1_only
+fermi_prt_batch_D1_only_eager = fermi_prt_batch_D1_only
+fermi_prt_batch_eager = fermi_prt_batch
+
+fermi_prt = _maybe_compile(fermi_prt, fullgraph=False, dynamic=False)
+fermi_prt_D1_only = _maybe_compile(fermi_prt_D1_only, fullgraph=False, dynamic=False)
+fermi_prt_batch_D1_only = _maybe_compile(
+    fermi_prt_batch_D1_only,
+    fullgraph=False,
+    dynamic=False,
+)
+fermi_prt_batch = _maybe_compile(fermi_prt_batch, fullgraph=False, dynamic=False)
 
 
 def Canon_DM_PRT(F1, T, Q, ev, mu_0, m):

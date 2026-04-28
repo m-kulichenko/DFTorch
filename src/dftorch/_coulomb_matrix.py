@@ -6,6 +6,8 @@ from typing import Optional, Dict  # <-- add Optional, Dict
 
 import torch
 
+from ._tools import _maybe_compile
+
 
 # ── Van der Waals radii (Bondi / Mantina) in Angstrom ───────────────────
 # Source: Bondi, J. Phys. Chem. 68:441 (1964);
@@ -341,120 +343,132 @@ def ewald_real_space_vectorized(
     # ────────────────────────────────────────────────────────────────────
 
     mask_same_elem = TYPE[neighbor_I] == TYPE[neighbor_J]
-    if mask_same_elem.any():
-        dR_mskd_same = dR_mskd[mask_same_elem]
-        Ti_same_el = Ti[mask_same_elem]
-        TI2 = Ti_same_el**2
-        TI3 = TI2 * Ti_same_el
-        SSB = TI3 / 48.0
-        SSC = 3 * TI2 / 16.0
-        SSD = 11 * Ti_same_el / 16.0
-        EXPTI = torch.exp(-Ti_same_el * dR_mskd_same)
-        tmp = SSB * dR_mskd_same**2 + SSC * dR_mskd_same + SSD + 1.0 / dR_mskd_same
-        sr_val = EXPTI * tmp  # γ(r)
-        sr_deriv = EXPTI * (
-            (-Ti_same_el) * tmp + (2 * SSB * dR_mskd_same + SSC - 1.0 / dR_mskd_same**2)
-        )  # γ'(r)
+    mask_diff_elem = ~mask_same_elem
+    zero_pair = torch.zeros_like(tmp1)
 
-        # Apply H-damping to same-element pairs (H-H only, since same elem)
-        if h_damp_exp is not None:
-            h_mask_same = h_mask[mask_same_elem]
-            if h_mask_same.any():
-                Ui_au = Hubbard_U[neighbor_I][mask_same_elem][h_mask_same] * EV_TO_HA
-                Uj_au = Hubbard_U[neighbor_J][mask_same_elem][h_mask_same] * EV_TO_HA
-                r_au = dR_mskd_same[h_mask_same] * ANG_TO_BOHR
-                rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
-                D = torch.exp(rTmp * r_au**2)
-                Dprime = 2.0 * rTmp * r_au * D * ANG_TO_BOHR  # d(D)/d(r_Ang)
-                sr_val_h = sr_val[h_mask_same]
-                sr_deriv_h = sr_deriv[h_mask_same]
-                sr_val[h_mask_same] = sr_val_h * D
-                sr_deriv[h_mask_same] = sr_deriv_h * D + sr_val_h * Dprime
+    TI2_same = Ti**2
+    TI3_same = TI2_same * Ti
+    SSB_same = TI3_same / 48.0
+    SSC_same = 3 * TI2_same / 16.0
+    SSD_same = 11 * Ti / 16.0
+    EXPTI_same = torch.exp(-Ti * dR_mskd)
+    same_tmp = SSB_same * dR_mskd**2 + SSC_same * dR_mskd + SSD_same + 1.0 / dR_mskd
+    same_sr_val = EXPTI_same * same_tmp
+    same_sr_deriv = EXPTI_same * (
+        (-Ti) * same_tmp + (2 * SSB_same * dR_mskd + SSC_same - 1.0 / dR_mskd**2)
+    )
 
-        tmp1[mask_same_elem] -= sr_val
-        dtmp1[mask_same_elem] -= sr_deriv
+    TI2_diff = Ti**2
+    TI4_diff = TI2_diff**2
+    TI6_diff = TI4_diff * TI2_diff
+    TJ2_diff = Tj**2
+    TJ4_diff = TJ2_diff**2
+    TJ6_diff = TJ4_diff * TJ2_diff
+    EXPTI_diff = torch.exp(-Ti * dR_mskd)
+    EXPTJ_diff = torch.exp(-Tj * dR_mskd)
+    TI2MTJ2 = torch.where(mask_diff_elem, TI2_diff - TJ2_diff, torch.ones_like(tmp1))
+    TJ2MTI2 = -TI2MTJ2
+    SB = TJ4_diff * Ti / (2 * TI2MTJ2**2)
+    SC = (TJ6_diff - 3 * TJ4_diff * TI2_diff) / (TI2MTJ2**3)
+    SE = TI4_diff * Tj / (2 * TJ2MTI2**2)
+    SF = (TI6_diff - 3 * TI4_diff * TJ2_diff) / (TJ2MTI2**3)
+    COULOMBV_tmp1 = SB - SC / dR_mskd
+    COULOMBV_tmp2 = SE - SF / dR_mskd
+    diff_sr_val = EXPTI_diff * COULOMBV_tmp1 + EXPTJ_diff * COULOMBV_tmp2
+    diff_sr_deriv = EXPTI_diff * (
+        (-Ti) * COULOMBV_tmp1 + SC / dR_mskd**2
+    ) + EXPTJ_diff * ((-Tj) * COULOMBV_tmp2 + SF / dR_mskd**2)
 
-    if (~mask_same_elem).any():
-        dR_mskd_diff = dR_mskd[~mask_same_elem]
-        Ti_diff_el = Ti[~mask_same_elem]
-        Tj_diff_el = Tj[~mask_same_elem]
-        TI2 = Ti_diff_el**2
-        TI4 = TI2**2
-        TI6 = TI4 * TI2
-        TJ2 = Tj_diff_el**2
-        TJ4 = TJ2**2
-        TJ6 = TJ4 * TJ2
-        EXPTI = torch.exp(-Ti_diff_el * dR_mskd_diff)
-        EXPTJ = torch.exp(-Tj_diff_el * dR_mskd_diff)
-        TI2MTJ2 = TI2 - TJ2
-        TJ2MTI2 = -TI2MTJ2
-        SB = TJ4 * Ti_diff_el / (2 * TI2MTJ2**2)
-        SC = (TJ6 - 3 * TJ4 * TI2) / (TI2MTJ2**3)
-        SE = TI4 * Tj_diff_el / (2 * TJ2MTI2**2)
-        SF = (TI6 - 3 * TI4 * TJ2) / (TJ2MTI2**3)
-        COULOMBV_tmp1 = SB - SC / dR_mskd_diff
-        COULOMBV_tmp2 = SE - SF / dR_mskd_diff
-        sr_val = EXPTI * COULOMBV_tmp1 + EXPTJ * COULOMBV_tmp2  # γ(r)
-        sr_deriv = EXPTI * (
-            (-Ti_diff_el) * COULOMBV_tmp1 + SC / dR_mskd_diff**2
-        ) + EXPTJ * ((-Tj_diff_el) * COULOMBV_tmp2 + SF / dR_mskd_diff**2)  # γ'(r)
+    if h_damp_exp is not None:
+        Ui_au = Hubbard_U[neighbor_I] * EV_TO_HA
+        Uj_au = Hubbard_U[neighbor_J] * EV_TO_HA
+        r_au = dR_mskd * ANG_TO_BOHR
+        rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
+        D = torch.exp(rTmp * r_au**2)
+        Dprime = 2.0 * rTmp * r_au * D * ANG_TO_BOHR  # d(D)/d(r_Ang)
 
-        # Apply H-damping to different-element pairs (H-X or X-H)
-        if h_damp_exp is not None:
-            h_mask_diff = h_mask[~mask_same_elem]
-            if h_mask_diff.any():
-                Ui_au = Hubbard_U[neighbor_I][~mask_same_elem][h_mask_diff] * EV_TO_HA
-                Uj_au = Hubbard_U[neighbor_J][~mask_same_elem][h_mask_diff] * EV_TO_HA
-                r_au = dR_mskd_diff[h_mask_diff] * ANG_TO_BOHR
-                rTmp = -((0.5 * (Ui_au + Uj_au)) ** h_damp_exp)
-                D = torch.exp(rTmp * r_au**2)
-                Dprime = 2.0 * rTmp * r_au * D * ANG_TO_BOHR  # d(D)/d(r_Ang)
-                sr_val_h = sr_val[h_mask_diff]
-                sr_deriv_h = sr_deriv[h_mask_diff]
-                sr_val[h_mask_diff] = sr_val_h * D
-                sr_deriv[h_mask_diff] = sr_deriv_h * D + sr_val_h * Dprime
+        same_h_mask = mask_same_elem & h_mask
+        diff_h_mask = mask_diff_elem & h_mask
+        same_sr_deriv = torch.where(
+            same_h_mask, same_sr_deriv * D + same_sr_val * Dprime, same_sr_deriv
+        )
+        same_sr_val = torch.where(same_h_mask, same_sr_val * D, same_sr_val)
+        diff_sr_deriv = torch.where(
+            diff_h_mask, diff_sr_deriv * D + diff_sr_val * Dprime, diff_sr_deriv
+        )
+        diff_sr_val = torch.where(diff_h_mask, diff_sr_val * D, diff_sr_val)
 
-        # Apply H5 correction to different-element pairs (exactly one H)
-        # γ_H5 = γ·(1+G) − G/r ;  γ'_H5 = γ·G' + γ'·(1+G) − (G'/r − G/r²)
-        elif _apply_h5:
-            h5_mask_diff = h5_mask_active[~mask_same_elem]
-            if h5_mask_diff.any():
-                r_h5 = dR_mskd_diff[h5_mask_diff]  # in Å
-                k_h5 = k_XH_all[~mask_same_elem][h5_mask_diff]
-                svdw = sumVdW_all[~mask_same_elem][h5_mask_diff]  # in Å
-                r0 = _h5_r_scaling * svdw
-                cc = _h5_w_scaling * svdw * _GAUSS_WIDTH_FACTOR
-                gauss = k_h5 * torch.exp(-0.5 * (r_h5 - r0) ** 2 / cc**2)
-                dgauss = -gauss * (r_h5 - r0) / cc**2
+    elif _apply_h5:
+        h5_mask_diff = mask_diff_elem & h5_mask_active
+        safe_sum_vdw = torch.where(
+            h5_mask_diff, sumVdW_all, torch.ones_like(sumVdW_all)
+        )
+        r0 = _h5_r_scaling * safe_sum_vdw
+        cc = _h5_w_scaling * safe_sum_vdw * _GAUSS_WIDTH_FACTOR
+        gauss = torch.where(
+            h5_mask_diff,
+            k_XH_all * torch.exp(-0.5 * (dR_mskd - r0) ** 2 / cc**2),
+            zero_pair,
+        )
+        dgauss = torch.where(
+            h5_mask_diff,
+            -gauss * (dR_mskd - r0) / cc**2,
+            zero_pair,
+        )
 
-                sr_val_h5 = sr_val[h5_mask_diff]
-                sr_deriv_h5 = sr_deriv[h5_mask_diff]
-                # scaled value:  γ·(1+G) − G/r
-                sr_val[h5_mask_diff] = sr_val_h5 * (1.0 + gauss) - gauss / r_h5
-                # scaled derivative (product rule):
-                # deriv1 = γ·G' + γ'·(1+G)
-                # deriv2 = G'/r − G/r²
-                deriv1 = sr_val_h5 * dgauss + sr_deriv_h5 * (1.0 + gauss)
-                deriv2 = dgauss / r_h5 - gauss / r_h5**2
-                sr_deriv[h5_mask_diff] = deriv1 - deriv2
+        # scaled value:  γ·(1+G) − G/r
+        diff_sr_deriv = torch.where(
+            h5_mask_diff,
+            diff_sr_val * dgauss
+            + diff_sr_deriv * (1.0 + gauss)
+            - (dgauss / dR_mskd - gauss / dR_mskd**2),
+            diff_sr_deriv,
+        )
+        diff_sr_val = torch.where(
+            h5_mask_diff,
+            diff_sr_val * (1.0 + gauss) - gauss / dR_mskd,
+            diff_sr_val,
+        )
 
-        tmp1[~mask_same_elem] -= sr_val
-        dtmp1[~mask_same_elem] -= sr_deriv
+    tmp1 = tmp1 - torch.where(mask_same_elem, same_sr_val, zero_pair)
+    dtmp1 = dtmp1 - torch.where(mask_same_elem, same_sr_deriv, zero_pair)
+    tmp1 = tmp1 - torch.where(mask_diff_elem, diff_sr_val, zero_pair)
+    dtmp1 = dtmp1 - torch.where(mask_diff_elem, diff_sr_deriv, zero_pair)
 
     tmp1 *= KECONST
     dtmp1 *= KECONST
-    CC_real.index_add_(0, neighbor_I * (Nats) + neighbor_J, tmp1)
-    CC_real = CC_real.reshape(Nats, Nats)
+    pair_index = neighbor_I * Nats + neighbor_J
+    dtmp1_xyz = dtmp1.unsqueeze(-1) * dR_dxyz[nn_mask]
 
-    dCC_dxyz_real = torch.zeros((3, Nats * Nats), device=dR.device, dtype=dR.dtype)
-    dCC_dxyz_real.index_add_(
-        1, neighbor_I * (Nats) + neighbor_J, dtmp1 * dR_dxyz[nn_mask].T
-    )
+    # bincount is a good no-grad reduction here, but it does not implement
+    # backward for weighted inputs. Keep the differentiable accumulation path
+    # when autograd is tracking these weights.
+    if tmp1.requires_grad or dtmp1_xyz.requires_grad:
+        CC_real = torch.zeros(
+            (Nats * Nats), device=dR.device, dtype=dR.dtype
+        ).scatter_add(0, pair_index, tmp1)
+
+        pair_index_xyz = pair_index.unsqueeze(0).expand(3, -1)
+        dCC_dxyz_real = torch.zeros(
+            (3, Nats * Nats), device=dR.device, dtype=dR.dtype
+        ).scatter_add(1, pair_index_xyz, dtmp1_xyz.T)
+    else:
+        CC_real = torch.bincount(pair_index, weights=tmp1, minlength=Nats * Nats)
+        dCC_dxyz_real = torch.stack(
+            [
+                torch.bincount(
+                    pair_index, weights=dtmp1_xyz[:, axis], minlength=Nats * Nats
+                )
+                for axis in range(3)
+            ],
+            dim=0,
+        )
+
+    CC_real = CC_real.reshape(Nats, Nats)
     dCC_dxyz_real = dCC_dxyz_real.reshape(3, Nats, Nats)
     return CC_real, dCC_dxyz_real
 
 
-@torch.compile(dynamic=False)
 def ewald_k_space_vectorized(
     RX: torch.Tensor,
     RY: torch.Tensor,
@@ -516,9 +530,9 @@ def ewald_k_space_vectorized(
     g2_norm = torch.norm(RECIPVECS[:, 1])
     g3_norm = torch.norm(RECIPVECS[:, 2])
 
-    LMAX = int(torch.ceil(torch.tensor(KCUTOFF / g1_norm)).item())
-    MMAX = int(torch.ceil(torch.tensor(KCUTOFF / g2_norm)).item())
-    NMAX = int(torch.ceil(torch.tensor(KCUTOFF / g3_norm)).item())
+    LMAX = int(torch.ceil(KCUTOFF / g1_norm).item())
+    MMAX = int(torch.ceil(KCUTOFF / g2_norm).item())
+    NMAX = int(torch.ceil(KCUTOFF / g3_norm).item())
 
     KECONST = 14.3996437701414  # in eV·Å/e²
     SQRTPI = math.sqrt(math.pi)
@@ -620,6 +634,12 @@ def ewald_k_space_vectorized(
     CORRFACT = 2 * KECONST * CALPHA / SQRTPI
     COULOMBV -= CORRFACT * DELTAQ_vec
     return COULOMBV, dC_dR
+
+
+ewald_real_space_vectorized_eager = ewald_real_space_vectorized
+ewald_k_space_vectorized_eager = ewald_k_space_vectorized
+ewald_real_space_vectorized = _maybe_compile(ewald_real_space_vectorized)
+ewald_k_space_vectorized = _maybe_compile(ewald_k_space_vectorized)
 
 
 ### not working shell-resolved ###

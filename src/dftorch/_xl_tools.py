@@ -14,9 +14,9 @@ from ._dm_fermi_x import (
 )
 from ._spin import get_h_spin_diag
 from typing import Any, Optional, Tuple, Dict
+from ._tools import _maybe_compile
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def calc_q(
     H0: torch.Tensor,
     U: torch.Tensor,
@@ -111,7 +111,6 @@ def calc_q(
     return q, H, Hcoul, D, Dorth, Q, e, f, mu0
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def calc_q_os(
     H0: torch.Tensor,
     H_spin: torch.Tensor,
@@ -190,7 +189,6 @@ def calc_q_os(
     return q_sr, H, Hcoul, D, Dorth, Q, e, f, mu0
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def calc_q_batch(
     H0: torch.Tensor,
     U: torch.Tensor,
@@ -243,7 +241,6 @@ def calc_q_batch(
     return q, H, Hcoul, D, Dorth, Q, e, f, mu0
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def calc_dq(
     U: torch.Tensor,
     v: torch.Tensor,
@@ -317,7 +314,6 @@ def calc_dq(
     return dq
 
 
-@torch.compile(fullgraph=False, dynamic=False)
 def calc_dq_batch(
     U: torch.Tensor,
     v: torch.Tensor,
@@ -360,6 +356,19 @@ def calc_dq_batch(
     dq = torch.zeros(batch_size, Nats, dtype=S.dtype, device=S.device)
     dq.scatter_add_(1, atom_ids, D1S)
     return dq
+
+
+calc_q_eager = calc_q
+calc_q_os_eager = calc_q_os
+calc_q_batch_eager = calc_q_batch
+calc_dq_eager = calc_dq
+calc_dq_batch_eager = calc_dq_batch
+
+calc_q = _maybe_compile(calc_q, fullgraph=False, dynamic=False)
+calc_q_os = _maybe_compile(calc_q_os, fullgraph=False, dynamic=False)
+calc_q_batch = _maybe_compile(calc_q_batch, fullgraph=False, dynamic=False)
+calc_dq = _maybe_compile(calc_dq, fullgraph=False, dynamic=False)
+calc_dq_batch = _maybe_compile(calc_dq_batch, fullgraph=False, dynamic=False)
 
 
 def kernel_update_lr(
@@ -756,13 +765,23 @@ def kernel_update_lr_os(
         # ── Response in eigenbasis (chi precomputed) ──────────────────────
         X = chi * QH1Q
         mu1_mask = (torch.abs(f_diag_sum) > 1e-12).to(S.dtype)
-        if mu0.dim() == 0: # check if shared chemical potential. If so, calc mu1 combined response.
+        if (
+            mu0.dim() == 0
+        ):  # check if shared chemical potential. If so, calc mu1 combined response.
             mu1 = (
-                 (X[0].diagonal(dim1=-1, dim2=0).sum(dim=0) + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)) / ((f_diag_sum[0] + (1.0 - mu1_mask)) + (f_diag_sum[1] + (1.0 - mu1_mask)))
+                (
+                    X[0].diagonal(dim1=-1, dim2=0).sum(dim=0)
+                    + X[1].diagonal(dim1=-1, dim2=0).sum(dim=0)
+                )
+                / (
+                    (f_diag_sum[0] + (1.0 - mu1_mask))
+                    + (f_diag_sum[1] + (1.0 - mu1_mask))
+                )
             ) * mu1_mask
         else:
             mu1 = (
-                X.diagonal(dim1=-2, dim2=-1).sum(dim=1) / (f_diag_sum + (1.0 - mu1_mask))
+                X.diagonal(dim1=-2, dim2=-1).sum(dim=1)
+                / (f_diag_sum + (1.0 - mu1_mask))
             ) * mu1_mask
         X = X - torch.diag_embed(f_diag) * mu1.unsqueeze(-1).unsqueeze(-1)
 

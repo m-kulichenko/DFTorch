@@ -15,6 +15,8 @@ import math
 
 import torch
 
+from ._tools import _maybe_compile
+
 # ---------------------------------------------------------------------------
 # Unit conversions  (DFTorch internal: eV / angstrom)
 # ---------------------------------------------------------------------------
@@ -1095,8 +1097,8 @@ class GBSA:
         coords_bohr = self.coords * ANG_TO_BOHR
         rad_bohr = self.vdw_rad * ANG_TO_BOHR
 
-        qtotal = q.sum().item()
-        ntotal = n.sum().item()
+        qtotal = q.sum()
+        ntotal = n.sum()
         shadow_q2 = (2.0 * qtotal - ntotal) * ntotal
 
         rad3 = rad_bohr**3
@@ -1112,8 +1114,8 @@ class GBSA:
         outer_part = torch.einsum("i,ij,ik->jk", rad3, vec, vec)
         inertia = diag_part - outer_part
 
-        det_val = torch.det(inertia).item()
-        aDet = math.sqrt(det_val ** (1.0 / 3.0) / (2.0 * totRad3.item()) * 5.0)
+        det_val = torch.det(inertia)
+        aDet = torch.sqrt(det_val.pow(1.0 / 3.0) / (2.0 * totRad3) * 5.0)
 
         II = inertia
         aDeriv = torch.zeros(3, 3, dtype=torch.float64, device=self.device)
@@ -1127,7 +1129,7 @@ class GBSA:
         aDeriv[1, 2] = II[0, 0] * II[1, 2] - II[0, 1] * II[0, 2]
         aDeriv[2, 2] = II[2, 2] * (II[0, 0] + II[1, 1]) - II[0, 2] ** 2 - II[1, 2] ** 2
 
-        scale = 250.0 / (48.0 * totRad3.item() ** 3 * aDet**5)
+        scale = 250.0 / (48.0 * totRad3**3 * aDet**5)
         energy_factor = -0.5 * self.keps * self.alpbet * shadow_q2 / aDet**2
         ha_bohr_to_ev_ang = HA_TO_EV * ANG_TO_BOHR
         aDeriv = aDeriv * (scale * energy_factor * ha_bohr_to_ev_ang)
@@ -1191,7 +1193,7 @@ class GBSA:
         coords_bohr = self.coords * ANG_TO_BOHR
         rad_bohr = self.vdw_rad * ANG_TO_BOHR
 
-        qtotal = q.sum().item()
+        qtotal = q.sum()
         rad3 = rad_bohr**3
         totRad3 = rad3.sum()
         center = (coords_bohr * rad3.unsqueeze(1)).sum(dim=0) / totRad3
@@ -1205,8 +1207,8 @@ class GBSA:
         outer_part = torch.einsum("i,ij,ik->jk", rad3, vec, vec)
         inertia = diag_part - outer_part
 
-        det_val = torch.det(inertia).item()
-        aDet = math.sqrt(det_val ** (1.0 / 3.0) / (2.0 * totRad3.item()) * 5.0)
+        det_val = torch.det(inertia)
+        aDet = torch.sqrt(det_val.pow(1.0 / 3.0) / (2.0 * totRad3) * 5.0)
 
         # Cofactor-derived matrix
         II = inertia
@@ -1221,7 +1223,7 @@ class GBSA:
         aDeriv[1, 2] = II[0, 0] * II[1, 2] - II[0, 1] * II[0, 2]
         aDeriv[2, 2] = II[2, 2] * (II[0, 0] + II[1, 1]) - II[0, 2] ** 2 - II[1, 2] ** 2
 
-        scale = 250.0 / (48.0 * totRad3.item() ** 3 * aDet**5)
+        scale = 250.0 / (48.0 * totRad3**3 * aDet**5)
         energy_factor = -0.5 * self.keps * self.alpbet * qtotal**2 / aDet**2
         ha_bohr_to_ev_ang = HA_TO_EV * ANG_TO_BOHR
         aDeriv = aDeriv * (scale * energy_factor * ha_bohr_to_ev_ang)
@@ -1540,3 +1542,90 @@ def create_gbsa(structure, device, param_file=None, solvation_model="gbsa"):
         )
 
     return GBSA(coords, species, device, param_file=param_file, alpb=use_alpb)
+
+
+GBSA.get_shifts_eager = GBSA.get_shifts
+GBSA.get_energies_eager = GBSA.get_energies
+GBSA.get_energy_differentiable_eager = GBSA.get_energy_differentiable
+GBSA.get_sasa_gradients_eager = GBSA.get_sasa_gradients
+GBSA.get_born_gradients_eager = GBSA.get_born_gradients
+GBSA.get_shadow_energies_eager = GBSA.get_shadow_energies
+GBSA.get_shadow_sasa_gradients_eager = GBSA.get_shadow_sasa_gradients
+GBSA.get_shadow_born_gradients_eager = GBSA.get_shadow_born_gradients
+
+GBSA.get_shifts = _maybe_compile(GBSA.get_shifts, fullgraph=False, dynamic=False)
+GBSA.get_energies = _maybe_compile(GBSA.get_energies, fullgraph=False, dynamic=False)
+GBSA.get_energy_differentiable = _maybe_compile(
+    GBSA.get_energy_differentiable,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSA.get_sasa_gradients = _maybe_compile(
+    GBSA.get_sasa_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSA.get_born_gradients = _maybe_compile(
+    GBSA.get_born_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSA.get_shadow_energies = _maybe_compile(
+    GBSA.get_shadow_energies,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSA.get_shadow_sasa_gradients = _maybe_compile(
+    GBSA.get_shadow_sasa_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSA.get_shadow_born_gradients = _maybe_compile(
+    GBSA.get_shadow_born_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+
+GBSABatch.get_shifts_eager = GBSABatch.get_shifts
+GBSABatch.get_energies_eager = GBSABatch.get_energies
+GBSABatch.get_sasa_gradients_eager = GBSABatch.get_sasa_gradients
+GBSABatch.get_born_gradients_eager = GBSABatch.get_born_gradients
+GBSABatch.get_shadow_energies_eager = GBSABatch.get_shadow_energies
+GBSABatch.get_shadow_sasa_gradients_eager = GBSABatch.get_shadow_sasa_gradients
+GBSABatch.get_shadow_born_gradients_eager = GBSABatch.get_shadow_born_gradients
+
+GBSABatch.get_shifts = _maybe_compile(
+    GBSABatch.get_shifts,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_energies = _maybe_compile(
+    GBSABatch.get_energies,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_sasa_gradients = _maybe_compile(
+    GBSABatch.get_sasa_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_born_gradients = _maybe_compile(
+    GBSABatch.get_born_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_shadow_energies = _maybe_compile(
+    GBSABatch.get_shadow_energies,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_shadow_sasa_gradients = _maybe_compile(
+    GBSABatch.get_shadow_sasa_gradients,
+    fullgraph=False,
+    dynamic=False,
+)
+GBSABatch.get_shadow_born_gradients = _maybe_compile(
+    GBSABatch.get_shadow_born_gradients,
+    fullgraph=False,
+    dynamic=False,
+)

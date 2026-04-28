@@ -1,5 +1,15 @@
 import torch
 
+from ._tools import _maybe_compile
+
+
+def _entropy_eps(dtype: torch.dtype) -> float:
+    if dtype == torch.float32:
+        return 1e-7
+    if dtype == torch.float64:
+        return 1e-10
+    return max(torch.finfo(dtype).eps, 1e-10)
+
 
 def energy(
     H0: torch.Tensor,
@@ -75,10 +85,7 @@ def energy(
     """
     kB = 8.61739e-5  # eV/K
 
-    if torch.get_default_dtype() == torch.float32:
-        eps = 1e-7
-    elif torch.get_default_dtype() == torch.float64:
-        eps = 1e-10
+    eps = _entropy_eps(f.dtype)
 
     # Ensure D0 is diagonal for consistent subtraction
     # if D.ndim == 2:
@@ -263,10 +270,7 @@ def energy_shadow(
     """
     kB = 8.61739e-5  # eV/K
 
-    if torch.get_default_dtype() == torch.float32:
-        eps = 1e-7
-    elif torch.get_default_dtype() == torch.float64:
-        eps = 1e-10
+    eps = _entropy_eps(f.dtype)
 
     # Ensure D0 is diagonal for consistent subtraction
     if D0.ndim == 2:
@@ -351,3 +355,10 @@ def energy_shadow(
     Etot = Eband0 + Ecoul + Edipole + E_entropy
 
     return Etot, Eband0, Ecoul, Edipole, E_entropy, S_ent
+
+
+energy_eager = energy
+energy_shadow_eager = energy_shadow
+
+energy = _maybe_compile(energy, fullgraph=False, dynamic=False)
+energy_shadow = _maybe_compile(energy_shadow, fullgraph=False, dynamic=False)

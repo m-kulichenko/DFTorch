@@ -229,7 +229,7 @@ class GeoOpt:
         hydrostatic_only: bool = False,
         free_mask: Optional[torch.Tensor] = None,
         dump_interval: int = 1,
-        traj_filename: str = "opt_trj.xyz",
+        traj_filename: str = "opt_trj",
         # FIRE parameters
         dt_start: float = 0.5,
         dt_max: float = 2.0,
@@ -377,7 +377,7 @@ class GeoOpt:
 
             if step % dump_interval == 0:
                 write_XYZ_trajectory(
-                    traj_filename,
+                    traj_filename + ".xyz",
                     structure,
                     f"Step {step}: {info}",
                     step=step,
