@@ -102,7 +102,7 @@ def vectorized_nearestneighborlist(
             pbc = torch.tensor(
                 [False, False, False], dtype=torch.bool, device=Rx.device
             )
-            _cell = torch.eye(3, dtype=Rx.dtype, device=Rx.device) * 1e4
+            _cell = torch.eye(3, dtype=Rx.dtype, device=Rx.device) * 1e3
         else:
             _cell = normalize_cell(cell, device=Rx.device, dtype=Rx.dtype)
 
