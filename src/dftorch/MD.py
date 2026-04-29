@@ -783,6 +783,7 @@ class MDXL:
 
         # ── Kernel update ────────────────────────────────────────────────
         Res = (structure.q_spin_sr if self._os else structure.q) - self.n
+        kernel_q = self.n
         if md_step % 100000 == 0 and self.do_full_kernel:
             pass
         elif self.NoRank:
@@ -800,7 +801,7 @@ class MDXL:
                 dftorch_params["KRYLOV_TOL_MD"],
                 structure.KK.clone(),
                 Res,
-                structure.q_spin_sr,
+                kernel_q,
                 structure.S,
                 structure.Z,
                 self.PME_data,
@@ -834,7 +835,7 @@ class MDXL:
                 dftorch_params["KRYLOV_TOL_MD"],
                 structure.KK.clone(),
                 Res,
-                structure.q,
+                kernel_q,
                 structure.S,
                 structure.Z,
                 self.PME_data,
@@ -1657,6 +1658,7 @@ class MDXLBatch:
 
         # Update Kernel
         Res = structure.q - self.n
+        kernel_q = self.n
         if md_step % 10000 == 0 and self.do_full_kernel:
             1
             # KK, _ = _kernel_fermi(
@@ -1682,7 +1684,7 @@ class MDXLBatch:
                 dftorch_params["KRYLOV_TOL_MD"],
                 structure.KK.clone(),
                 Res,
-                structure.q,
+                kernel_q,
                 structure.S,
                 structure.Z,
                 self.PME_data,

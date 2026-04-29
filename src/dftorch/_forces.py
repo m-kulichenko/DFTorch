@@ -1,7 +1,5 @@
 import torch
 
-from ._tools import _maybe_compile
-
 
 # @torch.compile  # Disabled: stale inductor cache produces incorrect Ftot
 def Forces(
@@ -961,34 +959,34 @@ def forces_shadow_pme(
     return Ftot, Fcoul, Fband0, Fdipole, FPulay, FScoul, FSdipole, Frep
 
 
-Forces_eager = Forces
-forces_spin_eager = forces_spin
-Forces_PME_eager = Forces_PME
-forces_shadow_eager = forces_shadow
-forces_shadow_pme_eager = forces_shadow_pme
+# Forces_eager = Forces
+# forces_spin_eager = forces_spin
+# Forces_PME_eager = Forces_PME
+# forces_shadow_eager = forces_shadow
+# forces_shadow_pme_eager = forces_shadow_pme
 
-Forces = _maybe_compile(
-    Forces,
-    fullgraph=False,
-    dynamic=False,
-)
-forces_spin = _maybe_compile(
-    forces_spin,
-    fullgraph=False,
-    dynamic=False,
-)
-Forces_PME = _maybe_compile(
-    Forces_PME,
-    fullgraph=False,
-    dynamic=False,
-)
-forces_shadow = _maybe_compile(
-    forces_shadow,
-    fullgraph=False,
-    dynamic=False,
-)
-forces_shadow_pme = _maybe_compile(
-    forces_shadow_pme,
-    fullgraph=False,
-    dynamic=False,
-)
+# Forces = _maybe_compile(
+#     Forces,
+#     fullgraph=False,
+#     dynamic=False,
+# )
+# forces_spin = _maybe_compile(
+#     forces_spin,
+#     fullgraph=False,
+#     dynamic=False,
+# )
+# Forces_PME = _maybe_compile(
+#     Forces_PME,
+#     fullgraph=False,
+#     dynamic=False,
+# )
+# forces_shadow = _maybe_compile(
+#     forces_shadow,
+#     fullgraph=False,
+#     dynamic=False,
+# )
+# forces_shadow_pme = _maybe_compile(
+#     forces_shadow_pme,
+#     fullgraph=False,
+#     dynamic=False,
+# )
