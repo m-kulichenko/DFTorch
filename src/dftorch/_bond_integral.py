@@ -425,7 +425,13 @@ def read_skf_table(
         if len(tokens) != 20:
             raise ValueError(f"Expected 20 values, got {len(tokens)} in line: {ln}")
         rows.append([float(x) for x in tokens])
-    rows.append([float(x) * 0.0 for x in tokens])
+
+    # Append a zero knot at the tabulated cutoff, then extend the padded tail
+    # with zeros so spline intervals beyond the last physical grid point vanish.
+    zero_row = [0.0] * len(_CHANNELS)
+    rows.append(zero_row)
+    if len(rows) < npts_pad:
+        rows.extend([zero_row.copy() for _ in range(npts_pad - len(rows))])
 
     mat = torch.tensor(rows) * 27.21138625  # (npts,20)
     R = torch.arange(1, npts_pad + 1) * step * 0.52917721  # Convert to Angstrom
@@ -696,8 +702,10 @@ def get_skf_tensors(
     UP = torch.zeros(120, device=TYPE.device)
     UD = torch.zeros(120, device=TYPE.device)
 
+    R_orb_master = None
+
     for i in range(len(label_list)):
-        R_orb, channels, R_rep, rep_splines, close_exp = read_skf_table(
+        R_orb_i, channels, R_rep, rep_splines, close_exp = read_skf_table(
             skfpath + "{}.skf".format(label_list[i]),
             N_ORB,
             MAX_ANG,
@@ -715,9 +723,15 @@ def get_skf_tensors(
         )
 
         channels_matrix = channels_to_matrix(channels)
-        coeffs = cubic_spline_coeffs(R_orb, channels_matrix)
-        R_tensor[i, : len(R_orb)] = R_orb
+        coeffs = cubic_spline_coeffs(R_orb_i, channels_matrix)
+        zero_row_idx = torch.nonzero(channels_matrix.eq(0).all(dim=1), as_tuple=False)
+        if zero_row_idx.numel() > 0:
+            coeffs[int(zero_row_idx[0].item()) :] = 0
+        R_tensor[i, : len(R_orb_i)] = R_orb_i
         coeffs_tensor[i, : len(coeffs)] = coeffs
+
+        if R_orb_master is None or len(R_orb_i) > len(R_orb_master):
+            R_orb_master = R_orb_i
 
         R_rep_tensor[i, : len(R_rep)] = R_rep
         rep_splines_tensor[i, : len(rep_splines)] = rep_splines
@@ -731,7 +745,7 @@ def get_skf_tensors(
     if os.path.isfile(wfc_path):
         read_wfc_hsd(wfc_path, N_ORB, MAX_ANG, MAX_ANG_OCC)
 
-    R_orb = R_orb.to(device=TYPE.device)
+    R_orb = R_orb_master.to(device=TYPE.device)
 
     coeffs_tensor = torch.cat(
         (

@@ -671,6 +671,14 @@ def forces_shadow(
     # Fcoul = -q_i * sum_j q_j * dCj/dRi
     Fcoul = (2 * q - n) * (n @ dC)
 
+    # # Ecoul_shadow = 0.5 * (2q - n)^T C n, so the explicit Coulomb force
+    # # is the symmetric cross derivative, not the one-sided SCC form.
+    # shadow_charge = 2 * q - n
+    # Fcoul = 0.5 * (
+    #     shadow_charge.unsqueeze(0) * (n @ dC)
+    #     + n.unsqueeze(0) * (shadow_charge @ dC)
+    # )
+
     # Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * U)
     # FScoul
     CoulPot = C @ n

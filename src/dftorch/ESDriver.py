@@ -143,6 +143,15 @@ class ESDriver(torch.nn.Module):
         )
 
         if self.dftorch_params["coul_method"] == "PME":
+            if (
+                structure.dU_dq is not None
+                and self.dftorch_params.get("dftb3_diagonal_only", False) is False
+            ):
+                raise NotImplementedError(
+                    "PME currently supports only diagonal-only DFTB3. "
+                    "Set dftb3_diagonal_only=True or use coul_method='FULL' "
+                    "for full off-diagonal 3rd-order DFTB."
+                )
             structure.C = None
             structure.dCC = None
             # TODO: Full off-diagonal DFTB3 with PME requires building a

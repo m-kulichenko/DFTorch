@@ -12,6 +12,7 @@ experiments/*.xyz
 experiments/*.pqr
 experiments/*.txt
 experiments/*.bib
+experiments/*.hsd
 
 !experiments/1_tutorial.ipynb
 !experiments/2_tutorial_freq.ipynb

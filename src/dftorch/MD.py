@@ -941,7 +941,53 @@ class MDXL:
                     else None
                 ),
             )
-            structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
+
+            # structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
+
+            test_f_coul = forces1 * (2 * q_e / n_e - 1.0)
+
+            shadow_charge = 2.0 * q_e - n_e
+            _, forces_2q, _ = calculate_PME_ewald(
+                torch.stack((structure.RX, structure.RY, structure.RZ)),
+                2.0 * q_e,
+                structure.cell,
+                nbr_inds,
+                disps,
+                dists,
+                self.CALPHA,
+                dftorch_params["cutoff"],
+                self.PME_data,
+                hubbard_u=structure.Hubbard_U,
+                atomtypes=structure.TYPE,
+                screening=1,
+                calculate_forces=1,
+                calculate_dq=0,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
+            )
+            _, forces_shadow_charge, _ = calculate_PME_ewald(
+                torch.stack((structure.RX, structure.RY, structure.RZ)),
+                shadow_charge,
+                structure.cell,
+                nbr_inds,
+                disps,
+                dists,
+                self.CALPHA,
+                dftorch_params["cutoff"],
+                self.PME_data,
+                hubbard_u=structure.Hubbard_U,
+                atomtypes=structure.TYPE,
+                screening=1,
+                calculate_forces=1,
+                calculate_dq=0,
+                h_damp_exp=dftorch_params.get("h_damp_exp", None),
+                h5_params=dftorch_params.get("h5_params", None),
+            )
+            # Exact bilinear PME force for 0.5 * (2q - n)^T C n.
+            structure.f_coul = 0.5 * (forces_2q - forces_shadow_charge - forces1)
+
+            print("test", (test_f_coul - structure.f_coul).abs().max())
+
             structure.f_tot = structure.f_tot + structure.f_coul
         else:
             (
