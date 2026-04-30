@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from ._cell import normalize_cell, normalize_cell_batch
 from ._tools import _maybe_compile
 
 # ---------------------------------------------------------------------------
@@ -182,17 +183,50 @@ class SimpleDftD3:
             torch.arange(MAX_REF, device=device).unsqueeze(0) < self._nref.unsqueeze(1)
         ).to(dtype)
 
+    def _pair_diff(
+        self, coords_bohr: torch.Tensor, cell_bohr: torch.Tensor = None
+    ) -> torch.Tensor:
+        diff = coords_bohr.unsqueeze(0) - coords_bohr.unsqueeze(1)  # (N, N, 3)
+        if cell_bohr is None:
+            return diff
+
+        cell_bohr = normalize_cell(cell_bohr, device=diff.device, dtype=diff.dtype)
+        cell_inv = torch.linalg.inv(cell_bohr)
+        diff_frac = diff @ cell_inv
+        diff_frac = diff_frac - torch.round(diff_frac)
+        return diff_frac @ cell_bohr
+
+    def _pair_diff_batch(
+        self, coords_bohr: torch.Tensor, cell_bohr: torch.Tensor = None
+    ) -> torch.Tensor:
+        diff = coords_bohr.unsqueeze(1) - coords_bohr.unsqueeze(2)  # (B, N, N, 3)
+        if cell_bohr is None:
+            return diff
+
+        cell_bohr = normalize_cell_batch(
+            cell_bohr,
+            coords_bohr.shape[0],
+            device=diff.device,
+            dtype=diff.dtype,
+        )
+        cell_inv = torch.linalg.inv(cell_bohr)
+        diff_frac = torch.einsum("bnmi,bij->bnmj", diff, cell_inv)
+        diff_frac = diff_frac - torch.round(diff_frac)
+        return torch.einsum("bnmi,bij->bnmj", diff_frac, cell_bohr)
+
     # -------------------------------------------------------------------
     # Core energy computation (Bohr / Hartree, differentiable)
     # -------------------------------------------------------------------
 
-    def _compute_energy_ha(self, coords_bohr: torch.Tensor) -> torch.Tensor:
+    def _compute_energy_ha(
+        self, coords_bohr: torch.Tensor, cell_bohr: torch.Tensor = None
+    ) -> torch.Tensor:
         """
         D3(BJ) dispersion energy in Hartree.
 
         Fully differentiable w.r.t. ``coords_bohr`` via autograd.
         """
-        diff = coords_bohr.unsqueeze(0) - coords_bohr.unsqueeze(1)  # (N, N, 3)
+        diff = self._pair_diff(coords_bohr, cell_bohr)
         r2 = (diff * diff).sum(dim=-1)  # (N, N)
         diag_mask = torch.eye(self.N, device=self.device, dtype=self.dtype) * 1e30
         r2 = r2 + diag_mask
@@ -234,6 +268,7 @@ class SimpleDftD3:
     def _compute_analytical_forces_ha(
         self,
         coords_bohr: torch.Tensor,
+        cell_bohr: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         D3(BJ) energy (Hartree) and analytical forces (Hartree/Bohr).
@@ -248,7 +283,7 @@ class SimpleDftD3:
         dt = self.dtype
 
         # ── pair geometry ────────────────────────────────────────────
-        diff = coords_bohr.unsqueeze(0) - coords_bohr.unsqueeze(1)  # (N,N,3)
+        diff = self._pair_diff(coords_bohr, cell_bohr)
         r2 = (diff * diff).sum(dim=-1)  # (N,N)
         diag_inf = torch.eye(N, device=dev, dtype=dt) * 1e30
         r2safe = r2 + diag_inf
@@ -361,10 +396,12 @@ class SimpleDftD3:
     def _get_dispersion_analytical(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Analytical D3(BJ) dispersion energy and forces in DFTorch units."""
         coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR
-        e_ha, f_ha = self._compute_analytical_forces_ha(coords_bohr)
+        cell_bohr = None if cell is None else cell.to(self.dtype) * ANG_TO_BOHR
+        e_ha, f_ha = self._compute_analytical_forces_ha(coords_bohr, cell_bohr)
         e_ev = e_ha * HA_TO_EV
         f_ev_ang = f_ha * (HA_TO_EV * ANG_TO_BOHR)
         return e_ev, f_ev_ang
@@ -372,6 +409,7 @@ class SimpleDftD3:
     def get_dispersion(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
         use_autograd: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -394,20 +432,22 @@ class SimpleDftD3:
             Shape (3, N) matches DFTorch convention.
         """
         if use_autograd:
-            return self._get_dispersion_autograd(coords)
+            return self._get_dispersion_autograd(coords, cell)
 
-        return self._get_dispersion_analytical(coords)
+        return self._get_dispersion_analytical(coords, cell)
 
     def _get_dispersion_autograd(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forces via ``torch.autograd`` (reference implementation)."""
         coords_ang = coords.to(self.dtype).detach().requires_grad_(True)
         coords_bohr = coords_ang * ANG_TO_BOHR
+        cell_bohr = None if cell is None else cell.to(self.dtype) * ANG_TO_BOHR
 
         with torch.enable_grad():
-            e_ha = self._compute_energy_ha(coords_bohr)
+            e_ha = self._compute_energy_ha(coords_bohr, cell_bohr)
             e_ev = e_ha * HA_TO_EV
             (grad_ev_ang,) = torch.autograd.grad(
                 e_ev,
@@ -418,33 +458,41 @@ class SimpleDftD3:
         f_disp = (-grad_ev_ang).T  # (3, N)
         return e_ev.detach(), f_disp.detach()
 
-    def get_energy(self, coords: torch.Tensor) -> torch.Tensor:
+    def get_energy(
+        self, coords: torch.Tensor, cell: torch.Tensor = None
+    ) -> torch.Tensor:
         """Return dispersion energy (eV), differentiable w.r.t. *coords*."""
         coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR
-        e_ha = self._compute_energy_ha(coords_bohr)
+        cell_bohr = None if cell is None else cell.to(self.dtype) * ANG_TO_BOHR
+        e_ha = self._compute_energy_ha(coords_bohr, cell_bohr)
         return e_ha * HA_TO_EV
 
-    def _get_forces_analytical(self, coords: torch.Tensor) -> torch.Tensor:
+    def _get_forces_analytical(
+        self, coords: torch.Tensor, cell: torch.Tensor = None
+    ) -> torch.Tensor:
         """Analytical dispersion forces (3, N) in eV/Å."""
-        _, f = self._get_dispersion_analytical(coords)
+        _, f = self._get_dispersion_analytical(coords, cell)
         return f
 
     def get_forces(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
         use_autograd: bool = False,
     ) -> torch.Tensor:
         """Return dispersion forces (3, N) in eV/Å."""
         if use_autograd:
-            _, f = self.get_dispersion(coords, use_autograd=True)
+            _, f = self.get_dispersion(coords, cell, use_autograd=True)
             return f
-        return self._get_forces_analytical(coords)
+        return self._get_forces_analytical(coords, cell)
 
     # -------------------------------------------------------------------
     # Batched API  — coords (B, N, 3) in Angstrom
     # -------------------------------------------------------------------
 
-    def get_energy_batch(self, coords: torch.Tensor) -> torch.Tensor:
+    def get_energy_batch(
+        self, coords: torch.Tensor, cell: torch.Tensor = None
+    ) -> torch.Tensor:
         """Dispersion energy for a batch of geometries.
 
         Parameters
@@ -456,8 +504,9 @@ class SimpleDftD3:
         e_disp : (B,) in eV, differentiable w.r.t. *coords*.
         """
         coords_bohr = coords.to(self.dtype) * ANG_TO_BOHR  # (B,N,3)
+        cell_bohr = None if cell is None else cell.to(self.dtype) * ANG_TO_BOHR
 
-        diff = coords_bohr.unsqueeze(1) - coords_bohr.unsqueeze(2)  # (B,N,N,3)
+        diff = self._pair_diff_batch(coords_bohr, cell_bohr)
         r2 = (diff * diff).sum(dim=-1)  # (B,N,N)
         diag_mask = torch.eye(self.N, device=self.device, dtype=self.dtype) * 1e30
         r2 = r2 + diag_mask.unsqueeze(0)
@@ -503,6 +552,7 @@ class SimpleDftD3:
     def _get_forces_batch_analytical(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
     ) -> torch.Tensor:
         """Analytical batched dispersion forces (B, 3, N) in eV/Å."""
         # Analytical — loop-free over batch via full vectorised path
@@ -511,8 +561,9 @@ class SimpleDftD3:
         dt = self.dtype
 
         coords_bohr = coords.to(dt) * ANG_TO_BOHR
+        cell_bohr = None if cell is None else cell.to(dt) * ANG_TO_BOHR
 
-        diff = coords_bohr.unsqueeze(1) - coords_bohr.unsqueeze(2)  # (B,N,N,3)
+        diff = self._pair_diff_batch(coords_bohr, cell_bohr)
         r2 = (diff * diff).sum(dim=-1)  # (B,N,N)
         diag_inf = torch.eye(N, device=dev, dtype=dt).unsqueeze(0) * 1e30
         r2safe = r2 + diag_inf
@@ -588,6 +639,7 @@ class SimpleDftD3:
     def get_forces_batch(
         self,
         coords: torch.Tensor,
+        cell: torch.Tensor = None,
         use_autograd: bool = False,
     ) -> torch.Tensor:
         """Dispersion forces for a batch of geometries.
@@ -602,10 +654,10 @@ class SimpleDftD3:
         """
         if use_autograd:
             coords_ag = coords.detach().requires_grad_(True)
-            e = self.get_energy_batch(coords_ag)  # (B,)
+            e = self.get_energy_batch(coords_ag, cell)  # (B,)
             (grad,) = torch.autograd.grad(e.sum(), coords_ag, create_graph=False)
             return (-grad).permute(0, 2, 1)  # (B,3,N)
-        return self._get_forces_batch_analytical(coords)
+        return self._get_forces_batch_analytical(coords, cell)
 
     # -------------------------------------------------------------------
     # Coordination number (exponential counting function, kcn = 16)

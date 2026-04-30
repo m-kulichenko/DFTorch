@@ -551,7 +551,7 @@ class ESDriver(torch.nn.Module):
                 coords_ang = torch.stack(
                     [structure.RX, structure.RY, structure.RZ], dim=1
                 )
-                structure.e_d3 = structure.dftd3.get_energy(coords_ang)
+                structure.e_d3 = structure.dftd3.get_energy(coords_ang, structure.cell)
                 structure.e_tot = structure.e_tot + structure.e_d3
             else:
                 structure.e_d3 = 0.0
@@ -677,7 +677,9 @@ class ESDriver(torch.nn.Module):
                 coords_ang = torch.stack(
                     [structure.RX, structure.RY, structure.RZ], dim=1
                 )
-                structure.f_d3 = structure.dftd3.get_forces(coords_ang).to(self.device)
+                structure.f_d3 = structure.dftd3.get_forces(
+                    coords_ang, structure.cell
+                ).to(self.device)
                 structure.f_tot = structure.f_tot + structure.f_d3
 
     def calc_stress(self, structure, const):
@@ -1520,7 +1522,9 @@ class ESDriverBatch(torch.nn.Module):
                 coords_batch = torch.stack(
                     [structure.RX, structure.RY, structure.RZ], dim=2
                 )  # (B, N, 3)
-                structure.e_d3 = structure.dftd3.get_energy_batch(coords_batch)  # (B,)
+                structure.e_d3 = structure.dftd3.get_energy_batch(
+                    coords_batch, structure.cell
+                )  # (B,)
                 structure.e_tot = structure.e_tot + structure.e_d3
             else:
                 structure.dftd3 = None
@@ -1609,7 +1613,7 @@ class ESDriverBatch(torch.nn.Module):
                     [structure.RX, structure.RY, structure.RZ], dim=2
                 )  # (B, N, 3)
                 structure.f_d3 = structure.dftd3.get_forces_batch(
-                    coords_batch
+                    coords_batch, structure.cell
                 )  # (B, 3, N)
                 structure.f_tot = structure.f_tot + structure.f_d3
 

@@ -942,51 +942,51 @@ class MDXL:
                 ),
             )
 
-            # structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
+            structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
 
-            test_f_coul = forces1 * (2 * q_e / n_e - 1.0)
+            # test_f_coul = forces1 * (2 * q_e / n_e - 1.0)
 
-            shadow_charge = 2.0 * q_e - n_e
-            _, forces_2q, _ = calculate_PME_ewald(
-                torch.stack((structure.RX, structure.RY, structure.RZ)),
-                2.0 * q_e,
-                structure.cell,
-                nbr_inds,
-                disps,
-                dists,
-                self.CALPHA,
-                dftorch_params["cutoff"],
-                self.PME_data,
-                hubbard_u=structure.Hubbard_U,
-                atomtypes=structure.TYPE,
-                screening=1,
-                calculate_forces=1,
-                calculate_dq=0,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
-            )
-            _, forces_shadow_charge, _ = calculate_PME_ewald(
-                torch.stack((structure.RX, structure.RY, structure.RZ)),
-                shadow_charge,
-                structure.cell,
-                nbr_inds,
-                disps,
-                dists,
-                self.CALPHA,
-                dftorch_params["cutoff"],
-                self.PME_data,
-                hubbard_u=structure.Hubbard_U,
-                atomtypes=structure.TYPE,
-                screening=1,
-                calculate_forces=1,
-                calculate_dq=0,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
-            )
-            # Exact bilinear PME force for 0.5 * (2q - n)^T C n.
-            structure.f_coul = 0.5 * (forces_2q - forces_shadow_charge - forces1)
+            # shadow_charge = 2.0 * q_e - n_e
+            # _, forces_2q, _ = calculate_PME_ewald(
+            #     torch.stack((structure.RX, structure.RY, structure.RZ)),
+            #     2.0 * q_e,
+            #     structure.cell,
+            #     nbr_inds,
+            #     disps,
+            #     dists,
+            #     self.CALPHA,
+            #     dftorch_params["cutoff"],
+            #     self.PME_data,
+            #     hubbard_u=structure.Hubbard_U,
+            #     atomtypes=structure.TYPE,
+            #     screening=1,
+            #     calculate_forces=1,
+            #     calculate_dq=0,
+            #     h_damp_exp=dftorch_params.get("h_damp_exp", None),
+            #     h5_params=dftorch_params.get("h5_params", None),
+            # )
+            # _, forces_shadow_charge, _ = calculate_PME_ewald(
+            #     torch.stack((structure.RX, structure.RY, structure.RZ)),
+            #     shadow_charge,
+            #     structure.cell,
+            #     nbr_inds,
+            #     disps,
+            #     dists,
+            #     self.CALPHA,
+            #     dftorch_params["cutoff"],
+            #     self.PME_data,
+            #     hubbard_u=structure.Hubbard_U,
+            #     atomtypes=structure.TYPE,
+            #     screening=1,
+            #     calculate_forces=1,
+            #     calculate_dq=0,
+            #     h_damp_exp=dftorch_params.get("h_damp_exp", None),
+            #     h5_params=dftorch_params.get("h5_params", None),
+            # )
+            # # Exact bilinear PME force for 0.5 * (2q - n)^T C n.
+            # structure.f_coul = 0.5 * (forces_2q - forces_shadow_charge - forces1)
 
-            print("test", (test_f_coul - structure.f_coul).abs().max())
+            # print("test", (test_f_coul - structure.f_coul).abs().max())
 
             structure.f_tot = structure.f_tot + structure.f_coul
         else:
@@ -1098,9 +1098,9 @@ class MDXL:
         # ── D3(BJ) dispersion energy + forces ───────────────────────────
         if structure.dftd3 is not None:
             coords_ang = torch.stack([structure.RX, structure.RY, structure.RZ], dim=1)
-            structure.e_d3 = structure.dftd3.get_energy(coords_ang)
+            structure.e_d3 = structure.dftd3.get_energy(coords_ang, structure.cell)
             structure.e_tot = structure.e_tot + structure.e_d3
-            structure.f_d3 = structure.dftd3.get_forces(coords_ang)
+            structure.f_d3 = structure.dftd3.get_forces(coords_ang, structure.cell)
             structure.f_tot = structure.f_tot + structure.f_d3
         else:
             structure.e_d3 = 0.0
@@ -1805,7 +1805,9 @@ class MDXLBatch:
             coords_batch = torch.stack(
                 [structure.RX, structure.RY, structure.RZ], dim=2
             )  # (B, N, 3)
-            structure.e_d3 = structure.dftd3.get_energy_batch(coords_batch)  # (B,)
+            structure.e_d3 = structure.dftd3.get_energy_batch(
+                coords_batch, structure.cell
+            )  # (B,)
             structure.e_tot = structure.e_tot + structure.e_d3
 
         self.EPOT = structure.e_tot
@@ -1870,7 +1872,9 @@ class MDXLBatch:
             coords_batch = torch.stack(
                 [structure.RX, structure.RY, structure.RZ], dim=2
             )  # (B, N, 3)
-            structure.f_d3 = structure.dftd3.get_forces_batch(coords_batch)  # (B,3,N)
+            structure.f_d3 = structure.dftd3.get_forces_batch(
+                coords_batch, structure.cell
+            )  # (B,3,N)
             structure.f_tot = structure.f_tot + structure.f_d3
 
         self.VX = (
