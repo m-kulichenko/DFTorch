@@ -13,6 +13,7 @@ experiments/*.pqr
 experiments/*.txt
 experiments/*.bib
 experiments/*.hsd
+experiments/*.vel
 
 !experiments/1_tutorial.ipynb
 !experiments/2_tutorial_freq.ipynb
