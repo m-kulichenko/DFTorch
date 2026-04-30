@@ -26,6 +26,65 @@ def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
+def write_velocity_trajectory(
+    filename,
+    structure,
+    VX,
+    VY,
+    VZ,
+    charges=None,
+    n_charges=None,
+    comment="",
+    step=0,
+):
+    """Append one velocity frame as a PDB-like fixed-width record.
+
+    Notes
+    -----
+    - Uses CRYST1/REMARK/MODEL/ATOM/ENDMDL records like regular PDB.
+    - VX/VY/VZ are written in the coordinate columns (31-54).
+    - Extra aligned columns q and n are appended after the element field.
+    """
+    with open(filename, "a+") as f:
+        num_atoms = structure.Nats
+
+        # CRYST1 record for periodic box
+        if structure.cell is not None:
+            a, b, c, alpha, beta, gamma = _cell_to_pdb_cryst1(structure.cell)
+            f.write(
+                f"CRYST1{a:9.3f}{b:9.3f}{c:9.3f}"
+                f"{alpha:7.2f}{beta:7.2f}{gamma:7.2f} P 1           1\n"
+            )
+
+        f.write(f"REMARK  Step {step}, {comment}\n")
+        f.write(
+            "REMARK  ATOM columns use VX VY VZ in place of X Y Z; appended columns are q and n\n"
+        )
+        f.write(f"MODEL     {step:>8d}\n")
+
+        for i in range(num_atoms):
+            serial = (i + 1) % 100000
+            raw = structure.TYPE[i].item()
+            element = NUMBER_TO_SYMBOL.get(int(raw), "X")
+            vx = VX[i].item()
+            vy = VY[i].item()
+            vz = VZ[i].item()
+            q = 0.0 if charges is None else float(charges[i].item())
+            n_q = 0.0 if n_charges is None else float(n_charges[i].item())
+
+            # PDB fixed-width ATOM fields with VX/VY/VZ in coordinate columns.
+            f.write(
+                f"{'ATOM':<6}{serial:>5d}  "
+                f"{element:<4s}{'MOL':>3s} {'A':1s}{1:>4d}    "
+                f"{vx:>8.3f}{vy:>8.3f}{vz:>8.3f}"
+                f"  1.00  0.00          "
+                f"{element:>2s}"
+                f"{q:>10.4f}{n_q:>10.4f}\n"
+            )
+
+        f.write("ENDMDL\n")
+
+
 SYMBOL_TO_NUMBER = {
     "H": 1,
     "He": 2,

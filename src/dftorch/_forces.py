@@ -691,7 +691,7 @@ def forces_shadow(
     # When full off-diagonal thirdorder is active, its shift is already in
     # CoulPot via thirdorder_shift, so the diagonal dU_dq term is suppressed.
     if dU_dq is not None and thirdorder_shift is None:
-        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+        factor = (U * n + CoulPot + 0.5 * dU_dq * n**2) * 2
     else:
         factor = (U * n + CoulPot) * 2
     # ─────────────────────────────────────────────────────────────────────
@@ -908,7 +908,7 @@ def forces_shadow_pme(
     # When full off-diagonal thirdorder is active, its shift is already in
     # CoulPot via thirdorder_shift, so the diagonal dU_dq term is suppressed.
     if dU_dq is not None and thirdorder_shift is None:
-        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+        factor = (U * n + CoulPot + 0.5 * dU_dq * n**2) * 2
     else:
         factor = (U * n + CoulPot) * 2
     # ─────────────────────────────────────────────────────────────────────

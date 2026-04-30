@@ -21,7 +21,7 @@ import torch
 
 from typing import Any, Tuple, Optional
 import time
-from ._io import write_XYZ_trajectory, write_pdb_frame
+from ._io import write_XYZ_trajectory, write_pdb_frame, write_velocity_trajectory
 from dftorch._tools import calculate_dist_dips
 
 
@@ -471,12 +471,20 @@ class MDXL:
                     f"NS = {structure.net_spin_sr.sum().item():.4f}, "
                     f"Res = {ResErr:.6f}"
                 )
+                q_dump = torch.zeros_like(structure.RX)
+                q_dump.scatter_add_(
+                    0, self.shell_to_atom, structure.q_spin_sr.sum(dim=0)
+                )
+                n_dump = torch.zeros_like(structure.RX)
+                n_dump.scatter_add_(0, self.shell_to_atom, self.n.sum(dim=0))
             else:
                 comm_string = (
                     f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, "
                     f"Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, "
                     f"Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV"
                 )
+                q_dump = structure.q
+                n_dump = self.n
             write_XYZ_trajectory(
                 traj_filename + ".xyz", structure, comm_string, step=md_step
             )
@@ -488,6 +496,17 @@ class MDXL:
                 step=md_step,
                 comment=comm_string,
                 mode="a",
+            )
+            write_velocity_trajectory(
+                traj_filename + ".vel",
+                structure,
+                self.VX,
+                self.VY,
+                self.VZ,
+                charges=q_dump,
+                n_charges=n_dump,
+                comment=comm_string,
+                step=md_step,
             )
 
         # ── First half velocity Verlet ───────────────────────────────────

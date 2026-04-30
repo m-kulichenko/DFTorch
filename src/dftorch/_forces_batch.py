@@ -384,7 +384,7 @@ def forces_shadow_batch(
     factor = (U * n + CoulPot) * 2  # (B, N)
     # ── DFTB3 shadow ──────────────────────────────────────────────────
     if dU_dq is not None and thirdorder_shift is None:
-        factor = (U * n + CoulPot + 0.5 * dU_dq * (2.0 * q - n) * n) * 2
+        factor = (U * n + CoulPot + 0.5 * dU_dq * n**2) * 2
     else:
         factor = (U * n + CoulPot) * 2  # (B, N)
     # ─────────────────────────────────────────────────────────────────────

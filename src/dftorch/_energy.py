@@ -301,7 +301,9 @@ def energy_shadow(
             # Full off-diagonal: shifts from n (shadow charges), energy with q (SCF)
             Ecoul = Ecoul + thirdorder.get_energy_xlbomd(n, q)
         elif dU_dq is not None:
-            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(0.5 * dU_dq * (2.0 * q - n) * n**2)
+            Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(
+                0.5 * dU_dq * (3.0 * q - 2.0 * n) * n**2
+            )
         # ─────────────────────────────────────────────────────────────────
 
     else:  # batched, only full Coulomb matrix for batches
@@ -317,7 +319,7 @@ def energy_shadow(
             Ecoul = Ecoul + thirdorder.get_energy_xlbomd(n, q)
         elif dU_dq is not None:
             Ecoul = Ecoul + (1.0 / 3.0) * torch.sum(
-                0.5 * dU_dq * (2.0 * q - n) * n**2, dim=1
+                0.5 * dU_dq * (3.0 * q - 2.0 * n) * n**2, dim=1
             )
         # ─────────────────────────────────────────────────────────────────
 
