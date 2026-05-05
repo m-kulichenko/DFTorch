@@ -1,6 +1,7 @@
+from __future__ import annotations
 import torch
 import torch.distributed as dist
-import time
+import numpy as np
 
 from dftorch.ewald_pme.neighbor_list import NeighborState
 from dftorch._tools import (
@@ -12,6 +13,9 @@ from dftorch.Structure import Structure
 from dftorch._h0ands import H0_and_S_vectorized
 
 from dftorch.ewald_pme import calculate_PME_ewald
+from sedacs.graph import compute_added, compute_removed, update_graph
+
+from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 
 
 def get_nl(structure, dftorch_params):
@@ -119,6 +123,123 @@ def gather_1d_to_rank0(x: torch.Tensor, device, src: int = 0) -> torch.Tensor:
     # 4) unpad + flatten
     parts = [g[: int(sizes[i].item())] for i, g in enumerate(gathered)]
     return torch.cat(parts, dim=0)
+
+
+def graph_diff_and_update(
+    prev_graph,
+    graph_on_rank,
+    parts_on_rank,
+    maxToAddRemove=100,
+    device=None,
+    add_only=False,
+):
+    """
+    torch.distributed mirror of sedacs graph_diff_and_update (graph.py).
+    Uses the same compute_added / compute_removed / update_graph @njit kernels,
+    replacing comm.Allreduce with dist.all_reduce.
+    """
+    # Normalise to contiguous CPU int64 numpy (required by @njit kernels)
+    if torch.is_tensor(prev_graph):
+        prev_graph = prev_graph.cpu().numpy().astype(np.int64)
+    else:
+        prev_graph = np.ascontiguousarray(prev_graph, dtype=np.int64)
+    if torch.is_tensor(graph_on_rank):
+        graph_on_rank = graph_on_rank.cpu().numpy().astype(np.int64)
+    else:
+        graph_on_rank = np.ascontiguousarray(graph_on_rank, dtype=np.int64)
+    if torch.is_tensor(parts_on_rank):
+        parts_on_rank = parts_on_rank.cpu().numpy().astype(np.int64)
+    else:
+        parts_on_rank = np.asarray(parts_on_rank, dtype=np.int64)
+
+    nnodes = prev_graph.shape[0]
+
+    # Determine device for dist.all_reduce (NCCL requires GPU tensors)
+    if device is None:
+        if dist.get_backend() == "nccl":
+            device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        else:
+            device = torch.device("cpu")
+
+    G_added = np.zeros((nnodes, maxToAddRemove + 1), dtype=prev_graph.dtype)
+    G_removed = np.zeros((nnodes, maxToAddRemove + 1), dtype=prev_graph.dtype)
+
+    if parts_on_rank.size > 0:
+        local_graph = prev_graph[parts_on_rank]
+        local_graph_new = graph_on_rank[parts_on_rank].copy()
+
+        G_added[parts_on_rank, 1:], G_added[parts_on_rank, 0] = compute_added(
+            local_graph[:, 1:],
+            local_graph_new[:, 1:],
+            local_graph[:, 0],
+            local_graph_new[:, 0],
+            nnodes,
+            maxToAddRemove=maxToAddRemove,
+        )
+        if not add_only:
+            G_removed[parts_on_rank, 1:], G_removed[parts_on_rank, 0] = compute_removed(
+                local_graph[:, 1:],
+                local_graph_new[:, 1:],
+                local_graph[:, 0],
+                local_graph_new[:, 0],
+                nnodes,
+                maxToAddRemove=maxToAddRemove,
+            )
+
+    local_overflow = int(
+        G_added[:, 0].max() > maxToAddRemove
+        or (not add_only and G_removed[:, 0].max() > maxToAddRemove)
+    )
+    overflow_t = torch.tensor([local_overflow], dtype=torch.int64, device=device)
+    dist.all_reduce(overflow_t, op=dist.ReduceOp.SUM)
+
+    if overflow_t.item() > 0:
+        # Fallback: OR-reduce full adjacency across ranks
+        adj = np.zeros((nnodes, nnodes), dtype=np.uint8)
+        rows, cols = np.where(graph_on_rank[:, 1:] >= 0)
+        adj[rows, graph_on_rank[:, 1:][rows, cols]] = 1
+        adj_t = torch.from_numpy(adj).to(device)
+        dist.all_reduce(adj_t, op=dist.ReduceOp.MAX)
+        adj = adj_t.cpu().numpy().astype(bool)
+        # Allocate wide enough to hold the maximum degree after union + symmetrization
+        # headroom: extra maxToAddRemove columns so symmetrize_graph won't overflow
+        max_adj_deg = int(adj.sum(axis=1).max())
+        out_width = max(prev_graph.shape[1], max_adj_deg + 1 + maxToAddRemove)
+        G_out = np.full((nnodes, out_width), -1, dtype=prev_graph.dtype)
+        G_out[:, 0] = adj.sum(axis=1)
+        for i in range(nnodes):
+            nbrs_i = np.where(adj[i])[0]
+            G_out[i, 1 : 1 + nbrs_i.size] = nbrs_i
+        return torch.from_numpy(G_out)
+
+    # All-reduce deltas (SUM is correct: parts partition all N nodes, no conflicts)
+    G_added_t = torch.from_numpy(G_added).to(device)
+    G_removed_t = torch.from_numpy(G_removed).to(device)
+    dist.all_reduce(G_added_t, op=dist.ReduceOp.SUM)
+    dist.all_reduce(G_removed_t, op=dist.ReduceOp.SUM)
+    G_added = G_added_t.cpu().numpy().astype(prev_graph.dtype)
+    G_removed = G_removed_t.cpu().numpy().astype(prev_graph.dtype)
+
+    # Clamp nadd per node so cnt + nadd never exceeds maxDeg in update_graph.
+    # (compute_added has an off-by-one: k > maxToAddRemove fires at k=101, giving
+    #  N_added = 101 which would cause an OOB write inside update_graph.)
+    maxDeg = prev_graph.shape[1] - 1
+    headroom = np.maximum(0, maxDeg - prev_graph[:, 0]).astype(prev_graph.dtype)
+    G_added[:, 0] = np.minimum(G_added[:, 0], np.minimum(headroom, maxToAddRemove))
+    if not add_only:
+        G_removed[:, 0] = np.minimum(G_removed[:, 0], maxToAddRemove)
+
+    # Apply delta — same @njit kernel as the mpi4py version
+    updated_graph = update_graph(
+        prev_graph[:, 1:],
+        prev_graph[:, 0],
+        G_removed[:, 1:],
+        G_removed[:, 0],
+        G_added[:, 1:],
+        G_added[:, 0],
+    )
+
+    return torch.from_numpy(updated_graph)
 
 
 def get_ij(TYPE, TYPE_all, nnType, nrnnlist, const):
@@ -293,7 +414,7 @@ def calc_q_on_rank(ch_structure, atom_ids, S, Z, KK, Q, e_vals, q, mu0):
     f = 1.0 / (torch.exp(beta * (e_vals - mu0)) + 1)
     Dorth = (Q * f.unsqueeze(-2)) @ Q.transpose(-2, -1)
     D = Z @ Dorth @ Z.T
-    DS = 2.0 * torch.diag(D @ S)
+    DS = 2.0 * (D * S.T).sum(dim=1)
     q = -1.0 * ch_structure.Znuc
     q.scatter_add_(
         0, atom_ids, DS
@@ -350,7 +471,7 @@ def get_forces_on_rank(structure, per_part_data, per_part_D, q_global, dq_p1, de
 
         ### Fband0
         Fband0 = torch.zeros((3, ch_structure.Nats), device=device)
-        TMP = 4 * (ch_structure.dH0 @ D).diagonal(offset=0, dim1=1, dim2=2)
+        TMP = 4 * (ch_structure.dH0 * D.T).sum(dim=-1)
         Fband0.scatter_add_(
             1, ch_structure.atom_ids.expand(3, -1), TMP
         )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
@@ -358,7 +479,7 @@ def get_forces_on_rank(structure, per_part_data, per_part_D, q_global, dq_p1, de
         ### Pulay forces
         SIHD = 4 * ch_structure.Z @ ch_structure.Z.T @ ch_structure.H @ D
         FPulay = torch.zeros((3, ch_structure.Nats), device=device)
-        TMP = -(ch_structure.dS @ SIHD).diagonal(offset=0, dim1=1, dim2=2)
+        TMP = -(ch_structure.dS * SIHD.T).sum(dim=-1)
         FPulay.scatter_add_(
             1, ch_structure.atom_ids.expand(3, -1), TMP
         )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
@@ -379,12 +500,11 @@ def get_forces_on_rank(structure, per_part_data, per_part_D, q_global, dq_p1, de
             + ch_structure.RZ * ch_structure.e_field[2]
         )
         FSdipole = torch.zeros((3, ch_structure.Nats), device=device)
-        tmp1 = (D - D0) @ ch_structure.dS
-        tmp2 = -2 * (tmp1).diagonal(offset=0, dim1=1, dim2=2)
+        D_diff = D - D0
+        tmp2 = -2 * (D_diff.unsqueeze(0) * ch_structure.dS.transpose(1, 2)).sum(dim=-1)
         FSdipole.scatter_add_(1, ch_structure.atom_ids.expand(3, -1), tmp2)
         FSdipole *= dotRE
 
-        D_diff = D - D0
         n_orb = ch_structure.dS.shape[1]
         a = ch_structure.dS * D_diff.permute(1, 0).unsqueeze(0)  # 3, n_ham, n_ham
         outs_by_atom = torch.zeros((3, n_orb, ch_structure.Nats), device=device)
@@ -436,7 +556,6 @@ def kernel_global(
         # Normalize current direction
         if dist.get_rank() == 0:
             torch.cuda.synchronize()
-            start_time1 = time.perf_counter()
             norm_dr = torch.norm(dr)
             if norm_dr < 1e-9:
                 print("zero norm_dr")
@@ -485,8 +604,6 @@ def kernel_global(
 
         if dist.get_rank() == 0:
             torch.cuda.synchronize()
-            print("  t K0 {:.1f} s\n".format(time.perf_counter() - start_time1))
-            start_time1 = time.perf_counter()
 
         dq_global = torch.zeros(structure.Nats, device=device)
         trP1 = torch.tensor(0.0, device=device)
@@ -545,7 +662,7 @@ def kernel_global(
             ### end fermi_prt
 
             D1 = ch_structure.Z @ D1 @ ch_structure.Z.T
-            D1S = 2 * torch.diag(D1 @ ch_structure.S)
+            D1S = 2 * (D1 * ch_structure.S.T).sum(dim=1)
 
             # dq (atomic) from AO response
             dq = torch.zeros(ch_structure.Nats, device=device)
@@ -588,9 +705,7 @@ def kernel_global(
             dPdMu_orth = (ch_structure.Q * dpdmu.unsqueeze(0)) @ ch_structure.Q.T
 
             dPdMu = ch_structure.Z @ (dPdMu_orth @ ch_structure.Z.T)
-            dPdMuAOS = 2.0 * torch.diagonal(
-                dPdMu @ ch_structure.S, offset=0, dim1=-2, dim2=-1
-            )
+            dPdMuAOS = 2.0 * (dPdMu * ch_structure.S.T).sum(dim=1)
 
             dq2 = torch.zeros(ch_structure.Nats, device=device)
             dq2.scatter_add_(0, ch_structure.atom_ids, dPdMuAOS)
@@ -611,8 +726,6 @@ def kernel_global(
 
         if dist.get_rank() == 0:
             torch.cuda.synchronize()
-            print("  t K1 {:.1f} s\n".format(time.perf_counter() - start_time1))
-            start_time1 = time.perf_counter()
 
         # New residual (df/dlambda), preconditioned
         for ch_structure in per_part_data:
@@ -649,11 +762,188 @@ def kernel_global(
 
         if dist.get_rank() == 0:
             torch.cuda.synchronize()
-            print("  t K2 {:.1f} s\n".format(time.perf_counter() - start_time1))
-            start_time1 = time.perf_counter()
 
     if dist.get_rank() == 0:
         K0Res_global = vi[:, :rank_m] @ Y
+
     dist.broadcast(K0Res_global, 0)
 
     return K0Res_global
+
+
+def repulsion(
+    R_rep_tensor: torch.Tensor,
+    rep_splines_tensor: torch.Tensor,
+    close_exp_tensor: torch.Tensor,
+    TYPE: torch.Tensor,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    cell,
+    Rcut: float,
+    Nats: int,
+    const,
+    verbose: bool,
+    compute_stress: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    """
+    Compute the total repulsive energy and its Cartesian derivatives.
+
+    Parameters
+    ----------
+    R_rep_tensor : (P, M) torch.Tensor
+        Radial grid (Å) per pair type (P = number of pair types).
+    rep_splines_tensor : (P, M, >=6) torch.Tensor
+        Spline coefficients c0..c5 (Hartree) for 5th‑order local polynomial segments.
+    close_exp_tensor : (P, 3) torch.Tensor
+        Close exponential parameters for each pair type.
+    TYPE : (Nats,) torch.Tensor
+        Atom type indices (compatible with const.label).
+    RX, RY, RZ : (Nats,) torch.Tensor
+        Atomic Cartesian coordinates in Å.
+    cell : sequence or tensor
+        Periodic cell specification:
+        - shape (3,) for orthorhombic box lengths
+        - shape (3,3) for a triclinic cell matrix
+    Rcut : float
+        Cutoff (Å) used to build the neighbor list.
+    Nats : int
+        Number of atoms.
+    const : object
+        Contains chemical label mapping for pair typing.
+    verbose : bool
+        If True, neighbor list routine may emit timing info.
+    compute_stress : bool
+        If True, also compute and return the analytical pair-virial
+        stress tensor (requires ``cell`` to be a (3,3) matrix).
+
+    Returns
+    -------
+    Vr : torch.Tensor (scalar, eV)
+        Total repulsive energy.
+    dVr : torch.Tensor, shape (3, Nats, Nats), eV/Å
+        Antisymmetric matrix of pairwise force contributions:
+        dVr[:, i, j] = +∂E/∂r_i from pair (i,j); dVr[:, j, i] = −dVr[:, i, j].
+    sigma_rep : torch.Tensor, shape (3, 3), eV/ų (only when ``compute_stress=True``)
+        Symmetrised repulsive virial stress tensor:
+        σ_{αβ} = (1/V) Σ_{ij} (dV/dR) R_{ij,α} R_{ij,β} / R_{ij}.
+
+    Notes
+    -----
+    - Distances converted to Bohr internally (factor 0.52917721).
+    - energy converted Hartree → eV using 27.21138625.
+    - Neighbor list uses minimum image (min_image_only=True).
+    """
+    _, _, nnRx, nnRy, nnRz, nnType, _, _, neighbor_I, neighbor_J, IJ_pair_type, _ = (
+        vectorized_nearestneighborlist(
+            TYPE,
+            RX,
+            RY,
+            RZ,
+            cell,
+            Rcut,
+            Nats,
+            const,
+            min_image_only=True,
+            verbose=verbose,
+        )
+    )
+    Rab_X = nnRx - RX.unsqueeze(-1)
+    Rab_Y = nnRy - RY.unsqueeze(-1)
+    Rab_Z = nnRz - RZ.unsqueeze(-1)
+    dR = torch.norm(torch.stack((Rab_X, Rab_Y, Rab_Z), dim=-1), dim=-1)
+    nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list
+    dR_mskd = dR[nn_mask]
+
+    # ── per-pair starting distance ────────────────────────────────────
+    R0 = R_rep_tensor[IJ_pair_type, 0]  # (P,) first spline knot
+    use_exp = dR_mskd < R0  # (P,) bool mask
+    del R0
+
+    # ── spline indices (only needed for spline region) ────────────────
+    indices = (
+        torch.searchsorted(
+            R_rep_tensor[IJ_pair_type], dR_mskd.unsqueeze(-1), right=True
+        ).squeeze(-1)
+        - 1
+    )
+    # Optionally clamp to keep indices in bounds
+    # K = R_rep_tensor.size(1)
+    # indices = indices.clamp(min=0, max=K-1)
+
+    dx = (dR_mskd - R_rep_tensor[IJ_pair_type, indices]) / 0.52917721
+
+    # ── spline energy ─────────────────────────────────────────────────
+    Vr = (
+        rep_splines_tensor[IJ_pair_type, indices, 0]
+        + rep_splines_tensor[IJ_pair_type, indices, 1] * dx
+        + rep_splines_tensor[IJ_pair_type, indices, 2] * dx**2
+        + rep_splines_tensor[IJ_pair_type, indices, 3] * dx**3
+        + rep_splines_tensor[IJ_pair_type, indices, 4] * dx**4
+        + rep_splines_tensor[IJ_pair_type, indices, 5] * dx**5
+    )
+
+    # ── exponential energy  E = exp(a0*r + a1) + a2 ──────────────────
+    Vr_exp = (
+        torch.exp(
+            -close_exp_tensor[IJ_pair_type, 0] * dR_mskd / 0.52917721
+            + close_exp_tensor[IJ_pair_type, 1]
+        )
+        + close_exp_tensor[IJ_pair_type, 2]
+    )
+    # ── select per pair ───────────────────────────────────────────────
+    Vr = torch.where(use_exp, Vr_exp, Vr)
+    Vr = Vr.sum() * 27.21138625  # eV
+    del Vr_exp
+
+    # ── spline gradient  dV/dR (Ha/Bohr) ─────────────────────────────
+    # now, it's Ha/Bohr
+    dVr_dR = (
+        rep_splines_tensor[IJ_pair_type, indices, 1]
+        + 2 * rep_splines_tensor[IJ_pair_type, indices, 2] * dx
+        + 3 * rep_splines_tensor[IJ_pair_type, indices, 3] * dx**2
+        + 4 * rep_splines_tensor[IJ_pair_type, indices, 4] * dx**3
+        + 5 * rep_splines_tensor[IJ_pair_type, indices, 5] * dx**4
+    )
+    # ── exponential gradient  dV/dR (Ha/Bohr) ────────────────────────
+    dVr_exp_dR = -close_exp_tensor[IJ_pair_type, 0] * torch.exp(
+        -close_exp_tensor[IJ_pair_type, 0] * dR_mskd / 0.52917721
+        + close_exp_tensor[IJ_pair_type, 1]
+    )
+
+    # ── select per pair ───────────────────────────────────────────────
+    dVr_dR = torch.where(use_exp, dVr_exp_dR, dVr_dR)
+    del dVr_exp_dR
+
+    # ── stress tensor (pair virial) ──────────────────────────────────
+    sigma_rep = None
+    if compute_stress and cell is not None:
+        Rab = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=-1)[nn_mask]  # (P, 3)
+        dVr_dR_eV = dVr_dR * 27.21138625 / 0.52917721  # eV/Å
+        Vcell = torch.abs(torch.det(cell))
+        sigma_rep = (
+            dVr_dR_eV[:, None, None]
+            * (Rab.unsqueeze(-1) * Rab.unsqueeze(-2))
+            / dR_mskd[:, None, None]
+        ).sum(dim=0) / Vcell
+        sigma_rep = 0.5 * (sigma_rep + sigma_rep.T)
+
+    # ── accumulate forces ───────────────────
+    dR_dxyz = torch.stack((Rab_X, Rab_Y, Rab_Z), dim=0)[:, nn_mask] / dR_mskd
+    dVr_dR_times_dR_dxyz = dVr_dR * dR_dxyz
+    del dVr_dR, dR_dxyz
+
+    # Do this O(N) equivalent:
+    scale = 27.21138625 / 0.52917721
+    f_rep = torch.zeros((3, Nats), device=RX.device)
+    scaled = dVr_dR_times_dR_dxyz * scale
+    f_rep.index_add_(1, neighbor_I, scaled)
+    f_rep.index_add_(1, neighbor_J, -scaled)
+
+    del nnRx, nnRy, nnRz, nnType, neighbor_I, neighbor_J, IJ_pair_type, _
+
+    if sigma_rep is not None:
+        return Vr, f_rep, sigma_rep
+    return Vr, f_rep, None
