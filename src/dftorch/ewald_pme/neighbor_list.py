@@ -669,6 +669,7 @@ def generate_neighbor_list(
 
     cell_inds = (coords / cell_size_per_dim[:, None]).to(torch.int32)
     cells_per_side_np = cells_per_side.cpu().numpy()
+    cell_inds = cell_inds % cells_per_side.to(torch.int32)[:, None]  # <-- add this
 
     cell_sizes = count_flattened_cell_sizes(cell_inds, lattice_lengths, cutoff)
     max_cell_capacity = torch.max(cell_sizes)

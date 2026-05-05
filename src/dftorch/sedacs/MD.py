@@ -12,7 +12,6 @@ from dftorch.ewald_pme import (
 from dftorch._cell import wrap_positions
 
 from dftorch._tools import calculate_dist_dips
-from dftorch._repulsive_spline import get_repulsion_energy
 
 from sedacs.chemical_potential import get_mu
 
@@ -24,6 +23,7 @@ from . import (
     get_subsy_on_rank,
     get_evals_dvals,
     calc_q_on_rank,
+    repulsion,
 )
 
 from sedacs.graph_partition import (
@@ -118,12 +118,27 @@ class MDXL_Graph(MDXL):
                 ch[i], core_size[i], nh = get_coreHaloIndices(
                     ch[i][: core_size[i]], fullGraph, self.n_jumps
                 )
+                # print(
+                #     "Rank",
+                #     dist.get_rank(),
+                #     "has core and core-halo size:",
+                #     core_size[i].item(),
+                #     len(ch[i]),
+                # )
+
+            ch_sizes = [len(ch[i]) for i in range(works_per_rank)]
+            ch_stats = torch.tensor(
+                [max(ch_sizes), min(ch_sizes), sum(ch_sizes), works_per_rank],
+                dtype=torch.float64,
+                device=device,
+            )
+            dist.all_reduce(ch_stats[:1], op=dist.ReduceOp.MAX)
+            dist.all_reduce(ch_stats[1:2], op=dist.ReduceOp.MIN)
+            dist.all_reduce(ch_stats[2:], op=dist.ReduceOp.SUM)
+            if dist.get_rank() == 0:
+                g_max, g_min, g_sum, g_cnt = ch_stats.tolist()
                 print(
-                    "Rank",
-                    dist.get_rank(),
-                    "has core and core-halo size:",
-                    core_size[i],
-                    len(ch[i]),
+                    f"  CH sizes (all ranks): max={int(g_max)}, min={int(g_min)}, avg={g_sum / g_cnt:.1f}"
                 )
 
             mu0, graphOnRank = self.step(
@@ -215,10 +230,9 @@ class MDXL_Graph(MDXL):
                     structure,
                     structure.cell,
                     step=md_step,
-                    etot=Energ,
-                    temp=Temperature,
+                    comment=comm_string,
                     mode="a",
-                )  # 'w' — create fresh file
+                )
 
             self.VX = (
                 self.VX
@@ -257,7 +271,7 @@ class MDXL_Graph(MDXL):
 
             structure.coordinates = torch.stack(
                 (structure.RX, structure.RY, structure.RZ),
-            )
+            ).contiguous()
 
             if self.cuda_sync:
                 torch.cuda.synchronize()
@@ -284,7 +298,9 @@ class MDXL_Graph(MDXL):
             self.n_1 = self.n_0
             self.n_0 = self.n
 
-            positions = torch.stack((structure.RX, structure.RY, structure.RZ))
+            positions = torch.stack(
+                (structure.RX, structure.RY, structure.RZ)
+            ).contiguous()
             nbr_state.update(positions)
             disps, dists, nl = calculate_dist_dips(
                 positions, nbr_state, dftorch_params["cutoff"]
@@ -322,15 +338,24 @@ class MDXL_Graph(MDXL):
             self.n = torch.empty((structure.Nats,), device=device)
             CoulPot = torch.empty((structure.Nats,), device=device)
 
+            structure.coordinates = torch.empty(
+                (3, structure.Nats),
+                dtype=structure.RX.dtype,
+                device=device,
+            )
+
         tic2_1 = time.perf_counter()
 
         dist.broadcast(nl_shape, 0)
         dist.broadcast(self.n, 0)
         dist.broadcast(CoulPot, 0)
-        dist.broadcast(structure.RX, 0)
-        dist.broadcast(structure.RY, 0)
-        dist.broadcast(structure.RZ, 0)
+
+        # dist.broadcast(structure.RX, 0)
+        # dist.broadcast(structure.RY, 0)
+        # dist.broadcast(structure.RZ, 0)
+
         dist.broadcast(structure.coordinates, 0)
+        structure.RX, structure.RY, structure.RZ = structure.coordinates.unbind(dim=0)
 
         if dist.get_rank() != 0:
             nl = torch.empty(
@@ -482,7 +507,7 @@ class MDXL_Graph(MDXL):
         dist.all_reduce(s_entropy, op=dist.ReduceOp.SUM)
         if dist.get_rank() == 0:
             # nuclear repulsion
-            e_repulsion, dVr, stress_repulsion = get_repulsion_energy(
+            e_repulsion, f_rep, stress_repulsion = repulsion(
                 structure.const.R_rep_tensor,
                 structure.const.rep_splines_tensor,
                 structure.const.close_exp_tensor,
@@ -491,13 +516,12 @@ class MDXL_Graph(MDXL):
                 structure.RY,
                 structure.RZ,
                 structure.cell,
-                6.0,
+                4.0,
                 structure.Nats,  # repulsive_rcut
                 structure.const,
                 verbose=False,
                 compute_stress=False,
             )
-            f_rep = dVr.sum(dim=2)
 
             # Coulomb energy
             e_coul = 0.5 * (2 * q_global - self.n) @ CoulPot + 0.5 * torch.sum(
