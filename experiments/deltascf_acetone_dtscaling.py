@@ -1,5 +1,3 @@
-
-
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 # %                   SCF-TB - PROXY APPLICATION                      %
 # %                   A.M.N. Niklasson, M. Kulichenko. T1, LANL       %
@@ -14,22 +12,22 @@ import torch
 import warnings
 import logging
 import os
+
 # to disable torchdynamo completely. Faster for smaller systems and single-point calculations.
 os.environ["TORCHDYNAMO_DISABLE"] = "1"  # hard-disable capture
 
 import numpy as np
 import matplotlib.pyplot as plt
 
-from dftorch._scf import SCFx, SCFx_batch
 from dftorch.Constants import Constants
-from dftorch.Structure import Structure, StructureBatch
-from dftorch.MD import MDXL, MDXLBatch, MDXLOS
-from dftorch.ESDriver import ESDriver, ESDriverBatch
+from dftorch.Structure import Structure
+from dftorch.MD import MDXLOS
+from dftorch.ESDriver import ESDriver
 
 ### Configure torch and torch.compile ###
 # Silence warnings and module logs
 warnings.filterwarnings("ignore")
-os.environ["TORCH_LOGS"] = ""               # disable PT2 logging
+os.environ["TORCH_LOGS"] = ""  # disable PT2 logging
 os.environ["TORCHINDUCTOR_VERBOSE"] = "0"
 os.environ["TORCHDYNAMO_VERBOSE"] = "0"
 logging.getLogger("torch.fx").setLevel(logging.CRITICAL)
@@ -46,22 +44,16 @@ dftorch_params = {
     "UNRESTRICTED": True,
     "SHARED_MU": False,  # if True, use shared chemical potential for both spin channels in unrestricted calculations. Otherwise, use separate chemical potentials for each spin channel.
     "BROKEN_SYM": True,  # if True, mix 2 % of lumo in homo at initialization
-
-
-    "DELTA_SCF": True, # if True, perform delta SCF for targeted, non-aufbau excited state. Performs GS SCF, then ES SCF. 
-    "DELTA_SCF_TARGET": "SINGLET", # options: '"SINGLET" or "TRIPLET"'. desired lowest excited state
+    "DELTA_SCF": True,  # if True, perform delta SCF for targeted, non-aufbau excited state. Performs GS SCF, then ES SCF.
+    "DELTA_SCF_TARGET": "SINGLET",  # options: '"SINGLET" or "TRIPLET"'. desired lowest excited state
     "DELTA_SCF_SMEARING": False,  # if True, occupations for GS orbital and target ES orbital will be set to 0.5
-    
-    
-    "coul_method": "!PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
-    "Coulomb_acc": 1e-6,  # Coulomb accuracy for full coulomb calcs or t_err for PME
-    "cutoff": 12.0,  # Coulomb cutoff
-    "PME_order": 4,  # Ignored for FULL coulomb method
-
+    "COUL_METHOD": "!PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
+    "COULOMB_ACC": 1e-6,  # Coulomb accuracy for full coulomb calcs or t_err for PME
+    "COULOMB_CUTOFF": 12.0,  # Coulomb cutoff
+    "PME_ORDER": 4,  # Ignored for FULL coulomb method
     "SCF_MAX_ITER": 90,  # Maximum number of SCF iterations
     "SCF_TOL": 1e-6,  # SCF convergence tolerance on density matrix
     "SCF_ALPHA": 0.1,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
-
     "KRYLOV_MAXRANK": 15,  # Maximum Krylov subspace rank
     "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in SCF
     "KRYLOV_TOL_MD": 1e-6,  # Krylov subspace convergence tolerance in MD SCF
@@ -71,9 +63,11 @@ dftorch_params = {
 # Initial data, load atoms and coordinates, etc in COORD.dat
 device = "cuda" if torch.cuda.is_available() else "cpu"
 filename = "COORD_ACETONE.xyz"
-#filename = "O2.xyz"
-#LBox = None
-LBox = torch.tensor([12.0, 12.0, 12.0], device=device) # Simulation box size in Angstroms. Only cubic boxes supported for now.
+# filename = "O2.xyz"
+# LBox = None
+LBox = torch.tensor(
+    [12.0, 12.0, 12.0], device=device
+)  # Simulation box size in Angstroms. Only cubic boxes supported for now.
 
 # Create constants container. Set path to SKF files.
 const = Constants(
@@ -107,7 +101,6 @@ es_driver(structure1, const, do_scf=True)
 es_driver.calc_forces(structure1, const)  # Calculate forces after SCF
 
 
-
 dt = 0.125
 steps = 2000
 
@@ -116,38 +109,51 @@ torch.manual_seed(0)
 temperature_K = torch.tensor(300.0, device=structure1.device)
 mdDriver = MDXLOS(es_driver, const, temperature_K=temperature_K)
 # Set number of steps, time step (fs), dump interval and trajectory filename
-mdDriver.run(structure1, dftorch_params, num_steps=steps, dt=dt, dump_interval=1, traj_filename='md_trj.xyz')
+mdDriver.run(
+    structure1,
+    dftorch_params,
+    num_steps=steps,
+    dt=dt,
+    dump_interval=1,
+    traj_filename="md_trj.xyz",
+)
 
-#print(vars(mdDriver))
+# print(vars(mdDriver))
 Energy = mdDriver.E_array
 
-timesteps = np.arange(0,len(Energy),1)
+timesteps = np.arange(0, len(Energy), 1)
 timesteps = timesteps * dt
 
 deltaE = (Energy - Energy[0]) * 1000
-plt.plot(timesteps,deltaE,label=f'dt = {dt}')
-plt.xlabel('Time (fs)')
-plt.ylabel(r'$\Delta$E (meV)')
+plt.plot(timesteps, deltaE, label=f"dt = {dt}")
+plt.xlabel("Time (fs)")
+plt.ylabel(r"$\Delta$E (meV)")
 
 
 dt_array = [0.25, steps / 2], [0.5, steps / 4], [1.0, steps / 8]
 
-for dt,step in dt_array:
+for dt, step in dt_array:
     step = int(step)
     es_driver(structure1, const, do_scf=True)
     es_driver.calc_forces(structure1, const)  # Calculate forces after SCF
     torch.manual_seed(0)
     temperature_K = torch.tensor(300.0, device=structure1.device)
     mdDriver = MDXLOS(es_driver, const, temperature_K=temperature_K)
-    mdDriver.run(structure1, dftorch_params, num_steps=step, dt=dt, dump_interval=10, traj_filename='md_trj.xyz')
+    mdDriver.run(
+        structure1,
+        dftorch_params,
+        num_steps=step,
+        dt=dt,
+        dump_interval=10,
+        traj_filename="md_trj.xyz",
+    )
     Energy = mdDriver.E_array
     deltaE = (Energy - Energy[0]) * 1000
-    print(f'number of steps and len of Energy= {step} {len(Energy)}')
-    timesteps = np.arange(0,len(Energy),1)
+    print(f"number of steps and len of Energy= {step} {len(Energy)}")
+    timesteps = np.arange(0, len(Energy), 1)
     timesteps = timesteps * dt
     print(timesteps)
-    plt.plot(timesteps,deltaE,label=f'dt = {dt}')
-
+    plt.plot(timesteps, deltaE, label=f"dt = {dt}")
 
 
 plt.legend()

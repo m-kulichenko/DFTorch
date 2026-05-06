@@ -26,7 +26,7 @@ def get_nl(structure, dftorch_params):
         positions,
         structure.cell,
         None,
-        dftorch_params["cutoff"],
+        dftorch_params["COULOMB_CUTOFF"],
         is_dense=True,
         buffer=2.0,
         use_triton=False,
@@ -35,14 +35,14 @@ def get_nl(structure, dftorch_params):
         positions, nbr_state, dftorch_params["graph_cutoff"]
     )
 
-    if dftorch_params["graph_cutoff"] < dftorch_params["cutoff"]:
+    if dftorch_params["graph_cutoff"] < dftorch_params["COULOMB_CUTOFF"]:
         nl = torch.where(
             (dists > dftorch_params["graph_cutoff"]) | (dists == 0.0), -1, nl
         )
         nl = nl.sort(dim=1, descending=True)[0]
         nl = nl[:, : torch.max(torch.sum(nl != -1, dim=1))]
 
-    elif dftorch_params["graph_cutoff"] > dftorch_params["cutoff"]:
+    elif dftorch_params["graph_cutoff"] > dftorch_params["COULOMB_CUTOFF"]:
         raise ValueError(
             "Coulomb cutoff must be greater than or equal to graph cutoff for this implementation."
         )
@@ -538,21 +538,18 @@ def kernel_global(
     mu0,
     device,
 ):
+    krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
     if dist.get_rank() == 0:
-        vi = torch.zeros(
-            structure.Nats, dftorch_params["KRYLOV_MAXRANK"], device=device
-        )
-        fi = torch.zeros(
-            structure.Nats, dftorch_params["KRYLOV_MAXRANK"], device=device
-        )
+        vi = torch.zeros(structure.Nats, krylov_maxrank, device=device)
+        fi = torch.zeros(structure.Nats, krylov_maxrank, device=device)
     else:
         vi = None
         fi = None
     dr = K0Res_global.clone()
     krylov_rank = 0
     Fel = torch.tensor(float("inf"), device=device)
-    # FelTol = dftorch_params['KRYLOV_TOL']
-    while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
+
+    while (krylov_rank < krylov_maxrank) and (Fel > FelTol):
         # Normalize current direction
         if dist.get_rank() == 0:
             torch.cuda.synchronize()
@@ -586,15 +583,15 @@ def kernel_global(
                 disps_global,
                 dists_global,
                 CALPHA_global,
-                dftorch_params["cutoff"],
+                dftorch_params["COULOMB_CUTOFF"],
                 PME_data_global,
                 hubbard_u=structure.Hubbard_U,
                 atomtypes=structure.TYPE,
                 screening=1,
                 calculate_forces=0,
                 calculate_dq=1,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
+                h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=dftorch_params.get("H5_PARAMS", None),
             )
         else:
             v = torch.empty((structure.Nats,), device=device)

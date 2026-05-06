@@ -802,9 +802,11 @@ def get_total_stress_analytical(
     # --- 5. Coulomb stress (real-space pair virial + k-space metric) ---
     if Coulomb_acc is None:
         Coulomb_acc = (
-            dftorch_params.get("Coulomb_acc", 5e-5) if dftorch_params else 5e-5
+            dftorch_params.get("COULOMB_ACC", 1e-5) if dftorch_params else 1e-5
         )
-    coulomb_cutoff = dftorch_params.get("cutoff", None) if dftorch_params else None
+    coulomb_cutoff = (
+        dftorch_params.get("COULOMB_CUTOFF", None) if dftorch_params else None
+    )
 
     if structure.stress_coulomb is None:
         out["coulomb"] = get_coulomb_stress(

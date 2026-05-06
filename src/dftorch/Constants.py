@@ -10,16 +10,17 @@ class Constants(torch.nn.Module):
     Constants used in DFTB
     """
 
-    def __init__(
-        self, file, skfpath, magnetic_hubbard_ldep=False, dftb3=False, param_grad=False
-    ):
+    def __init__(self, dftorch_params):
         """
         Constructor
         """
 
         super().__init__()
 
-        self.skfpath = skfpath
+        self.skfpath = dftorch_params["SKFPATH"]
+        self.magnetic_hubbard_ldep = dftorch_params.get("MAGNETIC_HUBBARD_LDEP", False)
+        self.dftb3 = dftorch_params.get("DFTB3", False)
+        self.grad_param = dftorch_params.get("GRAD_PARAM", False)
         self.symbol_to_number = symbol_to_number
         self.label = label
         self.atomic_num = atomic_num
@@ -30,14 +31,20 @@ class Constants(torch.nn.Module):
         self.atomic_num = torch.nn.Parameter(atomic_num, requires_grad=False)
         self.mass = torch.nn.Parameter(mass, requires_grad=False)
 
-        if isinstance(file, str):
-            if file.lower().endswith(".pdb"):
-                species, _, _ = read_pdb([file], sort=False)  # Input coordinate file
+        if isinstance(dftorch_params["FILENAME"], str):
+            if dftorch_params["FILENAME"].lower().endswith(".pdb"):
+                species, _, _ = read_pdb(
+                    [dftorch_params["FILENAME"]], sort=False
+                )  # Input coordinate file
             else:
-                species, _ = read_xyz([file], sort=False)  # Input coordinate file
+                species, _ = read_xyz(
+                    [dftorch_params["FILENAME"]], sort=False
+                )  # Input coordinate file
 
         else:
-            species, _ = read_xyz(file, sort=False)  # Input coordinate file
+            species, _ = read_xyz(
+                dftorch_params["FILENAME"], sort=False
+            )  # Input coordinate file
         TYPE = torch.tensor(species.flatten())
 
         from ._bond_integral import get_skf_tensors
@@ -65,7 +72,9 @@ class Constants(torch.nn.Module):
         ) = get_skf_tensors(TYPE, self.skfpath)
 
         try:
-            w_shell = load_spinw_to_matrix(skfpath + "spinw.txt", device=TYPE.device)
+            w_shell = load_spinw_to_matrix(
+                self.skfpath + "spinw.txt", device=TYPE.device
+            )
             self.w_shell = torch.nn.Parameter(w_shell, requires_grad=False)
             w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
             w_atom[TYPE] = self.w_shell[
@@ -73,7 +82,7 @@ class Constants(torch.nn.Module):
             ]
             self.w_atom = torch.nn.Parameter(w_atom, requires_grad=False)
 
-            if magnetic_hubbard_ldep:
+            if self.magnetic_hubbard_ldep:
                 self.w = torch.nn.Parameter(w_shell.clone(), requires_grad=False)
             else:
                 self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
@@ -109,15 +118,15 @@ class Constants(torch.nn.Module):
         self.U = torch.nn.Parameter(US, requires_grad=False)
         self.Up = torch.nn.Parameter(UP, requires_grad=False)
         self.Ud = torch.nn.Parameter(UD, requires_grad=False)
-        self.Es = torch.nn.Parameter(ES, requires_grad=param_grad)
-        self.Ep = torch.nn.Parameter(EP, requires_grad=param_grad)
-        self.Ed = torch.nn.Parameter(ED, requires_grad=param_grad)
+        self.Es = torch.nn.Parameter(ES, requires_grad=self.grad_param)
+        self.Ep = torch.nn.Parameter(EP, requires_grad=self.grad_param)
+        self.Ed = torch.nn.Parameter(ED, requires_grad=self.grad_param)
 
         # ── DFTB3: Hubbard derivatives dU/dq ─────────────────────────────
-        if dftb3:
+        if self.dftb3:
             import os
 
-            _hubbard_path = os.path.join(skfpath, "hubbard_derivative.txt")
+            _hubbard_path = os.path.join(self.skfpath, "hubbard_derivative.txt")
             try:
                 dU_dq = load_hubbard_derivs(_hubbard_path, device=TYPE.device)
                 self.dU_dq = torch.nn.Parameter(dU_dq, requires_grad=False)

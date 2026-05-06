@@ -5,7 +5,7 @@ from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,
 )
-from ._tools import fractional_matrix_power_symm
+from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
 from ._scf import scf_x_os, SCFx, SCFx_batch, delta_scf_x_os
 from ._energy import energy
 from ._forces import Forces, forces_spin, Forces_PME
@@ -27,16 +27,14 @@ class ESDriver(torch.nn.Module):
     def __init__(
         self,
         dftorch_params,
-        electronic_rcut: float,
-        repulsive_rcut: float,
         device: torch.device,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.dftorch_params = dftorch_params
-        self.electronic_rcut = electronic_rcut
-        self.repulsive_rcut = repulsive_rcut
+        self.electronic_rcut = dftorch_params.get("RCUT_ELECTRONIC", 10.0)
+        self.repulsive_rcut = dftorch_params.get("RCUT_REPULSIVE", 6.0)
         self.device = device
 
     def forward(
@@ -59,6 +57,14 @@ class ESDriver(torch.nn.Module):
         forces : (Nats, 3) torch.Tensor
             Atomic forces in eV/Å.
         """
+
+        self.dftorch_params["COULOMB_CUTOFF"] = self.dftorch_params.get(
+            "COULOMB_CUTOFF", 10.0
+        )
+        self.dftorch_params["SCF_ALPHA"] = self.dftorch_params.get("SCF_ALPHA", 0.1)
+        normalize_coulomb_settings(
+            self.dftorch_params, structure.cell, context="ESDriver"
+        )
 
         # Build the neighborlist
 
@@ -142,14 +148,14 @@ class ESDriver(torch.nn.Module):
             )
         )
 
-        if self.dftorch_params["coul_method"] == "PME":
+        if self.dftorch_params["COUL_METHOD"] == "PME":
             if (
                 structure.dU_dq is not None
                 and self.dftorch_params.get("dftb3_diagonal_only", False) is False
             ):
                 raise NotImplementedError(
                     "PME currently supports only diagonal-only DFTB3. "
-                    "Set dftb3_diagonal_only=True or use coul_method='FULL' "
+                    "Set dftb3_diagonal_only=True or use COUL_METHOD='FULL' "
                     "for full off-diagonal 3rd-order DFTB."
                 )
             structure.C = None
@@ -159,9 +165,9 @@ class ESDriver(torch.nn.Module):
             # For now, PME uses diagonal-only DFTB3.
             structure.thirdorder = None
         else:
-            Coulomb_acc = self.dftorch_params["Coulomb_acc"]
+            Coulomb_acc = self.dftorch_params.get("COULOMB_ACC", 1e-5)
             SQRTX = math.sqrt(-math.log(Coulomb_acc))
-            COULCUT = self.dftorch_params["cutoff"]
+            COULCUT = self.dftorch_params["COULOMB_CUTOFF"]
             CALPHA = SQRTX / COULCUT
             if COULCUT > 50.0 and structure.cell is not None:
                 COULCUT = 50.0
@@ -211,8 +217,8 @@ class ESDriver(torch.nn.Module):
                 neighbor_J,
                 CALPHA,
                 verbose=verbose,
-                h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
-                h5_params=self.dftorch_params.get("h5_params", None),
+                h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=self.dftorch_params.get("H5_PARAMS", None),
             )
 
             # ── Full off-diagonal DFTB3 third-order matrices ────────────
@@ -241,7 +247,7 @@ class ESDriver(torch.nn.Module):
                     structure.Hubbard_U,
                     structure.dU_dq,
                     structure.TYPE,
-                    h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
+                    h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                 )
                 structure.thirdorder.update_coords(
                     structure.RX,
@@ -271,18 +277,18 @@ class ESDriver(torch.nn.Module):
 
         if do_scf:
             # --- GBSA / ALPB implicit solvation ---
-            if self.dftorch_params.get("solvent_param_file", None) is not None:
+            if self.dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
                 structure.gbsa = create_gbsa(
                     structure,
                     self.device,
-                    param_file=self.dftorch_params.get("solvent_param_file", None),
-                    solvation_model=self.dftorch_params.get("solvation_model", "gbsa"),
+                    param_file=self.dftorch_params.get("SOLVENT_PARAM_FILE", None),
+                    solvation_model=self.dftorch_params.get("SOLVATION_MODEL", "gbsa"),
                 )
             else:
                 structure.gbsa = None
 
             # --- D3(BJ) dispersion correction ---
-            d3_params = self.dftorch_params.get("d3_params", None)
+            d3_params = self.dftorch_params.get("D3_PARAMS", None)
             if d3_params is not None:
                 structure.dftd3 = create_dftd3(
                     atomic_numbers=structure.TYPE.cpu().numpy().astype(int),
@@ -520,7 +526,7 @@ class ESDriver(torch.nn.Module):
                 structure.e_gb = e_gb
                 structure.e_sasa = e_sasa
 
-                if self.dftorch_params.get("gbsa_differentiable", False):
+                if self.dftorch_params.get("GBSA_DIFFERENTIABLE", False):
                     # Differentiable path: recomputes Born radii, Born
                     # matrix and SASA with autograd ops.  Enables
                     # backprop through coordinates but allocates O(N²)
@@ -571,7 +577,7 @@ class ESDriver(torch.nn.Module):
                 to_shift = structure.thirdorder.get_shifts(structure.q)
 
             if (
-                self.dftorch_params["coul_method"] == "PME"
+                self.dftorch_params["COUL_METHOD"] == "PME"
             ):  # f_coul was calculated in _scf via calculate_PME_ewald
                 # structure.f_coul was calculated in _scf via calculate_PME_ewald
                 (
@@ -704,7 +710,6 @@ class ESDriver(torch.nn.Module):
         mode: str = "frozen_gbsa",
         batch_size: int = 32,
         delta: float = 1e-4,
-        filename: str = None,
         verbose: bool = False,
     ) -> torch.Tensor:
         """Compute the Hessian matrix d²E/dR² (3N × 3N).
@@ -746,9 +751,6 @@ class ESDriver(torch.nn.Module):
             each DOF consumes two batch slots (+δ, −δ).
         delta : float, default 1e-4
             Cartesian displacement step in Å.
-        filename : str
-            Path to the XYZ (or PDB) file used to create ``structure``.
-            Required (needed to construct ``StructureBatch`` objects internally).
         verbose : bool, default False
             Print progress information.
 
@@ -758,7 +760,7 @@ class ESDriver(torch.nn.Module):
             Symmetrised Hessian in eV/Å².  Also stored as ``structure.hessian``.
         """
         if mode in ("full", "frozen_gbsa"):
-            if filename is None:
+            if self.dftorch_params["FILENAME"] is None:
                 raise ValueError(
                     f"'filename' is required for mode='{mode}'. "
                     "Pass the XYZ/PDB file used to create the Structure."
@@ -769,7 +771,6 @@ class ESDriver(torch.nn.Module):
                 mode=mode,
                 batch_size=batch_size,
                 delta=delta,
-                filename=filename,
                 verbose=verbose,
             )
         elif mode == "autograd":
@@ -955,7 +956,6 @@ class ESDriver(torch.nn.Module):
         mode,
         batch_size,
         delta,
-        filename,
         verbose=False,
     ):
         """Central-difference Hessian using batched ES calls."""
@@ -981,7 +981,7 @@ class ESDriver(torch.nn.Module):
         gbsa_ref = None
         if (
             mode == "frozen_gbsa"
-            and self.dftorch_params.get("solvent_param_file", None) is not None
+            and self.dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None
         ):
 
             class _StructProxy:
@@ -995,8 +995,8 @@ class ESDriver(torch.nn.Module):
             gbsa_ref = create_gbsa(
                 proxy,
                 self.device,
-                param_file=self.dftorch_params.get("solvent_param_file", None),
-                solvation_model=self.dftorch_params.get("solvation_model", "gbsa"),
+                param_file=self.dftorch_params.get("SOLVENT_PARAM_FILE", None),
+                solvation_model=self.dftorch_params.get("SOLVATION_MODEL", "gbsa"),
             )
             if verbose:
                 print("Reference GBSA computed (frozen geometry approximation)")
@@ -1049,13 +1049,12 @@ class ESDriver(torch.nn.Module):
             # D0 is zeroed so the SCF uses q_init instead of the atomic
             # density matrix for the initial guess.
             sb = StructureBatch(
-                [filename] * bs,
-                structure.cell,
+                {
+                    **self.dftorch_params,
+                    "FILENAME": [self.dftorch_params["FILENAME"]] * bs,
+                },
                 const,
-                charge=structure.charge,
-                Te=structure.Te,
                 device=self.device,
-                req_grad_xyz=False,
             )
             sb.RX = RX_batch
             sb.RY = RY_batch
@@ -1070,8 +1069,6 @@ class ESDriver(torch.nn.Module):
             # ── Batched ES + forces ──────────────────────────────────
             es_batch = ESDriverBatch(
                 {**self.dftorch_params, "UNRESTRICTED": False},
-                electronic_rcut=self.electronic_rcut,
-                repulsive_rcut=self.repulsive_rcut,
                 device=self.device,
             )
             with torch.no_grad():
@@ -1121,16 +1118,14 @@ class ESDriverBatch(torch.nn.Module):
     def __init__(
         self,
         dftorch_params,
-        electronic_rcut: float,
-        repulsive_rcut: float,
         device: torch.device,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.dftorch_params = dftorch_params
-        self.electronic_rcut = electronic_rcut
-        self.repulsive_rcut = repulsive_rcut
+        self.electronic_rcut = dftorch_params.get("RCUT_ELECTRONIC", 10.0)
+        self.repulsive_rcut = dftorch_params.get("RCUT_REPULSIVE", 4.0)
         self.device = device
 
     def forward(
@@ -1170,6 +1165,14 @@ class ESDriverBatch(torch.nn.Module):
         forces : (Nats, 3) torch.Tensor
             Atomic forces in eV/Å.
         """
+
+        self.dftorch_params["COULOMB_CUTOFF"] = self.dftorch_params.get(
+            "COULOMB_CUTOFF", 10.0
+        )
+        self.dftorch_params["SCF_ALPHA"] = self.dftorch_params.get("SCF_ALPHA", 0.1)
+        normalize_coulomb_settings(
+            self.dftorch_params, structure.cell, context="ESDriverBatch"
+        )
 
         # Build the neighborlist
 
@@ -1254,15 +1257,15 @@ class ESDriverBatch(torch.nn.Module):
             verbose=verbose,
         )
 
-        if self.dftorch_params["coul_method"] == "PME":
+        if self.dftorch_params["COUL_METHOD"] == "PME":
             structure.C = None
             structure.dCC = None
             raise ValueError("Batched PME Coulomb not implemented.")
             return
         else:
-            Coulomb_acc = self.dftorch_params["Coulomb_acc"]
+            Coulomb_acc = self.dftorch_params.get("COULOMB_ACC", 1e-5)
             SQRTX = math.sqrt(-math.log(Coulomb_acc))
-            COULCUT = self.dftorch_params["cutoff"]
+            COULCUT = self.dftorch_params["COULOMB_CUTOFF"]
             CALPHA = SQRTX / COULCUT
             if COULCUT > 50.0 and structure.cell is not None:
                 COULCUT = 50.0
@@ -1313,8 +1316,8 @@ class ESDriverBatch(torch.nn.Module):
                 neighbor_J,
                 CALPHA,
                 verbose=verbose,
-                h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
-                h5_params=self.dftorch_params.get("h5_params", None),
+                h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=self.dftorch_params.get("H5_PARAMS", None),
             )
 
             del (
@@ -1341,7 +1344,7 @@ class ESDriverBatch(torch.nn.Module):
                         structure.Hubbard_U[b],
                         structure.dU_dq[b],
                         structure.TYPE[b],
-                        h_damp_exp=self.dftorch_params.get("h_damp_exp", None),
+                        h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                     )
                     # Build pairwise data for_ this structure from the Coulomb neighbor list.
                     # We rebuild a quick pairwise data from the full Coulomb matrix C[b].
@@ -1383,7 +1386,7 @@ class ESDriverBatch(torch.nn.Module):
                 # Reuse pre-computed GBSA (frozen geometry approximation)
                 structure.gbsa_batch = gbsa_batch_precomputed
                 structure.gbsa_list = gbsa_batch_precomputed._list
-            elif self.dftorch_params.get("solvent_param_file", None) is not None:
+            elif self.dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
                 tic = time.time()
                 _gbsa_list = []
                 for b in range(structure.batch_size):
@@ -1399,9 +1402,9 @@ class ESDriverBatch(torch.nn.Module):
                     gbsa_b = create_gbsa(
                         proxy,
                         self.device,
-                        param_file=self.dftorch_params.get("solvent_param_file", None),
+                        param_file=self.dftorch_params.get("SOLVENT_PARAM_FILE", None),
                         solvation_model=self.dftorch_params.get(
-                            "solvation_model", "gbsa"
+                            "SOLVATION_MODEL", "gbsa"
                         ),
                     )
                     _gbsa_list.append(gbsa_b)
@@ -1485,7 +1488,7 @@ class ESDriverBatch(torch.nn.Module):
                     # Fast path: use pre-computed Born matrix + SASA (no recompute)
                     e_gb, e_sasa = structure.gbsa_batch.get_energies(structure.q)
                     structure.e_solv = e_gb + e_sasa  # (B,)
-                elif self.dftorch_params.get("gbsa_differentiable", False):
+                elif self.dftorch_params.get("GBSA_DIFFERENTIABLE", False):
                     # Full differentiable path: recomputes geometry for autograd
                     coords_batch = torch.stack(
                         [structure.RX, structure.RY, structure.RZ], dim=2
@@ -1507,7 +1510,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.e_solv = torch.zeros(structure.batch_size, device=self.device)
 
             # ── D3(BJ) dispersion (single D3 object, batched) ───────────
-            d3_params = self.dftorch_params.get("d3_params", None)
+            d3_params = self.dftorch_params.get("D3_PARAMS", None)
             if d3_params is not None:
                 # All batch elements share the same atomic numbers — one D3 object
                 structure.dftd3 = create_dftd3(
@@ -1544,7 +1547,7 @@ class ESDriverBatch(torch.nn.Module):
             if structure.thirdorder_batch is not None:
                 to_shift = structure.thirdorder_batch.get_shifts(structure.q)  # (B, N)
 
-            if self.dftorch_params["coul_method"] == "PME":
+            if self.dftorch_params["COUL_METHOD"] == "PME":
                 raise ValueError("Batched PME Coulomb not implemented.")
                 return
             else:

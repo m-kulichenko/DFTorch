@@ -226,6 +226,42 @@ def calculate_dist_dips(
     return disps.to(pos_T.dtype), dists.to(pos_T.dtype), nbr_inds
 
 
+def normalize_coulomb_settings(dftorch_params: dict, cell, context: str = "DFTorch"):
+    """Validate/sanitize Coulomb settings for periodic and non-periodic runs.
+
+    Rules enforced:
+    1) Non-periodic: force COULOMB_CUTOFF=10000.
+    2) PME: require each cell-vector length >= 2 * COULOMB_CUTOFF.
+    3) Non-periodic + PME: switch to FULL and print a message.
+    """
+    method = str(dftorch_params.get("COUL_METHOD", "FULL")).upper()
+
+    if cell is None:
+        dftorch_params["COULOMB_CUTOFF"] = 10000.0
+        if method == "PME":
+            print(
+                f"[{context}] Non-periodic system with COUL_METHOD='PME' detected. "
+                "Switching to COUL_METHOD='FULL'."
+            )
+            dftorch_params["COUL_METHOD"] = "FULL"
+            method = "FULL"
+
+    cutoff = float(dftorch_params.get("COULOMB_CUTOFF", 10.0))
+
+    if method == "PME":
+        cell_t = torch.as_tensor(cell)
+        vec_lengths = torch.linalg.norm(cell_t, dim=-1)
+        min_dim = float(vec_lengths.min().item())
+        if min_dim < 2.0 * cutoff:
+            raise ValueError(
+                "PME requires each cell dimension (lattice-vector length) to be "
+                f">= 2 * COULOMB_CUTOFF. Got min cell dimension {min_dim:.6f} "
+                f"and COULOMB_CUTOFF {cutoff:.6f}."
+            )
+
+    return dftorch_params["COUL_METHOD"], cutoff
+
+
 def load_spinw_to_matrix(
     path: str, device: torch.device, max_Z: int = 120
 ) -> torch.Tensor:

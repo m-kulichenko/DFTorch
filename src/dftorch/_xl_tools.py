@@ -441,8 +441,9 @@ def kernel_update_lr(
     else:
         dU_dq_gathered = None
 
-    vi = torch.zeros(n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device)
-    fi = torch.zeros(n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device)
+    krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
+    vi = torch.zeros(n_atoms, krylov_maxrank, device=S.device)
+    fi = torch.zeros(n_atoms, krylov_maxrank, device=S.device)
 
     # Preconditioned residual
     K0Res = KK0 @ Res
@@ -450,7 +451,7 @@ def kernel_update_lr(
     krylov_rank = 0
     Fel = torch.tensor(float("inf"), device=S.device)
 
-    while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
+    while (krylov_rank < krylov_maxrank) and (Fel > FelTol):
         # Normalize current direction
         norm_dr = torch.norm(dr)
         if norm_dr < 1e-9:
@@ -473,7 +474,7 @@ def kernel_update_lr(
         v = vi[:, krylov_rank].clone()  # current search direction
 
         # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import calculate_PME_ewald
 
             # PME Coulomb case
@@ -485,15 +486,15 @@ def kernel_update_lr(
                 disps,
                 dists,
                 CALPHA,
-                dftorch_params["cutoff"],
+                dftorch_params.get("COULOMB_CUTOFF", 10.0),
                 PME_data,
                 hubbard_u=Hubbard_U,
                 atomtypes=TYPE,
                 screening=1,
                 calculate_forces=0,
                 calculate_dq=1,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
+                h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=dftorch_params.get("H5_PARAMS", None),
             )
         else:  # Direct Coulomb case
             d_CoulPot = C @ v
@@ -631,12 +632,9 @@ def kernel_update_lr_os(
     """
     Nshells = n_shells_per_atom.sum().item()
 
-    vi = torch.zeros(
-        2, n_shells_per_atom.sum(), dftorch_params["KRYLOV_MAXRANK"], device=S.device
-    )
-    fi = torch.zeros(
-        2, n_shells_per_atom.sum(), dftorch_params["KRYLOV_MAXRANK"], device=S.device
-    )
+    krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
+    vi = torch.zeros(2, n_shells_per_atom.sum(), krylov_maxrank, device=S.device)
+    fi = torch.zeros(2, n_shells_per_atom.sum(), krylov_maxrank, device=S.device)
 
     # Preconditioned residual
     K0Res = torch.bmm(KK0, Res.unsqueeze(-1)).squeeze(-1)
@@ -671,7 +669,7 @@ def kernel_update_lr_os(
     f_diag_sum = f_diag.sum(dim=1)  # (2,) — for μ1 conservation
     # ─────────────────────────────────────────────────────────────────────
 
-    while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel > FelTol):
+    while (krylov_rank < krylov_maxrank) and (Fel > FelTol):
         # Normalize current direction
         norm_dr = torch.norm(dr)
         if norm_dr < 1e-9:
@@ -702,7 +700,7 @@ def kernel_update_lr_os(
         v_net_spin = v[0] - v[1]  # shell-resolved
 
         # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import calculate_PME_ewald
 
             # PME Coulomb case
@@ -714,15 +712,15 @@ def kernel_update_lr_os(
                 disps,
                 dists,
                 CALPHA,
-                dftorch_params["cutoff"],
+                dftorch_params.get("COULOMB_CUTOFF", 10.0),
                 PME_data,
                 hubbard_u=Hubbard_U,
                 atomtypes=TYPE,
                 screening=1,
                 calculate_forces=0,
                 calculate_dq=1,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
+                h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=dftorch_params.get("H5_PARAMS", None),
             )
         else:  # Direct Coulomb case
             d_CoulPot = C @ v_atomic
@@ -879,12 +877,9 @@ def kernel_update_lr_batch(
         Preconditioned low-rank correction step in charge space.
     """
     batch_size = q.shape[0]
-    vi = torch.zeros(
-        batch_size, n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device
-    )
-    fi = torch.zeros(
-        batch_size, n_atoms, dftorch_params["KRYLOV_MAXRANK"], device=S.device
-    )
+    krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
+    vi = torch.zeros(batch_size, n_atoms, krylov_maxrank, device=S.device)
+    fi = torch.zeros(batch_size, n_atoms, krylov_maxrank, device=S.device)
     step = torch.zeros_like(q)
 
     # Preconditioned residual
@@ -895,7 +890,7 @@ def kernel_update_lr_batch(
 
     active_mask = torch.tensor([True] * batch_size, dtype=torch.bool, device=q.device)
 
-    while (krylov_rank < dftorch_params["KRYLOV_MAXRANK"]) and (Fel_all > FelTol).any():
+    while (krylov_rank < krylov_maxrank) and (Fel_all > FelTol).any():
         # Normalize current direction
         if krylov_rank > 0:
             norm_dr = torch.norm(fi[active_mask, :, krylov_rank - 1], dim=1)
@@ -932,7 +927,7 @@ def kernel_update_lr_batch(
         v = vi[active_mask, :, krylov_rank].clone()  # current search direction
 
         # dHcoul from a unit step along v (atomic) mapped to AO via atom_ids
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             # PME Coulomb case
             NotImplementedError(
                 "PME Coulomb method not implemented in batch Krylov updater."

@@ -87,17 +87,17 @@ class MDXL_Graph(MDXL):
         if self.K0Res is None:
             self.K0Res = 0.0  # structure.KK@(q-self.n)
 
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
                 structure.cell.cpu().numpy(),
-                dftorch_params["cutoff"],
-                dftorch_params["Coulomb_acc"],
+                dftorch_params["COULOMB_CUTOFF"],
+                dftorch_params.get("COULOMB_ACC", 1e-5),
             )
             self.PME_data = init_PME_data(
                 grid_dimensions,
                 structure.cell,
                 self.CALPHA,
-                dftorch_params["PME_order"],
+                dftorch_params.get("PME_ORDER", 4),
             )
         else:
             self.CALPHA = None
@@ -303,7 +303,7 @@ class MDXL_Graph(MDXL):
             ).contiguous()
             nbr_state.update(positions)
             disps, dists, nl = calculate_dist_dips(
-                positions, nbr_state, dftorch_params["cutoff"]
+                positions, nbr_state, dftorch_params["COULOMB_CUTOFF"]
             )
             nl_shape = torch.tensor(list(nl.shape), dtype=self.int_dtype, device=device)
 
@@ -315,15 +315,15 @@ class MDXL_Graph(MDXL):
                 disps,
                 dists,
                 self.CALPHA,
-                dftorch_params["cutoff"],
+                dftorch_params["COULOMB_CUTOFF"],
                 self.PME_data,
                 hubbard_u=structure.Hubbard_U,
                 atomtypes=structure.TYPE,
                 screening=1,
                 calculate_forces=1,
                 calculate_dq=1,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
+                h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=dftorch_params.get("H5_PARAMS", None),
             )
 
             if self.cuda_sync:
@@ -488,7 +488,7 @@ class MDXL_Graph(MDXL):
                 self.CALPHA,
                 self.PME_data,
                 dftorch_params,
-                dftorch_params["KRYLOV_TOL_MD"],
+                dftorch_params.get("KRYLOV_TOL_MD", 1e-2),
                 self.K0Res,
                 per_part_data,
                 mu0,

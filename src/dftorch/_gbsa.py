@@ -1538,7 +1538,7 @@ def create_gbsa(structure, device, param_file=None, solvation_model="gbsa"):
     if param_file is None:
         raise ValueError(
             f"Could not find {solvation_model.upper()} parameter file for "
-            f"dftorch_params['solvent_param_file']."
+            f"dftorch_params['SOLVENT_PARAM_FILE']."
         )
 
     return GBSA(coords, species, device, param_file=param_file, alpb=use_alpb)

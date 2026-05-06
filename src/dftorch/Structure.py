@@ -56,17 +56,9 @@ class Structure(torch.nn.Module):
 
     def __init__(
         self,
-        file,
-        cell,
+        dftorch_params,
         const,
-        charge: int = 0,
-        spin_pol: int = 0,
-        os: bool = False,
-        Te: float = 3000.0,
-        e_field: torch.Tensor = None,
         device: str = "cpu",
-        req_grad_xyz: bool = False,
-        req_grad_cell: bool = False,
         species=None,
         coordinates=None,
         ignore_spin: bool = False,
@@ -75,16 +67,24 @@ class Structure(torch.nn.Module):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.req_grad_xyz = req_grad_xyz
-        self.req_grad_cell = req_grad_cell
+        self.req_grad_xyz = dftorch_params.get("GRAD_XYZ", False)
+        self.req_grad_cell = dftorch_params.get("GRAD_CELL", False)
+        cell = dftorch_params.get("CELL", None)
         if species is None or coordinates is None:
-            if file is not None and file.lower().endswith(".pdb"):
-                species, coordinates, pdb_cell = read_pdb([file], sort=False)
-                if cell is None and pdb_cell is not None:
+            if dftorch_params.get("FILENAME", None) is not None and dftorch_params[
+                "FILENAME"
+            ].lower().endswith(".pdb"):
+                species, coordinates, pdb_cell = read_pdb(
+                    [dftorch_params["FILENAME"]], sort=False
+                )
+                if dftorch_params.get("CELL", None) is None and pdb_cell is not None:
                     cell = pdb_cell
+                else:
+                    cell = dftorch_params.get("CELL", None)
             else:
+                cell = dftorch_params.get("CELL", None)
                 species, coordinates = read_xyz(
-                    [file], sort=False
+                    [dftorch_params["FILENAME"]], sort=False
                 )  # Input coordinate file
 
         # self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
@@ -163,15 +163,19 @@ class Structure(torch.nn.Module):
 
         self.Nats = len(self.TYPE)
         self.const = const
-        self.charge = charge
-        self.spin_pol = spin_pol
-        self.Te = Te
-        if e_field is None:
+        self.charge = dftorch_params.get("CHARGE", 0)
+        self.spin_pol = dftorch_params.get("SPIN_POL", 0)
+        self.Te = dftorch_params["T_ELECTRONIC"]
+        if dftorch_params.get("ELECTRIC_FIELD", None) is None:
             self.e_field = torch.zeros(
                 3, dtype=torch.get_default_dtype(), device=device
             )
         else:
-            self.e_field = e_field
+            self.e_field = torch.as_tensor(
+                dftorch_params["ELECTRIC_FIELD"],
+                device=device,
+                dtype=torch.get_default_dtype(),
+            )
 
         self.device = device
         self.n_orbitals_per_atom = const.n_orb[self.TYPE]
@@ -181,9 +185,9 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
-        if os:  # open-shell
+        if dftorch_params.get("UNRESTRICTED", False):  # open-shell
             tot_el = torch.tensor(
-                [int(const.tore[self.TYPE].sum() - charge)], device=device
+                [int(const.tore[self.TYPE].sum() - self.charge)], device=device
             )
 
             nocc_a = tot_el / 2 + self.spin_pol / 2
@@ -194,7 +198,7 @@ class Structure(torch.nn.Module):
             self.Nocc = torch.tensor([int(nocc_a), int(nocc_b)], device=device)
 
         else:
-            tot_el = const.tore[self.TYPE].sum() - charge
+            tot_el = const.tore[self.TYPE].sum() - self.charge
             if ((tot_el % 2) == 1).any() and not ignore_spin:
                 raise ValueError(
                     "Closed shell systems require even number of electrons"
@@ -317,28 +321,29 @@ class StructureBatch(torch.nn.Module):
 
     def __init__(
         self,
-        file,
-        cell,
+        dftorch_params,
         const,
-        charge: int = 0,
-        Te: float = 3000.0,
-        e_field: torch.Tensor = None,
         device: str = "cpu",
-        req_grad_xyz: bool = False,
         ignore_spin: bool = False,
         *args,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.batch_size = len(file)
+        self.batch_size = len(dftorch_params["FILENAME"])
         # Auto-detect PDB vs XYZ from first file extension
-        if file and isinstance(file[0], str) and file[0].lower().endswith(".pdb"):
-            species, coordinates, _ = read_pdb(file, sort=False)
+        if (
+            dftorch_params["FILENAME"]
+            and isinstance(dftorch_params["FILENAME"][0], str)
+            and dftorch_params["FILENAME"][0].lower().endswith(".pdb")
+        ):
+            species, coordinates, _ = read_pdb(dftorch_params["FILENAME"], sort=False)
         else:
-            species, coordinates = read_xyz(file, sort=False)  # Input coordinate file
+            species, coordinates = read_xyz(
+                dftorch_params["FILENAME"], sort=False
+            )  # Input coordinate file
         self.TYPE = torch.tensor(species, dtype=torch.int64, device=device)
-        self.req_grad_xyz = req_grad_xyz
+        self.req_grad_xyz = dftorch_params.get("GRAD_XYZ", False)
         self.RX = torch.tensor(
             coordinates[:, :, 0],
             device=device,
@@ -358,6 +363,7 @@ class StructureBatch(torch.nn.Module):
             requires_grad=self.req_grad_xyz,
         )
 
+        cell = dftorch_params.get("CELL", None)
         self.cell = (
             None
             if cell is None
@@ -383,14 +389,18 @@ class StructureBatch(torch.nn.Module):
 
         self.Nats = self.TYPE.shape[-1]
         self.const = const
-        self.charge = charge
-        self.Te = Te
-        if e_field is None:
+        self.charge = dftorch_params.get("CHARGE", 0)
+        self.Te = dftorch_params.get("T_ELECTRONIC", 1000.0)
+        if dftorch_params.get("ELECTRIC_FIELD", None) is None:
             self.e_field = torch.zeros(
                 3, dtype=torch.get_default_dtype(), device=device
             )
         else:
-            self.e_field = e_field
+            self.e_field = torch.tensor(
+                dftorch_params["ELECTRIC_FIELD"],
+                dtype=torch.get_default_dtype(),
+                device=device,
+            )
 
         self.device = device
         self.n_orbitals_per_atom = const.n_orb[self.TYPE]  # (batch, Nats)
@@ -405,7 +415,7 @@ class StructureBatch(torch.nn.Module):
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
 
-        tot_el = const.tore[self.TYPE].sum(dim=1) - charge
+        tot_el = const.tore[self.TYPE].sum(dim=1) - self.charge
         if ((tot_el % 2) == 1).any() and not ignore_spin:
             raise ValueError("Closed shell systems require even number of electrons")
         self.Nocc = (tot_el / 2).to(int)

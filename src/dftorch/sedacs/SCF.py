@@ -75,17 +75,17 @@ def scf(
         )
         CALPHA_global, grid_dimensions = calculate_alpha_and_num_grids(
             structure.cell.cpu().numpy(),
-            dftorch_params["cutoff"],
-            dftorch_params["Coulomb_acc"],
+            dftorch_params["COULOMB_CUTOFF"],
+            dftorch_params.get("COULOMB_ACC", 1e-5),
         )
         PME_data_global = init_PME_data(
             grid_dimensions,
             structure.cell,
             CALPHA_global,
-            dftorch_params["PME_order"],
+            dftorch_params.get("PME_ORDER", 4),
         )
-        # nbr_state = NeighborState(positions_global, structure.cell, None, dftorch_params['cutoff'], is_dense=True, buffer=0.0, use_triton=False)
-        # disps_global, dists_global, nbr_inds_global = calculate_dist_dips(positions_global, nbr_state, dftorch_params['cutoff'])
+        # nbr_state = NeighborState(positions_global, structure.cell, None, dftorch_params['COULOMB_CUTOFF'], is_dense=True, buffer=0.0, use_triton=False)
+        # disps_global, dists_global, nbr_inds_global = calculate_dist_dips(positions_global, nbr_state, dftorch_params['COULOMB_CUTOFF'])
     else:
         positions_global, CALPHA_global, PME_data_global = [None] * 3
 
@@ -93,8 +93,8 @@ def scf(
 
     scf_error = torch.tensor(float("inf"), device=device)
     scf_iter = 0
-    while (scf_error > dftorch_params["SCF_TOL"]) and (
-        scf_iter < dftorch_params["SCF_MAX_ITER"]
+    while (scf_error > dftorch_params.get("SCF_TOL", 1e-6)) and (
+        scf_iter < dftorch_params.get("SCF_MAX_ITER", 100)
     ):
         TIC = time.time()
         timing = {}
@@ -247,15 +247,15 @@ def scf(
             disps_global,
             dists_global,
             CALPHA_global,
-            dftorch_params["cutoff"],
+            dftorch_params["COULOMB_CUTOFF"],
             PME_data_global,
             hubbard_u=structure.Hubbard_U,
             atomtypes=structure.TYPE,
             screening=1,
             calculate_forces=1,
             calculate_dq=1,
-            h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            h5_params=dftorch_params.get("h5_params", None),
+            h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+            h5_params=dftorch_params.get("H5_PARAMS", None),
         )
 
         # Coulomb energy
@@ -345,15 +345,15 @@ def scf_step(
             disps_global,
             dists_global,
             CALPHA_global,
-            dftorch_params["cutoff"],
+            dftorch_params["COULOMB_CUTOFF"],
             PME_data_global,
             hubbard_u=structure.Hubbard_U,
             atomtypes=structure.TYPE,
             screening=1,
             calculate_forces=0,
             calculate_dq=1,
-            h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            h5_params=dftorch_params.get("h5_params", None),
+            h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+            h5_params=dftorch_params.get("H5_PARAMS", None),
         )
     else:
         CoulPot = torch.empty((structure.Nats,), device=device)
@@ -463,7 +463,7 @@ def scf_step(
 
     #####
     tic = time.time()
-    if scf_iter > dftorch_params["KRYLOV_START"]:
+    if scf_iter > dftorch_params.get("KRYLOV_START", 10):
         K0Res_global = kernel_global(
             structure,
             positions_global,
@@ -473,7 +473,7 @@ def scf_step(
             CALPHA_global,
             PME_data_global,
             dftorch_params,
-            dftorch_params["KRYLOV_TOL"],
+            dftorch_params.get("KRYLOV_TOL", 1e-6),
             K0Res_global,
             per_part_data,
             mu0,

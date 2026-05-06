@@ -22,7 +22,7 @@ import torch
 from typing import Any, Tuple, Optional
 import time
 from ._io import write_XYZ_trajectory, write_pdb_frame, write_velocity_trajectory
-from dftorch._tools import calculate_dist_dips
+from dftorch._tools import calculate_dist_dips, normalize_coulomb_settings
 
 
 class MDXL:
@@ -289,7 +289,7 @@ class MDXL:
         structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
 
         # Rebuild PME data for_ the new cell (if using PME Coulomb)
-        if self._dftorch_params["coul_method"] == "PME":
+        if self._dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
                 calculate_alpha_and_num_grids,
@@ -297,14 +297,14 @@ class MDXL:
 
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
                 structure.cell.detach().cpu().numpy(),
-                self._dftorch_params["cutoff"],
-                self._dftorch_params["Coulomb_acc"],
+                self._dftorch_params["COULOMB_CUTOFF"],
+                self._dftorch_params.get("COULOMB_ACC", 1e-5),
             )
             self.PME_data = init_PME_data(
                 grid_dimensions,
                 structure.cell,
                 self.CALPHA,
-                self._dftorch_params["PME_order"],
+                self._dftorch_params.get("PME_ORDER", 4),
             )
 
     def run(
@@ -321,6 +321,7 @@ class MDXL:
         self._os = (
             isinstance(structure.Nocc, torch.Tensor) and structure.Nocc.numel() == 2
         )
+        normalize_coulomb_settings(dftorch_params, structure.cell, context="MDXL.run")
 
         # Store params for_ barostat (needs them during step)
         self._dftorch_params = dftorch_params
@@ -380,7 +381,7 @@ class MDXL:
                 structure.n_shells_per_atom,
             )
 
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import (
                 init_PME_data,
                 calculate_alpha_and_num_grids,
@@ -388,14 +389,14 @@ class MDXL:
 
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
                 structure.cell.cpu().numpy(),
-                dftorch_params["cutoff"],
-                dftorch_params["Coulomb_acc"],
+                dftorch_params["COULOMB_CUTOFF"],
+                dftorch_params.get("COULOMB_ACC", 1e-5),
             )
             self.PME_data = init_PME_data(
                 grid_dimensions,
                 structure.cell,
                 self.CALPHA,
-                dftorch_params["PME_order"],
+                dftorch_params.get("PME_ORDER", 4),
             )
         else:
             self.CALPHA = None
@@ -602,7 +603,7 @@ class MDXL:
         tic2_1 = time.perf_counter()
 
         # ── Coulomb potential ────────────────────────────────────────────
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import (
                 calculate_PME_ewald,
             )
@@ -612,7 +613,7 @@ class MDXL:
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
                 structure.cell,
                 None,
-                dftorch_params["cutoff"],
+                dftorch_params["COULOMB_CUTOFF"],
                 is_dense=True,
                 buffer=0.0,
                 use_triton=False,
@@ -620,7 +621,7 @@ class MDXL:
             disps, dists, nbr_inds = calculate_dist_dips(
                 torch.stack((structure.RX, structure.RY, structure.RZ)),
                 nbr_state,
-                dftorch_params["cutoff"],
+                dftorch_params["COULOMB_CUTOFF"],
             )
 
             pme_charge = n_tot_atom if self._os else self.n
@@ -632,15 +633,15 @@ class MDXL:
                 disps,
                 dists,
                 self.CALPHA,
-                dftorch_params["cutoff"],
+                dftorch_params["COULOMB_CUTOFF"],
                 self.PME_data,
                 hubbard_u=structure.Hubbard_U,
                 atomtypes=structure.TYPE,
                 screening=1,
                 calculate_forces=1,
                 calculate_dq=1,
-                h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                h5_params=dftorch_params.get("h5_params", None),
+                h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                h5_params=dftorch_params.get("H5_PARAMS", None),
             )
         else:
             if self._os:
@@ -652,12 +653,12 @@ class MDXL:
             dists = None
 
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
-        if dftorch_params.get("solvent_param_file", None) is not None:
+        if dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
             structure.gbsa = create_gbsa(
                 structure,
                 structure.device,
-                param_file=dftorch_params.get("solvent_param_file", None),
-                solvation_model=dftorch_params.get("solvation_model", "gbsa"),
+                param_file=dftorch_params.get("SOLVENT_PARAM_FILE", None),
+                solvation_model=dftorch_params.get("SOLVATION_MODEL", "gbsa"),
             )
             # Born shift uses extrapolated charges n (shadow Hamiltonian)
             solv_n = n_tot_atom if self._os else self.n
@@ -817,7 +818,7 @@ class MDXL:
                 structure.Nats,
                 structure.Hubbard_U,
                 dftorch_params,
-                dftorch_params["KRYLOV_TOL_MD"],
+                dftorch_params.get("KRYLOV_TOL_MD", 1e-2),
                 structure.KK.clone(),
                 Res,
                 kernel_q,
@@ -851,7 +852,7 @@ class MDXL:
                 structure.Nats,
                 structure.Hubbard_U,
                 dftorch_params,
-                dftorch_params["KRYLOV_TOL_MD"],
+                dftorch_params.get("KRYLOV_TOL_MD", 1e-2),
                 structure.KK.clone(),
                 Res,
                 kernel_q,
@@ -896,7 +897,7 @@ class MDXL:
             n_e = self.n
 
         # ── Energy + Forces ──────────────────────────────────────────────
-        if dftorch_params["coul_method"] == "PME":
+        if dftorch_params["COUL_METHOD"] == "PME":
             (
                 structure.e_elec_tot,
                 structure.e_band0,
@@ -962,50 +963,6 @@ class MDXL:
             )
 
             structure.f_coul = forces1 * (2 * q_e / n_e - 1.0)
-
-            # test_f_coul = forces1 * (2 * q_e / n_e - 1.0)
-
-            # shadow_charge = 2.0 * q_e - n_e
-            # _, forces_2q, _ = calculate_PME_ewald(
-            #     torch.stack((structure.RX, structure.RY, structure.RZ)),
-            #     2.0 * q_e,
-            #     structure.cell,
-            #     nbr_inds,
-            #     disps,
-            #     dists,
-            #     self.CALPHA,
-            #     dftorch_params["cutoff"],
-            #     self.PME_data,
-            #     hubbard_u=structure.Hubbard_U,
-            #     atomtypes=structure.TYPE,
-            #     screening=1,
-            #     calculate_forces=1,
-            #     calculate_dq=0,
-            #     h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            #     h5_params=dftorch_params.get("h5_params", None),
-            # )
-            # _, forces_shadow_charge, _ = calculate_PME_ewald(
-            #     torch.stack((structure.RX, structure.RY, structure.RZ)),
-            #     shadow_charge,
-            #     structure.cell,
-            #     nbr_inds,
-            #     disps,
-            #     dists,
-            #     self.CALPHA,
-            #     dftorch_params["cutoff"],
-            #     self.PME_data,
-            #     hubbard_u=structure.Hubbard_U,
-            #     atomtypes=structure.TYPE,
-            #     screening=1,
-            #     calculate_forces=1,
-            #     calculate_dq=0,
-            #     h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            #     h5_params=dftorch_params.get("h5_params", None),
-            # )
-            # # Exact bilinear PME force for 0.5 * (2q - n)^T C n.
-            # structure.f_coul = 0.5 * (forces_2q - forces_shadow_charge - forces1)
-
-            # print("test", (test_f_coul - structure.f_coul).abs().max())
 
             structure.f_tot = structure.f_tot + structure.f_coul
         else:
@@ -1441,6 +1398,9 @@ class MDXLBatch:
         dump_interval=1,
         traj_filename="md_trj",
     ):
+        normalize_coulomb_settings(
+            dftorch_params, structure.cell, context="MDXLBatch.run"
+        )
 
         # Store params for_ barostat (needs them during step)
         self._dftorch_params = dftorch_params
@@ -1637,7 +1597,7 @@ class MDXLBatch:
         CoulPot = torch.matmul(structure.C, self.n.unsqueeze(-1)).squeeze(-1)
 
         # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
-        if dftorch_params.get("solvent_param_file", None) is not None:
+        if dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
             _gbsa_list = []
             for b in range(structure.batch_size):
 
@@ -1653,8 +1613,8 @@ class MDXLBatch:
                     create_gbsa(
                         proxy,
                         structure.device,
-                        param_file=dftorch_params.get("solvent_param_file", None),
-                        solvation_model=dftorch_params.get("solvation_model", "gbsa"),
+                        param_file=dftorch_params.get("SOLVENT_PARAM_FILE", None),
+                        solvation_model=dftorch_params.get("SOLVATION_MODEL", "gbsa"),
                     )
                 )
             structure.gbsa_list = _gbsa_list
@@ -1746,7 +1706,7 @@ class MDXLBatch:
                 structure.Nats,
                 self.Hubbard_U_gathered,
                 dftorch_params,
-                dftorch_params["KRYLOV_TOL_MD"],
+                dftorch_params.get("KRYLOV_TOL_MD", 1e-2),
                 structure.KK.clone(),
                 Res,
                 kernel_q,

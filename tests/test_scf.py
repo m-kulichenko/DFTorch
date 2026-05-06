@@ -35,38 +35,29 @@ def test_energy_smoke_import_and_call(device):
     from dftorch.ESDriver import ESDriver
 
     dftorch_params = {
-        "coul_method": "PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
-        "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
-        "cutoff": 10.0,  # Coulomb cutoff
-        "PME_order": 4,  # Ignored for FULL coulomb method
+        "FILENAME": str(xyz_path),
+        "CELL": [25.0, 25.0, 25.0],  # Simulation box vectors in Angstroms
+        "SKFPATH": str(skf_dir) + "/",  # Path to SKF files
+        "T_ELECTRONIC": 1000.0,  # Electronic temperature in Kelvin for Fermi smearing
+        "RCUT_ELECTRONIC": 8.0,  # Cutoff for electronic interactions in Angstroms. Should be >= largest cutoff in SKF files for the element pairs present in the system.
+        "RCUT_REPULSIVE": 4.0,  # Cutoff for repulsive interactions in Angstroms. Should be >= largest cutoff in SKF files for the element pairs present in the system.
+        "COUL_METHOD": "PME",  # 'FULL' for full coulomb matrix, 'PME' for Particle Mesh Ewald method
         "SCF_MAX_ITER": 25,  # Maximum number of _scf iterations
-        "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
-        "SCF_ALPHA": 0.2,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
-        "KRYLOV_MAXRANK": 10,  # Maximum Krylov subspace rank
-        "KRYLOV_TOL": 1e-6,  # Krylov subspace convergence tolerance in _scf
-        "KRYLOV_TOL_MD": 1e-4,  # Krylov subspace convergence tolerance in MD _scf
         "KRYLOV_START": 5,  # Number of initial _scf iterations before starting Krylov acceleration
     }
 
-    cell = torch.tensor(
-        [25.0, 25.0, 25.0], device=device
-    )  # Simulation box size in Angstroms. Only cubic boxes supported for now.
     # Create constants container. Set path to SKF files.
     const = Constants(
-        str(xyz_path), str(skf_dir) + "/", magnetic_hubbard_ldep=False
+        dftorch_params,
     ).to(device)
 
     # Create structure object. Define total charge and electronic temperature.
-    structure1 = Structure(
-        str(xyz_path), cell, const, charge=0, Te=1000.0, device=device
-    )
+    structure1 = Structure(dftorch_params, const, device=device)
 
     # Create ESDriver object and run _scf calculation
     # electronic_rcut and repulsive_rcut are in Angstroms.
     # They should be >= cutoffs defined in SKF files for the element pair with largest cutoff present in the system.
-    es_driver = ESDriver(
-        dftorch_params, electronic_rcut=8.0, repulsive_rcut=6.0, device=device
-    )
+    es_driver = ESDriver(dftorch_params, device=device)
     es_driver(structure1, const, do_scf=True)
     es_driver.calc_forces(structure1, const)  # Calculate forces after _scf
 

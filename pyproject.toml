@@ -37,4 +37,9 @@ addopts = ["-ra", "-q"]
 [tool.ruff]
 exclude = [
   "src/dftorch/_legacy",
+  ".git",
+  ".venv",
+  "__pycache__",
+  "*.ipynb",  # Exclude all notebooks
+
 ]

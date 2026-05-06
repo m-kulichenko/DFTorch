@@ -11,7 +11,7 @@ from ._dm_fermi_x import (
 )
 
 # from ._kernel_fermi import _kernel_fermi
-from ._tools import calculate_dist_dips
+from ._tools import calculate_dist_dips, normalize_coulomb_settings
 from ._xl_tools import (
     kernel_update_lr,
     kernel_update_lr_os,
@@ -201,10 +201,10 @@ def SCFx(
     ----------
     dftorch_params : dict
         _scf/control parameters. Expected keys include:
-        - 'coul_method': str, 'PME' or 'direct'
+        - 'COUL_METHOD': str, 'PME' or 'direct'
         - 'cutoff': float, real-space cutoff (PME)
         - 'Coulomb_acc': float, accuracy target for PME alpha/grid (PME)
-        - 'PME_order': int, B-spline order (PME)
+        - 'PME_ORDER': int, B-spline order (PME)
         - other PME/mixing options passed through to helper routines.
     structure : object
         Container providing required system data/attributes:
@@ -231,7 +231,7 @@ def SCFx(
     Efield : torch.Tensor
         External electric field vector (3,).
     C : torch.Tensor
-        Coulomb operator. If dftorch_params['coul_method'] == 'direct',
+        Coulomb operator. If dftorch_params['COUL_METHOD'] == 'direct',
         used as C @ q to build electrostatic potential; ignored for PME.
     Returns
     -------
@@ -281,7 +281,9 @@ def SCFx(
     else:
         dU_dq_gathered = None
 
-    if dftorch_params["coul_method"] == "PME":
+    normalize_coulomb_settings(dftorch_params, cell, context="SCFx")
+    coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
+    if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
             calculate_PME_ewald,
             init_PME_data,
@@ -295,23 +297,23 @@ def SCFx(
         )
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
             cell.cpu().numpy(),
-            dftorch_params["cutoff"],
-            dftorch_params["Coulomb_acc"],
+            coulomb_cutoff,
+            dftorch_params.get("COULOMB_ACC", 1e-5),
         )
         PME_data = init_PME_data(
-            grid_dimensions, cell, CALPHA, dftorch_params["PME_order"]
+            grid_dimensions, cell, CALPHA, dftorch_params.get("PME_ORDER", 4)
         )
         nbr_state = NeighborState(
             positions,
             cell,
             None,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             is_dense=True,
             buffer=0.0,
             use_triton=False,
         )
         disps, dists, nbr_inds = calculate_dist_dips(
-            positions, nbr_state, dftorch_params["cutoff"]
+            positions, nbr_state, coulomb_cutoff
         )
     else:
         PME_data = None
@@ -375,14 +377,14 @@ def SCFx(
 
         print("\nStarting cycle")
         while (
-            (ResNorm > dftorch_params["SCF_TOL"])
-            or (dEc > dftorch_params["SCF_TOL"] * 100)
-        ) and it < dftorch_params["SCF_MAX_ITER"]:
+            (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
+            or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
+        ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
             print("Iter {}".format(it))
 
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
@@ -393,15 +395,15 @@ def SCFx(
                         disps,
                         dists,
                         CALPHA,
-                        dftorch_params["cutoff"],
+                        coulomb_cutoff,
                         PME_data,
                         hubbard_u=Hubbard_U,
                         atomtypes=TYPE,
                         screening=1,
                         calculate_forces=0,
                         calculate_dq=1,
-                        h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                        h5_params=dftorch_params.get("h5_params", None),
+                        h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                        h5_params=dftorch_params.get("H5_PARAMS", None),
                     )
 
             else:
@@ -435,7 +437,7 @@ def SCFx(
             ResNorm = torch.norm(Res)
 
             # --- Charge mixing ---
-            use_krylov = it > dftorch_params["KRYLOV_START"]
+            use_krylov = it > dftorch_params.get("KRYLOV_START", 10)
 
             if use_krylov:
                 K0Res = KK @ Res
@@ -449,7 +451,7 @@ def SCFx(
                     Nats,
                     Hubbard_U,
                     dftorch_params,
-                    dftorch_params["KRYLOV_TOL"],
+                    dftorch_params.get("KRYLOV_TOL", 1e-6),
                     KK,
                     Res,
                     q,
@@ -480,7 +482,7 @@ def SCFx(
                 q = q_old - K0Res
 
             Ecoul_old = Ecoul
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
             else:
                 Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * Hubbard_U)
@@ -500,7 +502,7 @@ def SCFx(
                     ResNorm.item(), dEc.item(), time.perf_counter() - start_time
                 )
             )
-            if it == dftorch_params["SCF_MAX_ITER"]:
+            if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
         # f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
@@ -510,7 +512,7 @@ def SCFx(
     q = -1.0 * Znuc
     q.scatter_add_(0, atom_ids, DS)
 
-    if dftorch_params["coul_method"] == "PME":
+    if dftorch_params["COUL_METHOD"] == "PME":
         ewald_e1, forces1, dq_p1, stress_coul = calculate_PME_ewald(
             positions,  # .detach().clone(),
             q,
@@ -519,7 +521,7 @@ def SCFx(
             disps,
             dists,
             CALPHA,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             PME_data,
             hubbard_u=Hubbard_U,
             atomtypes=TYPE,
@@ -527,8 +529,8 @@ def SCFx(
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
             calculate_stress=0 if req_grad_xyz else 1,
-            h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            h5_params=dftorch_params.get("h5_params", None),
+            h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+            h5_params=dftorch_params.get("H5_PARAMS", None),
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
     else:
@@ -599,7 +601,9 @@ def scf_x_os(
     else:
         dU_dq_gathered = None
 
-    if dftorch_params["coul_method"] == "PME":
+    normalize_coulomb_settings(dftorch_params, cell, context="scf_x_os")
+    coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
+    if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
             calculate_PME_ewald,
             init_PME_data,
@@ -613,23 +617,23 @@ def scf_x_os(
         )
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
             cell.cpu().numpy(),
-            dftorch_params["cutoff"],
-            dftorch_params["Coulomb_acc"],
+            coulomb_cutoff,
+            dftorch_params.get("COULOMB_ACC", 1e-5),
         )
         PME_data = init_PME_data(
-            grid_dimensions, cell, CALPHA, dftorch_params["PME_order"]
+            grid_dimensions, cell, CALPHA, dftorch_params.get("PME_ORDER", 4)
         )
         nbr_state = NeighborState(
             positions,
             cell,
             None,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             is_dense=True,
             buffer=0.0,
             use_triton=False,
         )
         disps, dists, nbr_inds = calculate_dist_dips(
-            positions, nbr_state, dftorch_params["cutoff"]
+            positions, nbr_state, coulomb_cutoff
         )
     else:
         PME_data = None
@@ -654,7 +658,6 @@ def scf_x_os(
         # Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
         # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
         broken_symmetry = dftorch_params.get("BROKEN_SYM", False)
-        # shared_mu0 = dftorch_params.get("SHARED_MU", False)
 
         # if shared_mu0:
         #     Dorth, Q, e, f, mu0 = dm_fermi_x_os_shared(
@@ -736,14 +739,14 @@ def scf_x_os(
 
         print("\nStarting cycle")
         while (
-            (ResNorm > dftorch_params["SCF_TOL"])
-            or (dEc > dftorch_params["SCF_TOL"] * 100)
-        ) and it < dftorch_params["SCF_MAX_ITER"]:
+            (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
+            or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
+        ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
             print("Iter {}".format(it))
 
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
@@ -754,15 +757,15 @@ def scf_x_os(
                         disps,
                         dists,
                         CALPHA,
-                        dftorch_params["cutoff"],
+                        coulomb_cutoff,
                         PME_data,
                         hubbard_u=Hubbard_U,
                         atomtypes=TYPE,
                         screening=1,
                         calculate_forces=0,
                         calculate_dq=1,
-                        h_damp_exp=dftorch_params.get("h_damp_exp", None),
-                        h5_params=dftorch_params.get("h5_params", None),
+                        h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+                        h5_params=dftorch_params.get("H5_PARAMS", None),
                     )
             else:
                 CoulPot = C @ q_tot_atom
@@ -805,7 +808,7 @@ def scf_x_os(
             ResNorm = torch.norm(Res)
 
             # --- Charge mixing ---
-            use_krylov = it > dftorch_params["KRYLOV_START"]
+            use_krylov = it > dftorch_params.get("KRYLOV_START", 10)
 
             if use_krylov:
                 K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
@@ -819,7 +822,7 @@ def scf_x_os(
                     Nats,
                     Hubbard_U,
                     dftorch_params,
-                    dftorch_params["KRYLOV_TOL"],
+                    dftorch_params.get("KRYLOV_TOL", 1e-6),
                     KK,
                     Res,
                     q_spin_sr,
@@ -861,7 +864,7 @@ def scf_x_os(
             net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
 
             Ecoul_old = Ecoul
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
             else:
                 Ecoul = 0.5 * q_tot_atom @ (C @ q_tot_atom) + 0.5 * torch.sum(
@@ -876,7 +879,7 @@ def scf_x_os(
                     ResNorm.item(), dEc.item(), time.perf_counter() - start_time
                 )
             )
-            if it == dftorch_params["SCF_MAX_ITER"]:
+            if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
         f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
@@ -897,7 +900,7 @@ def scf_x_os(
     q_tot_atom = torch.zeros_like(RX)
     q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0))  # atom-resolved
 
-    if dftorch_params["coul_method"] == "PME":
+    if dftorch_params["COUL_METHOD"] == "PME":
         ewald_e1, forces1, dq_p1, stress_coul = calculate_PME_ewald(
             positions,  # .detach().clone(),
             q_tot_atom,
@@ -906,7 +909,7 @@ def scf_x_os(
             disps,
             dists,
             CALPHA,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             PME_data,
             hubbard_u=Hubbard_U,
             atomtypes=TYPE,
@@ -914,8 +917,8 @@ def scf_x_os(
             calculate_forces=0 if req_grad_xyz else 1,
             calculate_dq=0 if req_grad_xyz else 1,
             calculate_stress=0 if req_grad_xyz else 1,
-            h_damp_exp=dftorch_params.get("h_damp_exp", None),
-            h5_params=dftorch_params.get("h5_params", None),
+            h_damp_exp=dftorch_params.get("H_DAMP_EXP", None),
+            h5_params=dftorch_params.get("H5_PARAMS", None),
         )
         Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
     else:
@@ -1067,9 +1070,9 @@ def SCFx_batch(
 
         print("\nStarting cycle")
         while (
-            (ResNorm > dftorch_params["SCF_TOL"]).any()
-            or (dEc > dftorch_params["SCF_TOL"] * 100).any()
-        ) and it < dftorch_params["SCF_MAX_ITER"]:
+            (ResNorm > dftorch_params.get("SCF_TOL", 1e-6)).any()
+            or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100).any()
+        ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             it += 1
             print("Iter {}".format(it))
 
@@ -1101,7 +1104,7 @@ def SCFx_batch(
             ResNorm = torch.norm(Res, dim=1)
 
             # --- Charge mixing ---
-            use_krylov = it > dftorch_params["KRYLOV_START"]
+            use_krylov = it > dftorch_params.get("KRYLOV_START", 10)
 
             if use_krylov:
                 K0Res = torch.matmul(KK, Res.unsqueeze(-1)).squeeze(-1)
@@ -1110,7 +1113,7 @@ def SCFx_batch(
                     Nats,
                     Hubbard_U_gathered,
                     dftorch_params,
-                    dftorch_params["KRYLOV_TOL"],
+                    dftorch_params.get("KRYLOV_TOL", 1e-6),
                     KK,
                     Res,
                     q,
@@ -1159,7 +1162,7 @@ def SCFx_batch(
                 print(f"Batch {b}: Res = {rval:.3e}, dEc = {dval:.3e}")
             # print(f"t = {elapsed:.2f} s")
 
-            if it == dftorch_params["SCF_MAX_ITER"]:
+            if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
         f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
@@ -1239,7 +1242,9 @@ def delta_scf_x_os(
     else:
         dU_dq_gathered = None
 
-    if dftorch_params["coul_method"] == "PME":
+    normalize_coulomb_settings(dftorch_params, lattice_vecs, context="delta_scf_x_os")
+    coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
+    if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
             calculate_PME_ewald,
             init_PME_data,
@@ -1253,23 +1258,23 @@ def delta_scf_x_os(
         )
         CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
             lattice_vecs.cpu().numpy(),
-            dftorch_params["cutoff"],
-            dftorch_params["Coulomb_acc"],
+            coulomb_cutoff,
+            dftorch_params.get("COULOMB_ACC", 1e-5),
         )
         PME_data = init_PME_data(
-            grid_dimensions, lattice_vecs, CALPHA, dftorch_params["PME_order"]
+            grid_dimensions, lattice_vecs, CALPHA, dftorch_params.get("PME_ORDER", 4)
         )
         nbr_state = NeighborState(
             positions,
             lattice_vecs,
             None,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             is_dense=True,
             buffer=0.0,
             use_triton=False,
         )
         disps, dists, nbr_inds = calculate_dist_dips(
-            positions, nbr_state, dftorch_params["cutoff"]
+            positions, nbr_state, coulomb_cutoff
         )
     else:
         PME_data = None
@@ -1294,7 +1299,6 @@ def delta_scf_x_os(
         # Nocc = torch.tensor([Nocc, Nocc], device=H0.device)
         # Dorth, Q, e, f, mu0 = dm_fermi_x_os(Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, broken_symmetry=True)
         broken_symmetry = dftorch_params.get("BROKEN_SYM", False)  # noqa: F841
-        # shared_mu0 = dftorch_params.get("SHARED_MU", False)
         mu_0 = mu0
         ES_config = dftorch_params.get("DELTA_SCF_TARGET", "")
         ES_smearing = dftorch_params.get("DELTA_SCF_SMEARING", False)
@@ -1351,14 +1355,14 @@ def delta_scf_x_os(
 
         print("\nStarting cycle")
         while (
-            (ResNorm > dftorch_params["SCF_TOL"])
-            or (dEc > dftorch_params["SCF_TOL"] * 100)
-        ) and it < dftorch_params["SCF_MAX_ITER"]:
+            (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
+            or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
+        ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
             print("Iter {}".format(it))
 
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
                 if 1:
                     ewald_e1, forces1, CoulPot = calculate_PME_ewald(
@@ -1369,7 +1373,7 @@ def delta_scf_x_os(
                         disps,
                         dists,
                         CALPHA,
-                        dftorch_params["cutoff"],
+                        coulomb_cutoff,
                         PME_data,
                         hubbard_u=Hubbard_U,
                         atomtypes=TYPE,
@@ -1397,7 +1401,7 @@ def delta_scf_x_os(
                 atom_ids_sr,
                 el_per_shell,
                 dU_dq_gathered,
-                dftorch_params["SHARED_MU"],
+                dftorch_params.get("SHARED_MU", False),
                 dftorch_params["DELTA_SCF"],
                 dftorch_params,
             )
@@ -1411,15 +1415,15 @@ def delta_scf_x_os(
             ResNorm = torch.norm(Res)
             K0Res = torch.bmm(KK, Res.unsqueeze(-1)).squeeze(-1)
 
-            if (
-                it == dftorch_params["KRYLOV_START"]
+            if it == dftorch_params.get(
+                "KRYLOV_START", 10
             ):  # Calculate full kernel after KRYLOV_START steps
                 # KK,D0 = _kernel_fermi(structure, mu0,Te,Nats,H,C,S,Z,Q,e)
                 # KK = torch.load("/home/maxim/Projects/DFTB/DFTorch/tests/KK_C840.pt") # For testing purposes
                 # KK0 = KK.clone()  # To be kept as preconditioner
                 1
             # Preconditioned Low-Rank Krylov _scf acceleration
-            if it > dftorch_params["KRYLOV_START"]:
+            if it > dftorch_params.get("KRYLOV_START", 10):
                 # Preconditioned residual
                 K0Res = kernel_update_lr_os(
                     RX,
@@ -1430,7 +1434,7 @@ def delta_scf_x_os(
                     Nats,
                     Hubbard_U,
                     dftorch_params,
-                    dftorch_params["KRYLOV_TOL"],
+                    dftorch_params.get("KRYLOV_TOL", 1e-6),
                     KK,
                     Res,
                     q_spin_sr,
@@ -1464,7 +1468,7 @@ def delta_scf_x_os(
             net_spin_sr = q_spin_sr[0] - q_spin_sr[1]
 
             Ecoul_old = Ecoul
-            if dftorch_params["coul_method"] == "PME":
+            if dftorch_params["COUL_METHOD"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q_tot_atom**2 * Hubbard_U)
             else:
                 Ecoul = 0.5 * q_tot_atom @ (C @ q_tot_atom) + 0.5 * torch.sum(
@@ -1479,7 +1483,7 @@ def delta_scf_x_os(
                     ResNorm.item(), dEc.item(), time.perf_counter() - start_time
                 )
             )
-            if it == dftorch_params["SCF_MAX_ITER"]:
+            if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
         # f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2))) # supersedes non-aufbau contraint if calculated, at least in appearance
@@ -1500,7 +1504,7 @@ def delta_scf_x_os(
     q_tot_atom = torch.zeros_like(RX)
     q_tot_atom.scatter_add_(0, shell_to_atom, q_spin_sr.sum(dim=0))  # atom-resolved
 
-    if dftorch_params["coul_method"] == "PME":
+    if dftorch_params["COUL_METHOD"] == "PME":
         ewald_e1, forces1, dq_p1 = calculate_PME_ewald(
             positions,  # .detach().clone(),
             q_tot_atom,
@@ -1509,7 +1513,7 @@ def delta_scf_x_os(
             disps,
             dists,
             CALPHA,
-            dftorch_params["cutoff"],
+            coulomb_cutoff,
             PME_data,
             hubbard_u=Hubbard_U,
             atomtypes=TYPE,

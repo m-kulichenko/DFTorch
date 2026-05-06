@@ -55,12 +55,12 @@ NJUMPS = 1
 def prepare_structure(device):
     ### Prepare DFTB+DFTorch parameters, structure, neighbor list, and graph partitioning ###
     dftorch_params = {
-        "coul_method": "PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
-        "Coulomb_acc": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
-        "cutoff": 10.0,  # Coulomb cutoff
+        "COUL_METHOD": "PME",  # 'FULL' for full coulomb matrix, 'PME' for PME method
+        "COULOMB_ACC": 5e-5,  # Coulomb accuracy for full coulomb calcs or t_err for PME
+        "COULOMB_CUTOFF": 10.0,  # Coulomb cutoff
         "h0_cutoff": 8.0,  # Coulomb cutoff
         "graph_cutoff": 4.0,  # Graph cutoff
-        "PME_order": 4,  # Ignored for FULL coulomb method
+        "PME_ORDER": 4,  # Ignored for FULL coulomb method
         "SCF_MAX_ITER": 100,  # Maximum number of _scf iterations
         "SCF_TOL": 1e-6,  # _scf convergence tolerance on density matrix
         "SCF_ALPHA": 0.1,  # Scaled delta function coefficient. Acts as linear mixing coefficient used before Krylov acceleration starts.
@@ -127,7 +127,7 @@ def init_processes(backend):
 
     nparts = 8
     structure, dftorch_params = prepare_structure(device)
-    if dftorch_params["cutoff"] < dftorch_params["graph_cutoff"]:
+    if dftorch_params["COULOMB_CUTOFF"] < dftorch_params["graph_cutoff"]:
         raise ValueError(
             "Coulomb cutoff must be greater than or equal to graph cutoff for this implementation."
         )
@@ -143,24 +143,24 @@ def init_processes(backend):
             positions,
             structure.cell,
             None,
-            dftorch_params["cutoff"],
+            dftorch_params["COULOMB_CUTOFF"],
             is_dense=True,
             buffer=0.0,
             use_triton=False,
         )
         disps, dists, nl = calculate_dist_dips(
-            positions, nbr_state, dftorch_params["cutoff"]
+            positions, nbr_state, dftorch_params["COULOMB_CUTOFF"]
         )
         print("nl.dtype", nl.dtype)
 
-        if dftorch_params["graph_cutoff"] < dftorch_params["cutoff"]:
+        if dftorch_params["graph_cutoff"] < dftorch_params["COULOMB_CUTOFF"]:
             nl_init = torch.where(
                 (dists > dftorch_params["graph_cutoff"]) | (dists == 0.0), -1, nl
             )
             nl_init = nl_init.sort(dim=1, descending=True)[0]
             nl_init = nl_init[:, : torch.max(torch.sum(nl_init != -1, dim=1))]
 
-        elif dftorch_params["graph_cutoff"] > dftorch_params["cutoff"]:
+        elif dftorch_params["graph_cutoff"] > dftorch_params["COULOMB_CUTOFF"]:
             raise ValueError(
                 "Coulomb cutoff must be greater than or equal to graph cutoff for this implementation."
             )

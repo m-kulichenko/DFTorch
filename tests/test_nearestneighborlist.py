@@ -38,8 +38,12 @@ def test_nearestneighborlist_small_xyz(device):
     cell = torch.tensor([10.0, 10.0, 10.0])
     Rcut = 4.0
     N = 3
+    dftorch_params = {
+        "FILENAME": str(xyz_path),
+        "SKFPATH": str(skf_dir) + "/",  # Path to SKF files
+    }
     const = Constants(
-        str(xyz_path), str(skf_dir) + "/", magnetic_hubbard_ldep=False
+        dftorch_params,
     ).to(device)
 
     result = vectorized_nearestneighborlist(
