@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 import time
+import numpy as np
 from dftorch.ewald_pme import (
     calculate_PME_ewald,
     init_PME_data,
@@ -20,6 +21,7 @@ from . import (
     get_energy_on_rank,
     gather_1d_to_rank0,
     graph_diff_and_update,
+    symmetrize_graph_safe,
     kernel_global,
     get_forces_on_rank,
     get_subsy_on_rank,
@@ -89,7 +91,7 @@ def scf(
     else:
         positions_global, CALPHA_global, PME_data_global = [None] * 3
 
-    fullGraph = symmetrize_graph(fullGraph.cpu().numpy())
+    fullGraph = symmetrize_graph_safe(fullGraph.cpu().numpy())
 
     scf_error = torch.tensor(float("inf"), device=device)
     scf_iter = 0
@@ -188,7 +190,7 @@ def scf(
         timing["Graph_diff_update"] = time.time() - tic
 
         tic = time.time()
-        fullGraph = symmetrize_graph(fullGraph)
+        fullGraph = symmetrize_graph_safe(fullGraph)
         timing["Graph_symmetrize"] = time.time() - tic
 
         # tic = time.time()
@@ -409,7 +411,8 @@ def scf_step(
     tic = time.time()
     per_part_D = []
     K0Res_global = torch.zeros(structure.Nats, device=device)
-    graphOnRank = None
+    graphOnRank = np.full((structure.Nats, max_deg + 1), -1, dtype=np.int64)
+    graphOnRank[:, 0] = 0
     for ch_structure in per_part_data:
         q, D, f, K0Res = calc_q_on_rank(
             ch_structure,

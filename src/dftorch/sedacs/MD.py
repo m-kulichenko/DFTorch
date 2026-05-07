@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 import time
+import numpy as np
 
 from dftorch._io import write_XYZ_trajectory, write_pdb_frame
 from dftorch.MD import MDXL, initialize_velocities
@@ -19,6 +20,7 @@ from sedacs.chemical_potential import get_mu
 from . import (
     gather_1d_to_rank0,
     graph_diff_and_update,
+    symmetrize_graph_safe,
     kernel_global,
     get_energy_on_rank,
     get_forces_on_rank,
@@ -34,7 +36,6 @@ from sedacs.graph_partition import (
 from sedacs.graph import (
     collect_graph_from_rho,
     adaptive_halo_expansion,
-    symmetrize_graph,
 )
 
 
@@ -182,7 +183,7 @@ class MDXL_Graph(MDXL):
                 device=device,
                 add_only=False,
             ).numpy()
-            fullGraph = symmetrize_graph(fullGraph)
+            fullGraph = symmetrize_graph_safe(fullGraph)
 
     def step(
         self,
@@ -445,7 +446,8 @@ class MDXL_Graph(MDXL):
         per_part_D = []
         q_global = torch.zeros(structure.Nats, device=device)
         self.K0Res = torch.zeros(structure.Nats, device=device)
-        graphOnRank = None
+        graphOnRank = np.full((structure.Nats, self.max_deg + 1), -1, dtype=np.int64)
+        graphOnRank[:, 0] = 0
         for ch_structure in per_part_data:
             q, D, f, K0Res = calc_q_on_rank(
                 ch_structure,

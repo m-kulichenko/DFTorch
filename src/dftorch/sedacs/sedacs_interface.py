@@ -13,7 +13,7 @@ from dftorch.Structure import Structure
 from dftorch._h0ands import H0_and_S_vectorized
 
 from dftorch.ewald_pme import calculate_PME_ewald
-from sedacs.graph import compute_added, compute_removed, update_graph
+from sedacs.graph import compute_added, compute_removed, update_graph, symmetrize_graph
 
 from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 
@@ -125,6 +125,59 @@ def gather_1d_to_rank0(x: torch.Tensor, device, src: int = 0) -> torch.Tensor:
     return torch.cat(parts, dim=0)
 
 
+def _pad_graph_for_symmetrize(graph: np.ndarray) -> np.ndarray:
+    """
+    Pad a graph so sedacs.graph.symmetrize_graph can add inbound-only neighbors
+    without exceeding the current width.
+
+    symmetrize_graph uses the graph width as a hard maxDeg and raises before it
+    can resize. Here we compute a safe upper bound for the post-symmetrized
+    degree of each node: out_degree + in_degree.
+    """
+    nnodes = graph.shape[0]
+    max_deg = graph.shape[1] - 1
+    indeg = np.zeros((nnodes,), dtype=np.int64)
+
+    for i in range(nnodes):
+        deg = int(graph[i, 0])
+        if deg == 0:
+            continue
+        indeg[graph[i, 1 : 1 + deg]] += 1
+
+    required_deg = graph[:, 0].astype(np.int64) + indeg
+    padded_max_deg = int(required_deg.max())
+    if padded_max_deg <= max_deg:
+        return graph
+
+    graph_padded = np.full((nnodes, padded_max_deg + 1), -1, dtype=graph.dtype)
+    graph_padded[:, : graph.shape[1]] = graph
+    return graph_padded
+
+
+def _graph_to_dense_adjacency(graph: np.ndarray) -> np.ndarray:
+    adj = np.zeros((graph.shape[0], graph.shape[0]), dtype=np.uint8)
+    for i in range(graph.shape[0]):
+        deg = int(graph[i, 0])
+        if deg == 0:
+            continue
+        adj[i, graph[i, 1 : 1 + deg]] = 1
+    return adj
+
+
+def symmetrize_graph_safe(graph: np.ndarray) -> np.ndarray:
+    graph = np.ascontiguousarray(graph)
+    try:
+        return symmetrize_graph(graph)
+    except ValueError as exc:
+        if "larger degree than original maxDeg" not in str(exc):
+            raise
+
+        padded_graph = _pad_graph_for_symmetrize(graph)
+        if padded_graph.shape[1] == graph.shape[1]:
+            raise
+        return symmetrize_graph(padded_graph)
+
+
 def graph_diff_and_update(
     prev_graph,
     graph_on_rank,
@@ -195,9 +248,7 @@ def graph_diff_and_update(
 
     if overflow_t.item() > 0:
         # Fallback: OR-reduce full adjacency across ranks
-        adj = np.zeros((nnodes, nnodes), dtype=np.uint8)
-        rows, cols = np.where(graph_on_rank[:, 1:] >= 0)
-        adj[rows, graph_on_rank[:, 1:][rows, cols]] = 1
+        adj = _graph_to_dense_adjacency(graph_on_rank)
         adj_t = torch.from_numpy(adj).to(device)
         dist.all_reduce(adj_t, op=dist.ReduceOp.MAX)
         adj = adj_t.cpu().numpy().astype(bool)
@@ -210,7 +261,7 @@ def graph_diff_and_update(
         for i in range(nnodes):
             nbrs_i = np.where(adj[i])[0]
             G_out[i, 1 : 1 + nbrs_i.size] = nbrs_i
-        return torch.from_numpy(G_out)
+        return torch.from_numpy(_pad_graph_for_symmetrize(G_out))
 
     # All-reduce deltas (SUM is correct: parts partition all N nodes, no conflicts)
     G_added_t = torch.from_numpy(G_added).to(device)
@@ -239,7 +290,7 @@ def graph_diff_and_update(
         G_added[:, 0],
     )
 
-    return torch.from_numpy(updated_graph)
+    return torch.from_numpy(_pad_graph_for_symmetrize(updated_graph))
 
 
 def get_ij(TYPE, TYPE_all, nnType, nrnnlist, const):
