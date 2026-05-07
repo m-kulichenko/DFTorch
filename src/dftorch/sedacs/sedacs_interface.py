@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -9,11 +10,19 @@ from dftorch._tools import (
     fractional_matrix_power_symm,
     ordered_pairs_from_TYPE,
 )
-from dftorch.Structure import Structure
+from dftorch import Structure, Constants
+
 from dftorch._h0ands import H0_and_S_vectorized
 
 from dftorch.ewald_pme import calculate_PME_ewald
-from sedacs.graph import compute_added, compute_removed, update_graph, symmetrize_graph
+from sedacs.graph import (
+    compute_added,
+    compute_removed,
+    update_graph,
+    symmetrize_graph,
+    get_initial_graph,
+)
+from sedacs.graph_partition import get_coreHaloIndices, graph_partition
 
 from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 
@@ -83,6 +92,117 @@ def bcast_1d_int(t, dtype, device, src=0):
         t = torch.empty((n,), dtype=dtype, device=device)
     dist.broadcast(t, src)
     return t
+
+
+def prepare_initial_graph_data(
+    structure,
+    dftorch_params,
+    nparts,
+    n_jumps,
+    max_deg,
+    int_dtype,
+    device,
+):
+    rank = dist.get_rank()
+
+    if rank == 0:
+        positions = torch.stack((structure.RX, structure.RY, structure.RZ))
+
+        nbr_state = NeighborState(
+            positions,
+            structure.lattice_vecs,
+            None,
+            dftorch_params["COULOMB_CUTOFF"],
+            is_dense=True,
+            buffer=0.0,
+            use_triton=False,
+        )
+        disps, dists, nl = calculate_dist_dips(
+            positions, nbr_state, dftorch_params["COULOMB_CUTOFF"]
+        )
+
+        nl_init = torch.where(
+            (dists > dftorch_params["graph_cutoff"]) | (dists == 0.0), -1, nl
+        )
+        nl_init = nl_init.sort(dim=1, descending=True)[0]
+        nl_init = nl_init[:, : torch.max(torch.sum(nl_init != -1, dim=1))]
+
+        full_graph, _ = get_initial_graph(
+            positions.T.cpu().numpy(),
+            nl_init.cpu().numpy(),
+            dftorch_params["graph_cutoff"],
+            max_deg,
+            structure.cell.diag().cpu().numpy(),
+        )
+        full_graph = symmetrize_graph(full_graph)
+
+        tick = time.perf_counter()
+        parts = graph_partition(
+            structure,
+            structure,
+            full_graph,
+            "Metis",
+            nparts,
+            positions.T.cpu().numpy(),
+            verb=False,
+        )
+        print(f"Graph partitioning time: {time.perf_counter() - tick:.1f} s")
+
+        parts_core_halo = []
+        num_cores = []
+        print("\nCore and halos indices for every part:")
+        for part in parts:
+            core_halo, n_core, _ = get_coreHaloIndices(part, full_graph, n_jumps)
+            parts_core_halo.append(core_halo)
+            num_cores.append(n_core)
+
+            print(
+                "Rank",
+                dist.get_rank(),
+                "has core and core-halo size:",
+                n_core,
+                len(core_halo),
+            )
+
+        num_cores = torch.tensor(num_cores, dtype=int_dtype, device=device)
+        full_graph = torch.tensor(full_graph, dtype=int_dtype, device=device)
+        flat, offsets = pack_lol_int(parts_core_halo, int_dtype)
+        nl_shape = torch.tensor(list(nl.shape), dtype=int_dtype, device=device)
+        full_graph_shape = torch.tensor(
+            list(full_graph.shape), dtype=int_dtype, device=device
+        )
+    else:
+        nbr_state = None
+        disps = None
+        dists = None
+        flat = None
+        offsets = None
+        num_cores = torch.empty((nparts,), dtype=int_dtype, device=device)
+        nl_shape = torch.empty((2,), dtype=int_dtype, device=device)
+        full_graph_shape = torch.empty((2,), dtype=int_dtype, device=device)
+
+    dist.broadcast(num_cores, 0)
+    dist.broadcast(nl_shape, 0)
+    dist.broadcast(full_graph_shape, 0)
+
+    if rank != 0:
+        nl = torch.empty(
+            tuple(int(x) for x in nl_shape.tolist()), dtype=int_dtype, device=device
+        )
+        full_graph = torch.empty(
+            tuple(int(x) for x in full_graph_shape.tolist()),
+            dtype=int_dtype,
+            device=device,
+        )
+
+    dist.broadcast(nl, 0)
+    dist.broadcast(full_graph, 0)
+
+    flat = bcast_1d_int(flat, int_dtype, device=device, src=0)
+    offsets = bcast_1d_int(offsets, int_dtype, device=device, src=0)
+    parts_core_halo = unpack_lol_int(flat.cpu(), offsets.cpu())
+
+    return nbr_state, disps, dists, nl, full_graph, parts_core_halo, num_cores
 
 
 def gather_1d_to_rank0(x: torch.Tensor, device, src: int = 0) -> torch.Tensor:
@@ -992,3 +1112,12 @@ def repulsion(
     if sigma_rep is not None:
         return Vr, f_rep, sigma_rep
     return Vr, f_rep, None
+
+def prepare_structure(dftorch_params, device):
+    ### Prepare DFTB+DFTorch parameters, structure, neighbor list, and graph partitioning ###
+    const = Constants(dftorch_params).to(device)
+    structure = Structure(dftorch_params, const, device=device)
+    dftorch_params["CELL"] = structure.cell
+    structure.SpecClustNN = 10
+    structure.interface = 'dftorch'
+    return structure, dftorch_params

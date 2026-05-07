@@ -16,6 +16,8 @@ from .sedacs_interface import (
     get_evals_dvals,
     calc_q_on_rank,
     repulsion,
+    prepare_structure,
+    prepare_initial_graph_data,
 )
 
 from .MD import MDXL_Graph
@@ -40,4 +42,6 @@ __all__ = [
     "MDXL_Graph",
     "scf",
     "repulsion",
+    "prepare_structure",
+    "prepare_initial_graph_data",
 ]

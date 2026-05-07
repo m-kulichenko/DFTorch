@@ -18,6 +18,9 @@ from dftorch._tools import calculate_dist_dips
 from sedacs.chemical_potential import get_mu
 
 from . import (
+    pack_lol_int,
+    unpack_lol_int,
+    bcast_1d_int,
     gather_1d_to_rank0,
     graph_diff_and_update,
     symmetrize_graph_safe,
@@ -32,6 +35,7 @@ from . import (
 
 from sedacs.graph_partition import (
     get_coreHaloIndices,
+    graph_partition,
 )
 from sedacs.graph import (
     collect_graph_from_rho,
@@ -51,6 +55,61 @@ def _get_parts_on_rank(ch, core_size, device):
         return torch.empty((0,), dtype=torch.long, device=device)
 
     return torch.unique(torch.cat(parts_on_rank), sorted=False)
+
+
+def _full_graph_to_numpy(full_graph):
+    if isinstance(full_graph, torch.Tensor):
+        return full_graph.detach().cpu().numpy()
+    return full_graph
+
+
+def _repartition_local_parts(
+    structure,
+    full_graph,
+    n_jumps,
+    works_per_rank,
+    int_dtype,
+    device,
+):
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    num_parts = works_per_rank * world_size
+
+    if rank == 0:
+        graph_np = _full_graph_to_numpy(full_graph)
+        coords_np = torch.stack((structure.RX, structure.RY, structure.RZ)).T.cpu().numpy()
+        parts = graph_partition(
+            structure,
+            structure,
+            graph_np,
+            "Metis",
+            num_parts,
+            coords_np,
+            verb=False,
+        )
+
+        parts_core_halo = []
+        num_cores = []
+        for part in parts:
+            core_halo, n_core, _ = get_coreHaloIndices(part, graph_np, n_jumps)
+            parts_core_halo.append(core_halo)
+            num_cores.append(n_core)
+
+        num_cores = torch.tensor(num_cores, dtype=int_dtype, device=device)
+        flat, offsets = pack_lol_int(parts_core_halo, int_dtype)
+    else:
+        num_cores = torch.empty((num_parts,), dtype=int_dtype, device=device)
+        flat = None
+        offsets = None
+
+    dist.broadcast(num_cores, 0)
+    flat = bcast_1d_int(flat, int_dtype, device=device, src=0)
+    offsets = bcast_1d_int(offsets, int_dtype, device=device, src=0)
+    parts_core_halo = unpack_lol_int(flat.cpu(), offsets.cpu())
+
+    start = rank * works_per_rank
+    end = start + works_per_rank
+    return parts_core_halo[start:end], num_cores[start:end]
 
 
 class MDXL_Graph(MDXL):
@@ -132,17 +191,24 @@ class MDXL_Graph(MDXL):
             self.EPOT = structure.e_tot
 
         for md_step in range(num_steps):
+            if md_step > 0 and md_step % 100 == 0:
+                if dist.get_rank() == 0:
+                    print("Graph repartition")
+                ch, core_size = _repartition_local_parts(
+                    structure,
+                    fullGraph,
+                    self.n_jumps,
+                    works_per_rank,
+                    self.int_dtype,
+                    device,
+                )
+
+
             for i in range(works_per_rank):
                 ch[i], core_size[i], nh = get_coreHaloIndices(
                     ch[i][: core_size[i]], fullGraph, self.n_jumps
                 )
-                # print(
-                #     "Rank",
-                #     dist.get_rank(),
-                #     "has core and core-halo size:",
-                #     core_size[i].item(),
-                #     len(ch[i]),
-                # )
+                # print("Rank", dist.get_rank(), "has core and core-halo size:", core_size[i].item(), len(ch[i]))
 
             ch_sizes = [len(ch[i]) for i in range(works_per_rank)]
             ch_stats = torch.tensor(
