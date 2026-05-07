@@ -9,6 +9,7 @@ from dftorch.ewald_pme import (
     init_PME_data,
     calculate_alpha_and_num_grids,
 )
+from dftorch.ewald_pme.neighbor_list import NeighborState
 from dftorch._cell import wrap_positions
 
 from dftorch._tools import calculate_dist_dips
@@ -17,6 +18,7 @@ from sedacs.chemical_potential import get_mu
 
 from . import (
     gather_1d_to_rank0,
+    graph_diff_and_update,
     kernel_global,
     get_energy_on_rank,
     get_forces_on_rank,
@@ -36,6 +38,20 @@ from sedacs.graph import (
 )
 
 
+def _get_parts_on_rank(ch, core_size, device):
+    parts_on_rank = []
+    for row_indices, local_core_size in zip(ch, core_size):
+        n_core = int(local_core_size.item())
+        parts_on_rank.append(
+            torch.as_tensor(row_indices[:n_core], dtype=torch.long, device=device)
+        )
+
+    if len(parts_on_rank) == 0:
+        return torch.empty((0,), dtype=torch.long, device=device)
+
+    return torch.unique(torch.cat(parts_on_rank), sorted=False)
+
+
 class MDXL_Graph(MDXL):
     def __init__(self, const, temperature_K, n_jumps, g_thresh, max_deg, int_dtype):
         super().__init__(None, const, temperature_K)
@@ -43,6 +59,7 @@ class MDXL_Graph(MDXL):
         self.g_thresh = g_thresh
         self.max_deg = max_deg
         self.int_dtype = int_dtype
+        self.rank_nbr_state = None
 
     def run(
         self,
@@ -156,13 +173,16 @@ class MDXL_Graph(MDXL):
                 device,
             )
 
-            graphOnRank_tensor = torch.tensor(
-                graphOnRank, dtype=torch.int64, device=device
-            )  # fullGraphHalo
-            dist.all_reduce(graphOnRank_tensor, op=dist.ReduceOp.SUM)
-            # fullGraph = graph_diff_and_update(graphOnRank_tensor.cpu().numpy(), fullGraph)
-            # fullGraph = graph_diff_and_update(prevGraph, graphOnRank_tensor.cpu().numpy(), partsOnRank, comm)
-            fullGraph = symmetrize_graph(graphOnRank_tensor.cpu().numpy())
+            parts_on_rank = _get_parts_on_rank(ch, core_size, device)
+            fullGraph = graph_diff_and_update(
+                fullGraph,
+                graphOnRank,
+                parts_on_rank,
+                maxToAddRemove=100,
+                device=device,
+                add_only=False,
+            ).numpy()
+            fullGraph = symmetrize_graph(fullGraph)
 
     def step(
         self,
@@ -334,7 +354,6 @@ class MDXL_Graph(MDXL):
             positions = None
             disps = None
             dists = None
-            nl_shape = torch.empty((2,), dtype=self.int_dtype, device=device)
             self.n = torch.empty((structure.Nats,), device=device)
             CoulPot = torch.empty((structure.Nats,), device=device)
 
@@ -346,7 +365,6 @@ class MDXL_Graph(MDXL):
 
         tic2_1 = time.perf_counter()
 
-        dist.broadcast(nl_shape, 0)
         dist.broadcast(self.n, 0)
         dist.broadcast(CoulPot, 0)
 
@@ -358,13 +376,24 @@ class MDXL_Graph(MDXL):
         structure.RX, structure.RY, structure.RZ = structure.coordinates.unbind(dim=0)
 
         if dist.get_rank() != 0:
-            nl = torch.empty(
-                tuple(int(x) for x in nl_shape.tolist()),
-                dtype=self.int_dtype,
-                device=device,
+            positions = structure.coordinates.contiguous()
+            if self.rank_nbr_state is None:
+                self.rank_nbr_state = NeighborState(
+                    positions,
+                    structure.lattice_vecs,
+                    None,
+                    dftorch_params["COULOMB_CUTOFF"],
+                    is_dense=True,
+                    buffer=0.0,
+                    use_triton=False,
+                )
+            else:
+                self.rank_nbr_state.update(positions)
+            _, _, nl = calculate_dist_dips(
+                positions,
+                self.rank_nbr_state,
+                dftorch_params["COULOMB_CUTOFF"],
             )
-
-        dist.broadcast(nl, 0)
 
         per_part_data = []  # store (ch_structure, hindex, atom_ids, S, Z, KK, Q, e_vals, d_vals)
         e_list = []

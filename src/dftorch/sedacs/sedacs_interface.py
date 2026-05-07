@@ -290,11 +290,8 @@ def get_ij(TYPE, TYPE_all, nnType, nrnnlist, const):
 def get_subsy_on_rank(structure, dftorch_params, q, ch, core_size, CoulPot, device):
 
     ch_structure = Structure(
-        None,
-        structure.cell,
+        dftorch_params,
         structure.const,
-        charge=0,
-        Te=structure.Te,
         device=device,
         species=structure.TYPE[ch].unsqueeze(0),
         coordinates=structure.coordinates.T[ch].unsqueeze(0),
@@ -315,13 +312,13 @@ def get_subsy_on_rank(structure, dftorch_params, q, ch, core_size, CoulPot, devi
         positions,
         ch_structure.cell,
         None,
-        dftorch_params["h0_cutoff"],
+        dftorch_params["RCUT_ELECTRONIC"],
         is_dense=True,
         buffer=0.0,
         use_triton=False,
     )
     disps_sub, dists_sub, nl_sub = calculate_dist_dips(
-        positions, nbr_state, dftorch_params["h0_cutoff"]
+        positions, nbr_state, dftorch_params["RCUT_ELECTRONIC"]
     )
     num_neighbors = torch.sum(nl_sub != -1, dim=1)
     nl_sub = torch.cat((num_neighbors.unsqueeze(1), nl_sub), dim=1)
