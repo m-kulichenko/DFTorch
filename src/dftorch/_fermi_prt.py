@@ -184,14 +184,12 @@ fermi_prt_D1_only_eager = fermi_prt_D1_only
 fermi_prt_batch_D1_only_eager = fermi_prt_batch_D1_only
 fermi_prt_batch_eager = fermi_prt_batch
 
-fermi_prt = _maybe_compile(fermi_prt, fullgraph=False, dynamic=False)
-fermi_prt_D1_only = _maybe_compile(fermi_prt_D1_only, fullgraph=False, dynamic=False)
+fermi_prt = _maybe_compile(fermi_prt)
+fermi_prt_D1_only = _maybe_compile(fermi_prt_D1_only)
 fermi_prt_batch_D1_only = _maybe_compile(
     fermi_prt_batch_D1_only,
-    fullgraph=False,
-    dynamic=False,
 )
-fermi_prt_batch = _maybe_compile(fermi_prt_batch, fullgraph=False, dynamic=False)
+fermi_prt_batch = _maybe_compile(fermi_prt_batch)
 
 
 def Canon_DM_PRT(F1, T, Q, ev, mu_0, m):

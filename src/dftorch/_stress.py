@@ -836,6 +836,4 @@ get_coulomb_stress_real_eager = get_coulomb_stress_real
 
 get_coulomb_stress_real = _maybe_compile(
     get_coulomb_stress_real,
-    fullgraph=False,
-    dynamic=False,
 )

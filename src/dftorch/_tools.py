@@ -71,8 +71,6 @@ def fractional_matrix_power_symm(A: torch.Tensor, power: float = -0.5) -> torch.
 fractional_matrix_power_symm_eager = fractional_matrix_power_symm
 fractional_matrix_power_symm = _maybe_compile(
     fractional_matrix_power_symm,
-    fullgraph=False,
-    dynamic=False,
 )
 
 

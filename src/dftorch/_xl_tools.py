@@ -364,11 +364,11 @@ calc_q_batch_eager = calc_q_batch
 calc_dq_eager = calc_dq
 calc_dq_batch_eager = calc_dq_batch
 
-calc_q = _maybe_compile(calc_q, fullgraph=False, dynamic=False)
-calc_q_os = _maybe_compile(calc_q_os, fullgraph=False, dynamic=False)
-calc_q_batch = _maybe_compile(calc_q_batch, fullgraph=False, dynamic=False)
-calc_dq = _maybe_compile(calc_dq, fullgraph=False, dynamic=False)
-calc_dq_batch = _maybe_compile(calc_dq_batch, fullgraph=False, dynamic=False)
+calc_q = _maybe_compile(calc_q)
+calc_q_os = _maybe_compile(calc_q_os)
+calc_q_batch = _maybe_compile(calc_q_batch)
+calc_dq = _maybe_compile(calc_dq)
+calc_dq_batch = _maybe_compile(calc_dq_batch)
 
 
 def kernel_update_lr(

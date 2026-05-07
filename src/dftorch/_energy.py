@@ -362,5 +362,5 @@ def energy_shadow(
 energy_eager = energy
 energy_shadow_eager = energy_shadow
 
-energy = _maybe_compile(energy, fullgraph=False, dynamic=False)
-energy_shadow = _maybe_compile(energy_shadow, fullgraph=False, dynamic=False)
+energy = _maybe_compile(energy)
+energy_shadow = _maybe_compile(energy_shadow)

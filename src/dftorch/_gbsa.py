@@ -1553,37 +1553,25 @@ GBSA.get_shadow_energies_eager = GBSA.get_shadow_energies
 GBSA.get_shadow_sasa_gradients_eager = GBSA.get_shadow_sasa_gradients
 GBSA.get_shadow_born_gradients_eager = GBSA.get_shadow_born_gradients
 
-GBSA.get_shifts = _maybe_compile(GBSA.get_shifts, fullgraph=False, dynamic=False)
-GBSA.get_energies = _maybe_compile(GBSA.get_energies, fullgraph=False, dynamic=False)
+GBSA.get_shifts = _maybe_compile(GBSA.get_shifts)
+GBSA.get_energies = _maybe_compile(GBSA.get_energies)
 GBSA.get_energy_differentiable = _maybe_compile(
     GBSA.get_energy_differentiable,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSA.get_sasa_gradients = _maybe_compile(
     GBSA.get_sasa_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSA.get_born_gradients = _maybe_compile(
     GBSA.get_born_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSA.get_shadow_energies = _maybe_compile(
     GBSA.get_shadow_energies,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSA.get_shadow_sasa_gradients = _maybe_compile(
     GBSA.get_shadow_sasa_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSA.get_shadow_born_gradients = _maybe_compile(
     GBSA.get_shadow_born_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 
 GBSABatch.get_shifts_eager = GBSABatch.get_shifts
@@ -1596,36 +1584,22 @@ GBSABatch.get_shadow_born_gradients_eager = GBSABatch.get_shadow_born_gradients
 
 GBSABatch.get_shifts = _maybe_compile(
     GBSABatch.get_shifts,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_energies = _maybe_compile(
     GBSABatch.get_energies,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_sasa_gradients = _maybe_compile(
     GBSABatch.get_sasa_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_born_gradients = _maybe_compile(
     GBSABatch.get_born_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_shadow_energies = _maybe_compile(
     GBSABatch.get_shadow_energies,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_shadow_sasa_gradients = _maybe_compile(
     GBSABatch.get_shadow_sasa_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
 GBSABatch.get_shadow_born_gradients = _maybe_compile(
     GBSABatch.get_shadow_born_gradients,
-    fullgraph=False,
-    dynamic=False,
 )
