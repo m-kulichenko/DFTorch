@@ -366,8 +366,8 @@ def scf_step(
 
     tic = time.time()
     per_part_data = []  # store (ch_structure, hindex, atom_ids, S, Z, KK, Q, e_vals, d_vals)
-    e_vals_on_rank = torch.empty((0,), device=device)
-    d_vals_on_rank = torch.empty((0,), device=device)
+    e_vals_chunks = []
+    d_vals_chunks = []
     for i in range(works_per_rank):
         ch_structure = get_subsy_on_rank(
             structure,
@@ -383,8 +383,19 @@ def scf_step(
         )
 
         per_part_data.append((ch_structure))
-        e_vals_on_rank = torch.cat((e_vals_on_rank, ch_structure.e_vals), dim=0)
-        d_vals_on_rank = torch.cat((d_vals_on_rank, ch_structure.d_vals), dim=0)
+        e_vals_chunks.append(ch_structure.e_vals)
+        d_vals_chunks.append(ch_structure.d_vals)
+
+    e_vals_on_rank = (
+        torch.cat(e_vals_chunks, dim=0)
+        if e_vals_chunks
+        else torch.empty((0,), device=device)
+    )
+    d_vals_on_rank = (
+        torch.cat(d_vals_chunks, dim=0)
+        if d_vals_chunks
+        else torch.empty((0,), device=device)
+    )
     timing["Local_evals"] = time.time() - tic
 
     tic = time.time()
@@ -413,6 +424,9 @@ def scf_step(
     K0Res_global = torch.zeros(structure.Nats, device=device)
     graphOnRank = np.full((structure.Nats, max_deg + 1), -1, dtype=np.int64)
     graphOnRank[:, 0] = 0
+    graph_coords_np = structure.coordinates.T.cpu().numpy()
+    graph_cell_np = structure.cell.cpu().numpy()
+    graph_nl_np = nl.cpu().numpy()
     for ch_structure in per_part_data:
         q, D, f, K0Res = calc_q_on_rank(
             ch_structure,
@@ -427,31 +441,33 @@ def scf_step(
         )
         per_part_D.append(D)
         ch_structure.f = f
+        D_cpu = D.cpu()
+        hindex_cpu = ch_structure.hindex.cpu()
 
         graphOnRank = adaptive_halo_expansion(
             graphOnRank,
-            D.cpu(),
+            D_cpu,
             g_thresh,  # gthresh
             structure.Nats,
             max_deg,  # maxDeg
             ch_structure.ch,
             ch_structure.ch[: ch_structure.core_size],
-            ch_structure.hindex.cpu(),
-            structure.coordinates.T.cpu().numpy(),
-            structure.cell.cpu().numpy(),
-            nl.cpu().numpy(),
+            hindex_cpu,
+            graph_coords_np,
+            graph_cell_np,
+            graph_nl_np,
             alpha=0.7,
         )
 
         graphOnRank = collect_graph_from_rho(
             graphOnRank,
-            D.cpu(),
+            D_cpu,
             g_thresh,
             structure.Nats,
             max_deg,
             ch_structure.ch,
             ch_structure.core_size,
-            ch_structure.hindex.cpu(),
+            hindex_cpu,
         )
 
         K0Res_global[ch_structure.ch[: ch_structure.core_size]] = K0Res[

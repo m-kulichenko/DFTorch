@@ -448,6 +448,9 @@ class MDXL_Graph(MDXL):
         self.K0Res = torch.zeros(structure.Nats, device=device)
         graphOnRank = np.full((structure.Nats, self.max_deg + 1), -1, dtype=np.int64)
         graphOnRank[:, 0] = 0
+        graph_coords_np = structure.coordinates.T.cpu().numpy()
+        graph_cell_np = structure.cell.cpu().numpy()
+        graph_nl_np = nl.cpu().numpy()
         for ch_structure in per_part_data:
             q, D, f, K0Res = calc_q_on_rank(
                 ch_structure,
@@ -467,31 +470,33 @@ class MDXL_Graph(MDXL):
             per_part_D.append(D)
             ch_structure.q = q
             ch_structure.f = f
+            D_cpu = D.cpu()
+            hindex_cpu = ch_structure.hindex.cpu()
 
             graphOnRank = adaptive_halo_expansion(
                 graphOnRank,
-                D.cpu(),
+                D_cpu,
                 self.g_thresh,
                 structure.Nats,
                 self.max_deg,  # maxDeg
                 ch_structure.ch,
                 ch_structure.ch[: ch_structure.core_size],
-                ch_structure.hindex.cpu(),
-                structure.coordinates.T.cpu().numpy(),
-                structure.cell.cpu().numpy(),
-                nl.cpu().numpy(),
+                hindex_cpu,
+                graph_coords_np,
+                graph_cell_np,
+                graph_nl_np,
                 alpha=0.7,
             )
 
             graphOnRank = collect_graph_from_rho(
                 graphOnRank,
-                D.cpu(),
+                D_cpu,
                 self.g_thresh,
                 structure.Nats,
                 self.max_deg,
                 ch_structure.ch,
                 ch_structure.core_size,
-                ch_structure.hindex.cpu(),
+                hindex_cpu,
             )
 
             self.K0Res[ch_structure.ch[: ch_structure.core_size]] = K0Res[
