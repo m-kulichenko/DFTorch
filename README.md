@@ -36,15 +36,27 @@ DFTorch is a Python library, not a standalone command-line application. After
 installation, run it by importing `dftorch` from a Python script, a notebook,
 or an interactive Python session.
 
-Typical workflow:
+If you installed with `uv`, use `uv run` so commands execute inside the
+project environment without manually activating `.venv`.
 
 ```bash
-source .venv/bin/activate
-python
+uv run python
 ```
 
 ```python
 from dftorch import Constants, Structure, ESDriver
+```
+
+Run a script with:
+
+```bash
+uv run python your_script.py
+```
+
+For notebook-based usage, launch Jupyter from the same environment:
+
+```bash
+uv run jupyter lab
 ```
 
 For notebook-based usage, open one of the example notebooks in `experiments/`,
