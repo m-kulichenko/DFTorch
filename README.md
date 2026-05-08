@@ -75,7 +75,7 @@ from dftorch import (
 
 All other modules are internal implementation details and may change.
 
-![DFTorch demo](docs/assets/demo.gif)
+![DFTorch demo](docs/assets/comb_cell.gif)
 
 ## Authors
  M. Kulichenko, A.P. Baldo, A.M.N. Niklasson
