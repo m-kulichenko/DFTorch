@@ -12,7 +12,7 @@ uv venv --python 3.11
 uv pip install .
 ```
 
-or for compatibility with sedacs
+or for compatibility with [sedacs](https://github.com/lanl/sedacs)
 
 ```bash
 uv pip install -e ".[sedacs]"
@@ -29,6 +29,27 @@ To install DFTorch, run:
 ```bash
 pip install .
 ```
+
+## Running DFTorch
+
+DFTorch is a Python library, not a standalone command-line application. After
+installation, run it by importing `dftorch` from a Python script, a notebook,
+or an interactive Python session.
+
+Typical workflow:
+
+```bash
+source .venv/bin/activate
+python
+```
+
+```python
+from dftorch import Constants, Structure, ESDriver
+```
+
+For notebook-based usage, open one of the example notebooks in `experiments/`,
+for example `experiments/1_tutorial.ipynb`, and run the cells with your chosen
+Python environment.
 
 
 ## Requirements

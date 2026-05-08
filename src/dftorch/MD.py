@@ -1209,6 +1209,20 @@ class MDXLBatch:
 
         self.cuda_sync = True
 
+    @staticmethod
+    def _get_batch_structure_view(structure, batch_index: int):
+        class _BatchStructureView:
+            pass
+
+        view = _BatchStructureView()
+        view.Nats = structure.Nats
+        view.RX = structure.RX[batch_index]
+        view.RY = structure.RY[batch_index]
+        view.RZ = structure.RZ[batch_index]
+        view.TYPE = structure.TYPE[batch_index]
+        view.cell = None if structure.cell is None else structure.cell[batch_index]
+        return view
+
     def enable_langevin(self, gamma: float):
         """
         Enable Langevin thermostat.
@@ -1526,11 +1540,44 @@ class MDXLBatch:
             (self.Res_array, ResErr.detach().unsqueeze(0)), dim=0
         )
 
-        if md_step % dump_interval == 100000:
-            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {structure.mu0:.4f} eV\n"
-            write_XYZ_trajectory(
-                traj_filename + ".xyz", structure, comm_string, step=md_step
-            )
+        if md_step % dump_interval == 0:
+            for b in range(structure.batch_size):
+                structure_view = self._get_batch_structure_view(structure, b)
+                comm_string = (
+                    f"Etot = {Energ[b].item():.6f} eV, "
+                    f"Epot = {self.EPOT[b].item():.6f} eV, "
+                    f"Ekin = {self.EKIN[b].item():.6f} eV, "
+                    f"T = {Temperature[b].item():.2f} K, "
+                    f"Res = {ResErr[b].item():.6f}, "
+                    f"mu = {structure.mu0[b].item():.4f} eV"
+                )
+                file_prefix = f"{traj_filename}_batch_{b}"
+
+                write_XYZ_trajectory(
+                    file_prefix + ".xyz",
+                    structure_view,
+                    comm_string,
+                    step=md_step,
+                )
+                write_pdb_frame(
+                    file_prefix + ".pdb",
+                    structure_view,
+                    structure_view.cell,
+                    step=md_step,
+                    comment=comm_string,
+                    mode="a",
+                )
+                write_velocity_trajectory(
+                    file_prefix + ".vel",
+                    structure_view,
+                    self.VX[b],
+                    self.VY[b],
+                    self.VZ[b],
+                    charges=structure.q[b],
+                    n_charges=self.n[b],
+                    comment=comm_string,
+                    step=md_step,
+                )
         self.VX = (
             self.VX
             + 0.5 * dt * (self.F2V * structure.f_tot[:, 0] / structure.Mnuc)

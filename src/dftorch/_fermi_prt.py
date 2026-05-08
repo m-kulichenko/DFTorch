@@ -10,6 +10,22 @@ def _mu0_as_tensor(mu0: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor
     return torch.as_tensor(mu0, dtype=ref.dtype, device=ref.device)
 
 
+def _build_fermi_susceptibility(
+    fe: torch.Tensor,
+    de: torch.Tensor,
+    beta: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    diag = -beta * fe * (1.0 - fe)
+    off = de.abs() > 1e-12
+    safe_de = torch.where(off, de, torch.ones_like(de))
+
+    while diag.dim() < de.dim():
+        diag = diag.unsqueeze(-2)
+
+    chi = torch.where(off, (fe.unsqueeze(-1) - fe.unsqueeze(-2)) / safe_de, diag)
+    return chi, diag.squeeze(-2)
+
+
 def fermi_prt(
     H1: torch.Tensor,
     Te: float,
@@ -32,11 +48,7 @@ def fermi_prt(
     de = ei - ej  # (N,N)
 
     # Susceptibility kernel χ_ij = (f_i - f_j)/(e_i - e_j), with diagonal limit -β f(1-f)
-    chi = torch.empty_like(de)
-    off = de.abs() > 1e-12
-    chi[off] = (fe[:, None] - fe[None, :])[off] / de[off]
-    diag = -beta * fe * (1.0 - fe)  # (N,)
-    chi[~off] = diag.expand_as(de)[~off]
+    chi, diag = _build_fermi_susceptibility(fe, de, beta)
 
     # Response in eigenbasis
     X = chi * QH1Q
@@ -72,11 +84,7 @@ def fermi_prt_D1_only(
     QH1Q = Q.T @ H1 @ Q
     fe = 1.0 / (torch.exp(beta * (ev - mu0)) + 1.0)
     de = ev[:, None] - ev[None, :]
-    chi = torch.empty_like(de)
-    off = de.abs() > 1e-12
-    chi[off] = (fe[:, None] - fe[None, :])[off] / de[off]
-    diag = -beta * fe * (1.0 - fe)
-    chi[~off] = diag.expand_as(de)[~off]
+    chi, diag = _build_fermi_susceptibility(fe, de, beta)
     X = chi * QH1Q
     dN_dmu = diag.sum()
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
@@ -99,11 +107,7 @@ def fermi_prt_batch_D1_only(
     QH1Q = torch.matmul(Q.transpose(-1, -2), torch.matmul(H1, Q))
     fe = 1.0 / (torch.exp(beta * (ev - mu0.unsqueeze(-1))) + 1.0)
     de = ev[:, :, None] - ev[:, None, :]
-    chi = torch.empty_like(de)
-    off = de.abs() > 1e-12
-    chi[off] = (fe[:, :, None] - fe[:, None, :])[off] / de[off]
-    diag = -beta * fe * (1.0 - fe)
-    chi[~off] = diag.unsqueeze(1).expand_as(de)[~off]
+    chi, diag = _build_fermi_susceptibility(fe, de, beta)
     X = chi * QH1Q
     dN_dmu = diag.sum(dim=1)
     mask = (torch.abs(dN_dmu) > 1e-12).to(H1.dtype)
@@ -146,11 +150,7 @@ def fermi_prt_batch(
     de = ei - ej  # (N,N)
 
     # Susceptibility kernel χ_ij = (f_i - f_j)/(e_i - e_j), with diagonal limit -β f(1-f)
-    chi = torch.empty_like(de)
-    off = de.abs() > 1e-12
-    chi[off] = (fe[:, :, None] - fe[:, None, :])[off] / de[off]
-    diag = -beta * fe * (1.0 - fe)  # (N,)
-    chi[~off] = diag.unsqueeze(1).expand_as(de)[~off]
+    chi, diag = _build_fermi_susceptibility(fe, de, beta)
 
     # Response in eigenbasis
     X = chi * QH1Q

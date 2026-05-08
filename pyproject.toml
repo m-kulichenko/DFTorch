@@ -7,13 +7,14 @@ name = "dftorch"
 version = "0.1.5"
 description = "A Density Functional Tight Binding (SCC-DFTB) implementation in PyTorch"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "numpy",
   "scipy",
   "torch",
   "setuptools",
-  "pandas"]
+  "pandas",
+  "nvalchemi-toolkit-ops"]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "mypy", "pre-commit"]

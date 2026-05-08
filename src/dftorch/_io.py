@@ -1,11 +1,19 @@
 # ruff: noqa
+import os
 import numpy as np
 import re
 
 from dftorch._cell import _cell_to_pdb_cryst1
 
 
+def _ensure_parent_dir(filename):
+    parent = os.path.dirname(filename)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
+    _ensure_parent_dir(filename)
     with open(filename, "a+") as f:
         num_atoms = structure.Nats
         f.write(f"{structure.Nats}\n")
@@ -45,6 +53,7 @@ def write_velocity_trajectory(
     - VX/VY/VZ are written in the coordinate columns (31-54).
     - Extra aligned columns q and n are appended after the element field.
     """
+    _ensure_parent_dir(filename)
     with open(filename, "a+") as f:
         num_atoms = structure.Nats
 
@@ -228,6 +237,7 @@ def write_pdb_frame(filename, structure, cell=None, step=0, comment="", mode="a"
                                identical to the XYZ comment line content
     mode      : str            'w' for first frame, 'a' to append
     """
+    _ensure_parent_dir(filename)
     with open(filename, mode) as f:
         # CRYST1 — unit cell (required for periodic systems in PyMOL)
         if cell is not None:
