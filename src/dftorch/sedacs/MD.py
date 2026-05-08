@@ -3,7 +3,7 @@ import torch.distributed as dist
 import time
 import numpy as np
 
-from dftorch._io import write_XYZ_trajectory, write_pdb_frame
+from dftorch._io import write_XYZ_trajectory, write_pdb_frame, write_velocity_trajectory
 from dftorch.MD import MDXL, initialize_velocities
 from dftorch.ewald_pme import (
     calculate_PME_ewald,
@@ -191,6 +191,8 @@ class MDXL_Graph(MDXL):
             self.EPOT = structure.e_tot
 
         for md_step in range(num_steps):
+            if dist.get_rank() == 0:
+                print("########## Step = {:} ##########".format(md_step))
             if md_step > 0 and md_step % 100 == 0:
                 if dist.get_rank() == 0:
                     print("Graph repartition")
@@ -222,7 +224,7 @@ class MDXL_Graph(MDXL):
             if dist.get_rank() == 0:
                 g_max, g_min, g_sum, g_cnt = ch_stats.tolist()
                 print(
-                    f"  CH sizes (all ranks): max={int(g_max)}, min={int(g_min)}, avg={g_sum / g_cnt:.1f}"
+                    f"CH sizes (all ranks): max={int(g_max)}, min={int(g_min)}, avg={g_sum / g_cnt:.1f}"
                 )
 
             mu0, graphOnRank = self.step(
@@ -270,11 +272,6 @@ class MDXL_Graph(MDXL):
             if self.cuda_sync:
                 torch.cuda.synchronize()
             start_time = time.perf_counter()
-            print(
-                "########## Step = {:} ##########".format(
-                    md_step,
-                )
-            )
 
             self.EKIN = (
                 0.5
@@ -306,8 +303,8 @@ class MDXL_Graph(MDXL):
                 (self.Res_array, ResErr.detach().unsqueeze(0)), dim=0
             )
 
+            comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {mu0:.4f} eV"
             if md_step % dump_interval == 0:
-                comm_string = f"Etot = {Energ:.6f} eV, Epot = {self.EPOT:.6f} eV, Ekin = {self.EKIN:.6f} eV, T = {Temperature:.2f} K, Res = {ResErr:.6f}, mu = {mu0:.4f} eV\n"
                 write_XYZ_trajectory(
                     traj_filename, structure, comm_string, step=md_step
                 )
@@ -319,6 +316,20 @@ class MDXL_Graph(MDXL):
                     step=md_step,
                     comment=comm_string,
                     mode="a",
+                )
+
+                q_dump = structure.q
+                n_dump = self.n
+                write_velocity_trajectory(
+                    traj_filename + ".vel",
+                    structure,
+                    self.VX,
+                    self.VY,
+                    self.VZ,
+                    charges=q_dump,
+                    n_charges=n_dump,
+                    comment=comm_string,
+                    step=md_step,
                 )
 
             self.VX = (
@@ -690,16 +701,9 @@ class MDXL_Graph(MDXL):
             tic2_1 = time.perf_counter()
 
             print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}, t = {:.1f} s".format(
-                    Energ,
-                    self.EPOT.item(),
-                    self.EKIN.item(),
-                    Temperature.item(),
-                    ResErr.item(),
+                comm_string + ", t = {:.1f} s".format(
                     time.perf_counter() - start_time,
                 )
             )
-            print(torch.cuda.memory_allocated() / 1e9, "GB\n")
-            print()
 
         return mu0, graphOnRank

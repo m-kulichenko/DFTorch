@@ -91,7 +91,6 @@ def vectorized_nearestneighborlist(
 
     # ── Alchemi (cell_list) backend ───────────────────────────────────────
     if use_alchemi:
-        print("using alchemi")
         if not _ALCHEMI_AVAILABLE:
             raise ImportError(
                 "use_alchemi=True requires nvalchemiops. "

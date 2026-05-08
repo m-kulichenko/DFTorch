@@ -303,7 +303,6 @@ def scf(
 
     if dist.get_rank() == 0:
         f_tot = f_tot + f_rep + f_coul
-        torch.save(f_tot.cpu(), "f_tot.pt")
         structure.q = q_global
         structure.e_tot = e_tot
         structure.f_tot = f_tot
