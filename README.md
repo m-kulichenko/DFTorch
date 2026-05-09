@@ -34,8 +34,7 @@ pip install .
 
 ## Running DFTorch
 
-DFTorch is a Python library, not a standalone command-line application. After
-installation, run it by importing `dftorch` from a Python script, a notebook,
+After installation, run it by importing `dftorch` from a Python script, a notebook,
 or an interactive Python session.
 
 If you installed with `uv`, use `uv run` so commands execute inside the
@@ -84,10 +83,10 @@ See `experiments/1_tutorial.ipynb` for examples.
 - DFTB3 support, including diagonal-only and full third-order charge corrections.
 - Restricted and unrestricted/open-shell electronic structure calculations with finite-temperature occupations.
 - Non-periodic and periodic simulations with full Coulomb summation and Particle Mesh Ewald (PME) electrostatics.
+- SCF-free molecular dynamics ([XL-BOMD](https://link.springer.com/article/10.1140/epjb/s10051-021-00151-6)), including batched MD drivers.
 - [NVIDIA ALCHEMI](https://github.com/NVIDIA/nvalchemi-toolkit-ops) neighbor-list generation backend for accelerated neighbor-list construction.
 - Analytical and autograd forces and stress tensors.
 - Delta-SCF excited-state calculations for targeted non-Aufbau electronic excitations.
-- Extended-Lagrangian Born-Oppenheimer molecular dynamics ([XL-BOMD](https://link.springer.com/article/10.1140/epjb/s10051-021-00151-6)), including batched MD drivers.
 - NVT and NPT molecular dynamics with Langevin thermostat and Berendsen barostat.
 - Geometry optimization for atomic positions and periodic cells.
 - Implicit solvation ([GBSA/ALPB](https://pubs.acs.org/doi/full/10.1021/acs.jctc.1c00471)).
