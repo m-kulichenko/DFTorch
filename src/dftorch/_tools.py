@@ -1,16 +1,43 @@
+from __future__ import annotations
+
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 
 from ._elements import label, symbol_to_number
 
-
 _COMPILE_ENABLED = os.environ.get("DFTORCH_ENABLE_COMPILE", "0") != "0"
 
 
-def _maybe_compile(fn, fullgraph=False, dynamic=False):
+def _maybe_compile(
+    fn: Callable,
+    fullgraph: bool = False,
+    dynamic: bool = False,
+) -> Callable:
+    """Optionally wrap *fn* with ``torch.compile``.
+
+    Compilation is only performed when the environment variable
+    ``DFTORCH_ENABLE_COMPILE`` is set to a non-zero value.  Otherwise the
+    original callable is returned unchanged so that eager mode is preserved.
+
+    Parameters
+    ----------
+    fn : Callable
+        The function or ``nn.Module`` to (potentially) compile.
+    fullgraph : bool, default False
+        Passed directly to ``torch.compile``.  When ``True``, TorchDynamo
+        raises if the graph cannot be fully captured.
+    dynamic : bool, default False
+        Passed directly to ``torch.compile``.  When ``True``, enables
+        dynamic-shape tracing.
+
+    Returns
+    -------
+    Callable
+        Either the compiled function or the original *fn* unchanged.
+    """
     if not _COMPILE_ENABLED:
         return fn
     return torch.compile(fn, fullgraph=fullgraph, dynamic=dynamic)
@@ -178,7 +205,9 @@ def list_global_tensors(ns):
 
 
 def calculate_dist_dips(
-    pos_T, long_nbr_state, cutoff
+    pos_T: torch.Tensor,
+    long_nbr_state: Any,
+    cutoff: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute neighbor displacements, distances, and filtered neighbor indices.
@@ -224,7 +253,11 @@ def calculate_dist_dips(
     return disps.to(pos_T.dtype), dists.to(pos_T.dtype), nbr_inds
 
 
-def normalize_coulomb_settings(dftorch_params: dict, cell, context: str = "DFTorch"):
+def normalize_coulomb_settings(
+    dftorch_params: dict,
+    cell: Optional[torch.Tensor],
+    context: str = "DFTorch",
+) -> tuple[str, float]:
     """Validate/sanitize Coulomb settings for periodic and non-periodic runs.
 
     Rules enforced:

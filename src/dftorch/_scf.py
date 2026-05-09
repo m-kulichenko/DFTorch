@@ -1,31 +1,27 @@
-import torch
-
+import time
 from collections import deque
+from typing import Any, Dict, Optional, Tuple
 
+import torch
 
 from ._dm_fermi_x import (
     dm_fermi_x,
-    dm_fermi_x_os,
     dm_fermi_x_batch,
+    dm_fermi_x_os,
     nonaufbau_constraints,
 )
+from ._spin import get_h_spin
 
 # from ._kernel_fermi import _kernel_fermi
 from ._tools import calculate_dist_dips, normalize_coulomb_settings
 from ._xl_tools import (
-    kernel_update_lr,
-    kernel_update_lr_os,
-    kernel_update_lr_batch,
     calc_q,
-    calc_q_os,
     calc_q_batch,
+    calc_q_os,
+    kernel_update_lr,
+    kernel_update_lr_batch,
+    kernel_update_lr_os,
 )
-
-from ._spin import get_h_spin
-
-
-import time
-from typing import Optional, Dict, Any, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +281,9 @@ def SCFx(
     coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
     if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
+            calculate_alpha_and_num_grids,
             calculate_PME_ewald,
             init_PME_data,
-            calculate_alpha_and_num_grids,
         )
         from .ewald_pme.neighbor_list import NeighborState
 
@@ -605,9 +601,9 @@ def scf_x_os(
     coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
     if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
+            calculate_alpha_and_num_grids,
             calculate_PME_ewald,
             init_PME_data,
-            calculate_alpha_and_num_grids,
         )
         from .ewald_pme.neighbor_list import NeighborState
 
@@ -1246,9 +1242,9 @@ def delta_scf_x_os(
     coulomb_cutoff = dftorch_params.get("COULOMB_CUTOFF", 10.0)
     if dftorch_params["COUL_METHOD"] == "PME":
         from .ewald_pme import (
+            calculate_alpha_and_num_grids,
             calculate_PME_ewald,
             init_PME_data,
-            calculate_alpha_and_num_grids,
         )
         from .ewald_pme.neighbor_list import NeighborState
 

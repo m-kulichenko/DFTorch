@@ -95,6 +95,7 @@ See `experiments/1_tutorial.ipynb` for examples.
 - Hydrogen bond damping ([$γ^h$](https://pubs.acs.org/doi/10.1021/ct100684s) and [H5](https://pubs.acs.org/doi/10.1021/acs.jctc.7b00629)).
 - Automatic differentiation with respect to coordinates and selected model parameters for backpropagation workflows.
 - GPU acceleration through PyTorch, with optional compile-time optimization and differentiable tensor workflows.
+- [SEDACS](https://github.com/lanl/sedacs) interface for massively parallel simulations of up to 100,000 atoms.
 
 ### Public API
 
@@ -109,6 +110,7 @@ from dftorch import (
     ESDriverBatch,
     MDXL,
     MDXLBatch,
+    Optimizer,
 )
 ```
 

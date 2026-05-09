@@ -1,18 +1,51 @@
-import torch
+from typing import Any
+
 import numpy as np
-from ._elements import symbol_to_number, label, atomic_num, mass
-from ._io import read_xyz, read_pdb
-from ._tools import load_spinw_to_matrix, load_hubbard_derivs
+import torch
+
+from ._elements import atomic_num, label, mass, symbol_to_number
+from ._io import read_pdb, read_xyz
+from ._tools import load_hubbard_derivs, load_spinw_to_matrix
 
 
 class Constants(torch.nn.Module):
-    """
-    Constants used in DFTB
+    """Slater-Koster parameter database and element-level constants for DFTB.
+
+    Reads the Slater-Koster files (SKF) for all element pairs present in the
+    input structure, and exposes the resulting tensors (Hamiltonian splines,
+    repulsive splines, on-site energies, Hubbard U values, etc.) as registered
+    ``nn.Parameter`` buffers so they move to the correct device alongside the
+    model.
+
+    Parameters
+    ----------
+    dftorch_params : dict
+        Simulation parameter dictionary.  Required keys:
+
+        ``SKFPATH`` : str
+            Path to the directory containing ``.skf`` files (e.g. ``mio-1-1/``).
+        ``FILENAME`` : str or list of str
+            Path(s) to the input structure file(s) used to determine which
+            element pairs to load.
+
+        Optional keys:
+
+        ``DFTB3`` : bool, default False
+            Load Hubbard-derivative data for third-order corrections.
+        ``MAGNETIC_HUBBARD_LDEP`` : bool, default False
+            Use shell-dependent (l-dependent) Hubbard U parameters.
+        ``GRAD_PARAM`` : bool, default False
+            Enable parameter gradients (for ML-SK fitting workflows).
     """
 
-    def __init__(self, dftorch_params):
-        """
-        Constructor
+    def __init__(self, dftorch_params: dict[str, Any]) -> None:
+        """Load Slater-Koster data and element constants for the active system.
+
+        Parameters
+        ----------
+        dftorch_params : dict[str, Any]
+            Simulation parameter dictionary used to locate SKF files, input
+            structures, and optional third-order / magnetic-Hubbard data.
         """
 
         super().__init__()
@@ -147,15 +180,10 @@ class Constants(torch.nn.Module):
 
 
 class ConstantsTest(torch.nn.Module):
-    """
-    Class for debugging.
-    Constants used in DFTB.
-    """
+    """Lightweight in-memory constants table used for debugging and tests."""
 
-    def __init__(self):
-        """
-        Constructor
-        """
+    def __init__(self) -> None:
+        """Initialise the debugging constants tables."""
 
         super().__init__()
 

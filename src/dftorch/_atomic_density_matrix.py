@@ -129,7 +129,10 @@ def atomic_density_matrix_batch(
     """
     device = H_INDEX_START.device
     B = H_INDEX_START.shape[0]
-    assert B == batch_size, "batch_size mismatch"
+    if B != batch_size:
+        raise ValueError(
+            f"batch_size mismatch: H_INDEX_START has {B} entries, expected {batch_size}"
+        )
     D_atomic = torch.zeros(
         B, HDIM, device=device, dtype=torch.get_default_dtype()
     )  # force float dtype

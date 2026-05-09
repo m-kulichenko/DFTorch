@@ -1,12 +1,24 @@
 from __future__ import annotations
 
-
 import torch
 
 from ._tools import _maybe_compile
 
 
 def _mu0_as_tensor(mu0: float | torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+    """Ensure *mu0* is a scalar tensor compatible with *ref*.
+
+    Parameters
+    ----------
+    mu0 : float or torch.Tensor
+        Chemical potential value (eV).
+    ref : torch.Tensor
+        Reference tensor used to infer ``dtype`` and ``device``.
+
+    Returns
+    -------
+    torch.Tensor, scalar
+    """
     return torch.as_tensor(mu0, dtype=ref.dtype, device=ref.device)
 
 
@@ -15,6 +27,32 @@ def _build_fermi_susceptibility(
     de: torch.Tensor,
     beta: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the Fermi–Dirac susceptibility kernel χ_{ij}.
+
+    For off-diagonal pairs (e_i ≠ e_j)::
+
+        χ_{ij} = (f_i - f_j) / (e_i - e_j)
+
+    On the diagonal (e_i = e_j), the limit is taken::
+
+        χ_{ii} = -β f_i (1 - f_i)
+
+    Parameters
+    ----------
+    fe : torch.Tensor, shape (N,)
+        Fermi–Dirac occupation numbers f(e_i).
+    de : torch.Tensor, shape (N, N)
+        Pairwise eigenvalue differences e_i - e_j.
+    beta : float
+        Inverse temperature β = 1 / (k_B T) in eV⁻¹.
+
+    Returns
+    -------
+    chi : torch.Tensor, shape (N, N)
+        Susceptibility matrix.
+    diag : torch.Tensor, shape (N,)
+        Diagonal values -β f_i (1 - f_i).
+    """
     diag = -beta * fe * (1.0 - fe)
     off = de.abs() > 1e-12
     safe_de = torch.where(off, de, torch.ones_like(de))
@@ -192,10 +230,40 @@ fermi_prt_batch_D1_only = _maybe_compile(
 fermi_prt_batch = _maybe_compile(fermi_prt_batch)
 
 
-def Canon_DM_PRT(F1, T, Q, ev, mu_0, m):
-    """
-    canonical density matrix perturbation theory
-    Alg.2 from https://pubs.acs.org/doi/full/10.1021/acs.jctc.0c00264
+def Canon_DM_PRT(
+    F1: torch.Tensor,
+    T: float,
+    Q: torch.Tensor,
+    ev: torch.Tensor,
+    mu_0: float | torch.Tensor,
+    m: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run canonical density-matrix perturbation theory.
+
+    Implements Algorithm 2 from Niklasson and co-workers for the first-order
+    response of the finite-temperature density matrix in the canonical ensemble.
+
+    Parameters
+    ----------
+    F1 : torch.Tensor
+        First-order Hamiltonian perturbation in the AO basis.
+    T : float
+        Electronic temperature in Kelvin.
+    Q : torch.Tensor
+        Eigenvectors of the unperturbed orthogonal Hamiltonian.
+    ev : torch.Tensor
+        Unperturbed eigenvalues.
+    mu_0 : float or torch.Tensor
+        Zeroth-order chemical potential.
+    m : int
+        Number of purification iterations.
+
+    Returns
+    -------
+    p0 : torch.Tensor
+        Purified zeroth-order occupation matrix in the eigenbasis.
+    P1 : torch.Tensor
+        First-order density-matrix response in the AO basis.
     """
 
     mu0 = mu_0  # Intial guess

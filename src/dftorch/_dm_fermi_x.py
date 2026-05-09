@@ -336,9 +336,7 @@ dm_fermi_x_batch_eager = dm_fermi_x_batch
 
 dm_fermi_x = _maybe_compile(dm_fermi_x)
 dm_fermi_x_os = _maybe_compile(dm_fermi_x_os)
-dm_fermi_x_os_shared = _maybe_compile(
-    dm_fermi_x_os_shared
-)
+dm_fermi_x_os_shared = _maybe_compile(dm_fermi_x_os_shared)
 dm_fermi_x_batch = _maybe_compile(dm_fermi_x_batch)
 
 
@@ -399,6 +397,4 @@ def nonaufbau_constraints(
 
 
 nonaufbau_constraints_eager = nonaufbau_constraints
-nonaufbau_constraints = _maybe_compile(
-    nonaufbau_constraints
-)
+nonaufbau_constraints = _maybe_compile(nonaufbau_constraints)

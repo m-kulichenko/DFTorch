@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import math
-from typing import Optional, Dict  # <-- add Optional, Dict
-
+from typing import Dict, Optional  # <-- add Optional, Dict
 
 import torch
 
 from ._coulomb_matrix import (
-    _VDW_RADII_PM,
-    _H5_DEFAULT_SCALING,
     _GAUSS_WIDTH_FACTOR,
+    _H5_DEFAULT_SCALING,
+    _VDW_RADII_PM,
 )
 from ._tools import _maybe_compile
 

@@ -1,9 +1,14 @@
+from __future__ import annotations
+
+from typing import Any
+
 import torch
 
 from ._tools import _maybe_compile
 
 
 def _entropy_eps(dtype: torch.dtype) -> float:
+    """Return a numerically stable occupation cutoff for entropy terms."""
     if dtype == torch.float32:
         return 1e-7
     if dtype == torch.float64:
@@ -25,9 +30,16 @@ def energy(
     Rz: torch.Tensor,
     f: torch.Tensor,
     Te: float,
-    dU_dq: torch.Tensor = None,
-    thirdorder=None,
-):
+    dU_dq: torch.Tensor | None = None,
+    thirdorder: Any | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """
     Compute the total DFTB energy in the standard SCC formulation.
 
@@ -197,9 +209,16 @@ def energy_shadow(
     Rz: torch.Tensor,
     f: torch.Tensor,
     Te: float,
-    dU_dq: torch.Tensor = None,
-    thirdorder=None,
-):
+    dU_dq: torch.Tensor | None = None,
+    thirdorder: Any | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """
     Compute the total “shadow” DFTB energy.
 
@@ -239,7 +258,11 @@ def energy_shadow(
     Te : float
         Electronic temperature in Kelvin.
     dU_dq : torch.Tensor, optional
-        Derivative of the Hubbard U with respect to charge, shape (Nats,). If provided, adds the DFTB3 third-order correction to the Coulomb energy, using ``n
+        Derivative of the Hubbard U with respect to charge, shape ``(Nats,)``.
+        If provided, adds the DFTB3 third-order correction evaluated with the
+        shadow-charge formulation.
+    thirdorder : object, optional
+        Full third-order correction object exposing ``get_energy_xlbomd``.
 
     Returns
     -------
@@ -251,8 +274,10 @@ def energy_shadow(
         Shadow Coulomb (electrostatic) energy (scalar tensor).
     Edipole : torch.Tensor
         Interaction energy with the external electric field (scalar tensor).
+    E_entropy : torch.Tensor
+        Finite-temperature entropy contribution to the total energy.
     S_ent : torch.Tensor
-        Electronic entropy contribution (dimensionless, in units of k_B).
+        Electronic entropy contribution in units of ``k_B``.
 
     Notes
     -----

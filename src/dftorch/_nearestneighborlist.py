@@ -1,10 +1,10 @@
-import torch
 import time
-from typing import Union, Tuple
+from typing import Tuple, Union
 
-from ._tools import ordered_pairs_from_TYPE
+import torch
+
 from ._cell import normalize_cell, normalize_cell_batch
-
+from ._tools import ordered_pairs_from_TYPE
 
 try:
     from nvalchemiops.torch.neighbors import cell_list as _alchemi_cell_list
@@ -394,28 +394,60 @@ def vectorized_nearestneighborlist(
 
 # @torch.compile(dynamic=False)
 def vectorized_nearestneighborlist_batch(
-    TYPE,
-    Rx,
-    Ry,
-    Rz,
-    cell,
-    Rcut,
-    N,
+    TYPE: torch.Tensor,
+    Rx: torch.Tensor,
+    Ry: torch.Tensor,
+    Rz: torch.Tensor,
+    cell: Union[torch.Tensor, Tuple[float, float, float]],
+    Rcut: float,
+    N: int,
     const,
-    upper_tri_only=True,
-    remove_self_neigh=False,
-    min_image_only=False,
-    verbose=False,
-):
-    """
-    Batched version of vectorized_nearestneighborlist.
-    TYPE, Rx, Ry, Rz have shape (B, N).
+    upper_tri_only: bool = True,
+    remove_self_neigh: bool = False,
+    min_image_only: bool = False,
+    verbose: bool = False,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Compute a batched periodic neighbor list.
 
-    cell may be:
-    - shape (3,) for one shared orthorhombic box
-    - shape (3,3) for one shared triclinic cell
-    - shape (B,3) for per-structure orthorhombic boxes
-    - shape (B,3,3) for per-structure triclinic cells
+    Parameters
+    ----------
+    TYPE, Rx, Ry, Rz : torch.Tensor
+        Batched atom types and Cartesian coordinates with shape ``(B, N)``.
+    cell : torch.Tensor or tuple[float, float, float]
+        Periodic cell specification. Supported shapes are ``(3,)``, ``(3, 3)``,
+        ``(B, 3)``, or ``(B, 3, 3)``.
+    Rcut : float
+        Neighbor cutoff distance.
+    N : int
+        Number of atoms per structure.
+    const : object
+        Constants database providing labels and pair-ordering metadata.
+    upper_tri_only : bool, default True
+        If ``True``, keep only ``j > i`` pairs.
+    remove_self_neigh : bool, default False
+        If ``True``, exclude self-neighbors explicitly.
+    min_image_only : bool, default False
+        If ``True``, keep only the minimum-image neighbor per ``(i, j)`` pair.
+    verbose : bool, default False
+        Print timing information.
+
+    Returns
+    -------
+    tuple[torch.Tensor, ...]
+        Batched dense neighbor-list outputs matching the single-structure API.
     """
     start_time1 = time.perf_counter()
     B = TYPE.shape[0]

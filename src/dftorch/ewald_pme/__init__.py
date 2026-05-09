@@ -1,15 +1,17 @@
-# ruff: noqa
+from __future__ import annotations
+
 import logging
+
 import torch
 
 from . import ewald_torch as torch_impl
 from .util import (
-    calculate_num_kvecs_dynamic,
-    calculate_num_kvecs_ch_indep,
-    determine_alpha,
-    determine_alpha_ch_indep,
     CONV_FACTOR,
     calculate_alpha_and_num_grids,
+    calculate_num_kvecs_ch_indep,
+    calculate_num_kvecs_dynamic,
+    determine_alpha,
+    determine_alpha_ch_indep,
 )
 
 # Initialize the backend variable
@@ -45,23 +47,47 @@ ewald_kspace_part2 = impl.ewald_kspace_part2
 ewald_self_energy = torch_impl.ewald_self_energy
 
 
-def construct_kspace(cell, kcounts, cutoff, alpha):
-    # only transpose if trtion is active and data is on GPU
+def construct_kspace(
+    cell: torch.Tensor,
+    kcounts: list[int],
+    cutoff: float,
+    alpha: float,
+) -> torch.Tensor:
+    """Construct reciprocal-space vectors for the active Ewald backend.
+
+    Parameters
+    ----------
+    cell : torch.Tensor
+        Real-space cell matrix.
+    kcounts : list[int]
+        Number of reciprocal vectors along each lattice direction.
+    cutoff : float
+        Real-space cutoff radius.
+    alpha : float
+        Ewald screening parameter.
+
+    Returns
+    -------
+    torch.Tensor
+        Reciprocal-space vectors formatted for the active backend.
+    """
+    # Only transpose when the Triton backend is active on a GPU device.
     transpose_kvec = is_triton_available and (cell.device.type != "cpu")
     return torch_impl.construct_kspace(
         cell, kcounts, cutoff, alpha, transpose_kvec=transpose_kvec
     )
 
 
-def is_triton_active():
+def is_triton_active() -> bool:
+    """Return whether the Triton Ewald backend is active."""
     return is_triton_available
 
 
 # at the end because of the circular dependency
-from .PME_torch import (
-    init_PME_data,
+from .PME_torch import (  # noqa: E402
     calculate_PME_energy,
-    calculate_PME_kspace_stress,
-    map_charges_to_grid,
     calculate_PME_ewald,
+    calculate_PME_kspace_stress,
+    init_PME_data,
+    map_charges_to_grid,
 )

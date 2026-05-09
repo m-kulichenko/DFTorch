@@ -1,7 +1,8 @@
 import math
+from typing import Callable, List, Optional, Tuple
+
 import numpy as np
 import torch
-from typing import Callable, Optional, Tuple, List
 
 __all__ = [
     "calculate_num_kvecs_dynamic",
@@ -18,9 +19,23 @@ CONV_FACTOR = 14.399645
 
 
 @torch.compile
-def mixed_precision_sum(data, dim=None):
-    """
-    Util function for mixed precision summation (with double accumulation)
+def mixed_precision_sum(
+    data: torch.Tensor,
+    dim: Optional[int] = None,
+) -> torch.Tensor:
+    """Sum values with float64 accumulation before casting back.
+
+    Parameters
+    ----------
+    data : torch.Tensor
+        Input tensor to reduce.
+    dim : int, optional
+        Dimension along which to sum. If ``None``, all elements are reduced.
+
+    Returns
+    -------
+    torch.Tensor
+        Sum in the original dtype of ``data``.
     """
     return torch.sum(data, dtype=torch.float64, dim=dim).to(data.dtype)
 

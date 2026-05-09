@@ -1,5 +1,7 @@
-import torch
 import time
+
+import torch
+
 from ._slater_koster_pair import (
     Slater_Koster_Pair_SKF_vectorized,
     Slater_Koster_Pair_SKF_vectorized_batch,

@@ -12,6 +12,7 @@ Vectorized implementation -- all O(N^2) pair loops replaced by tensor ops.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 
@@ -138,7 +139,7 @@ _VDW_TABLE = torch.tensor(VDW_D3_ANG, dtype=torch.float64)
 # ---------------------------------------------------------------------------
 # Lebedev-Laikov 230-point angular grid
 # ---------------------------------------------------------------------------
-def _lebedev_230():
+def _lebedev_230() -> tuple[torch.Tensor, torch.Tensor]:
     """230-point Lebedev-Laikov grid. Weights sum to 1.0 (DFTB+ convention)."""
     import numpy as np
 
@@ -289,7 +290,8 @@ def _lebedev_230():
 
     pts_arr = np.array(pts, dtype=np.float64)
     wts_arr = np.array(wts, dtype=np.float64)
-    assert pts_arr.shape == (230, 3)
+    if pts_arr.shape != (230, 3):
+        raise RuntimeError(f"Expected Lebedev grid shape (230, 3), got {pts_arr.shape}")
     return (
         torch.tensor(pts_arr, dtype=torch.float64),
         torch.tensor(wts_arr, dtype=torch.float64),
@@ -299,9 +301,9 @@ def _lebedev_230():
 # ---------------------------------------------------------------------------
 # Parameter file reader  (gbsafile.F90 :: readParamGBSA)
 # ---------------------------------------------------------------------------
-def read_param_file(filepath):
+def read_param_file(filepath: str) -> dict[str, Any]:
     """
-    Read a DFTB+ GBSA/ALPB parameter file (e.g. param_alpb_h2o.txt).
+    Read a GBSA/ALPB parameter file (e.g. param_alpb_h2o.txt).
 
     File format (gbsafile.F90):
       Lines 1-8: global floats
@@ -334,7 +336,7 @@ def read_param_file(filepath):
 # ===================================================================
 # Vectorised helper: "standard" pair integral  (no overlap)
 # ===================================================================
-def _std(dist, rho_j):
+def _std(dist: torch.Tensor, rho_j: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Standard (non-overlapping) volume integral g_i and derivative dg_i/dr.
 
@@ -357,7 +359,9 @@ def _std(dist, rho_j):
 # ===================================================================
 # Vectorised helper: "overlap" pair integral
 # ===================================================================
-def _ovl(dist, rho_j, vdw_i):
+def _ovl(
+    dist: torch.Tensor, rho_j: torch.Tensor, vdw_i: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Overlapping volume integral g_i and dg_i for the case
     dist + rho_j > vdw_i  (otherwise g=0).
@@ -390,7 +394,7 @@ def _ovl(dist, rho_j, vdw_i):
 # ===================================================================
 # Differentiable helpers (value only — autograd handles derivatives)
 # ===================================================================
-def _std_g(dist, rho_j):
+def _std_g(dist: torch.Tensor, rho_j: torch.Tensor) -> torch.Tensor:
     """Standard (non-overlapping) volume integral g — differentiable.
 
     Safe for all dist > 0: clamps (dist - rho_j) to avoid log of
@@ -404,7 +408,9 @@ def _std_g(dist, rho_j):
     return rho_j / ab + 0.5 * torch.log(am / ap) / dist
 
 
-def _ovl_g(dist, rho_j, vdw_i):
+def _ovl_g(
+    dist: torch.Tensor, rho_j: torch.Tensor, vdw_i: torch.Tensor
+) -> torch.Tensor:
     """Overlapping volume integral g — differentiable.
 
     Safe for all dist > 0: clamps (dist + rho_j) away from zero.
@@ -440,8 +446,31 @@ class GBSA:
     """
 
     def __init__(
-        self, coords, species, device, param_file, alpb=False, alpha_alpb=0.571412
-    ):
+        self,
+        coords: torch.Tensor,
+        species: torch.Tensor,
+        device: torch.device | str,
+        param_file: str,
+        alpb: bool = False,
+        alpha_alpb: float = 0.571412,
+    ) -> None:
+        """Initialise a GBSA or ALPB solvation model.
+
+        Parameters
+        ----------
+        coords : torch.Tensor
+            Cartesian coordinates with shape ``(N, 3)`` in Angstrom.
+        species : torch.Tensor
+            Atomic numbers with shape ``(N,)``.
+        device : torch.device or str
+            Device used for all internal tensors.
+        param_file : str
+            Path to the DFTB+ solvation parameter file.
+        alpb : bool, default False
+            Enable the ALPB correction.
+        alpha_alpb : float, default 0.571412
+            ALPB alpha parameter.
+        """
         self.device = device
         self.nAtom = coords.shape[0]
         self.coords = coords.to(device)
@@ -1254,7 +1283,14 @@ class GBSABatch:
         One GBSA object per batch element (already constructed).
     """
 
-    def __init__(self, gbsa_list: list):
+    def __init__(self, gbsa_list: list[GBSA]) -> None:
+        """Initialise a batched GBSA wrapper from per-structure objects.
+
+        Parameters
+        ----------
+        gbsa_list : list[GBSA]
+            One GBSA object per batch element.
+        """
         self.B = len(gbsa_list)
         self._list = gbsa_list  # keep originals for rebuild
         g0 = gbsa_list[0]
@@ -1279,7 +1315,7 @@ class GBSABatch:
         self.free_energy_shift = g0.free_energy_shift  # scalar
 
     @classmethod
-    def from_single(cls, gbsa_single, batch_size):
+    def from_single(cls, gbsa_single: GBSA, batch_size: int) -> GBSABatch:
         """Create a GBSABatch by replicating a single GBSA object B times.
 
         This avoids the expensive per-structure Born radii / SASA / Born matrix
@@ -1350,7 +1386,7 @@ class GBSABatch:
         ).squeeze(-1)
         return shift  # (B,N)
 
-    def get_shifts_single(self, q_single, idx):
+    def get_shifts_single(self, q_single: torch.Tensor, idx: int) -> torch.Tensor:
         """Shift for a single batch element (used in Krylov active-mask path).
         q_single: (N,), idx: int → (N,)."""
         return self._list[idx].get_shifts(q_single)
@@ -1506,24 +1542,34 @@ class GBSABatch:
 # ---------------------------------------------------------------------------
 # Convenience function for ESDriver
 # ---------------------------------------------------------------------------
-def create_gbsa(structure, device, param_file=None, solvation_model="gbsa"):
+def create_gbsa(
+    structure,
+    device: torch.device | str,
+    param_file: str | None = None,
+    solvation_model: str = "gbsa",
+) -> GBSA:
     """Create a GBSA/ALPB object from a DFTorch Structure.
 
     Parameters
     ----------
     structure : Structure
-        DFTorch Structure object.
-    device : torch.device
-        Device for tensors.
-    param_file : str or None
-        Explicit path to parameter file.
-    solvation_model : str
+        DFTorch structure object.
+    device : torch.device or str
+        Device used for the constructed tensors.
+    param_file : str, optional
+        Explicit path to the solvation parameter file.
+    solvation_model : str, default "gbsa"
         ``"alpb"`` — Analytical Linearized Poisson-Boltzmann.
         ``"gbsa"`` (default) — plain Generalized Born + SASA (no ALPB correction).
         The choice determines (a) which parameter file is loaded when
         *param_file* is None, and (b) whether the ALPB correction term
         is applied.  The two models use **different** fitted parameters
         and must not be mixed.
+
+    Returns
+    -------
+    GBSA
+        Solvation model object configured for ``structure``.
     """
     solvation_model = solvation_model.lower()
     if solvation_model not in ("alpb", "gbsa"):

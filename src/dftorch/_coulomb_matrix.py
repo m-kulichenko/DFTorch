@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Optional, Dict  # <-- add Optional, Dict
+from typing import Dict, Optional  # <-- add Optional, Dict
 
 import torch
 
 from ._tools import _maybe_compile
-
 
 # ── Van der Waals radii (Bondi / Mantina) in Angstrom ───────────────────
 # Source: Bondi, J. Phys. Chem. 68:441 (1964);

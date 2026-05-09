@@ -100,7 +100,7 @@ class SimpleDftD3:
 
     def __init__(
         self,
-        atomic_numbers,
+        atomic_numbers: list[int] | np.ndarray | torch.Tensor,
         s6: float = 1.0,
         s8: float = 0.5883,
         a1: float = 0.5719,
@@ -108,9 +108,9 @@ class SimpleDftD3:
         s10: float = 0.0,
         cutoff_cn: float = _CUTOFF_CN,
         cutoff_disp: float = _CUTOFF_DISP,
-        device=None,
-        dtype=None,
-    ):
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> None:
         if device is None:
             device = torch.device("cpu")
         if dtype is None:
@@ -750,28 +750,32 @@ SimpleDftD3._get_forces_batch_analytical = _maybe_compile(
 
 
 def create_dftd3(
-    atomic_numbers,
+    atomic_numbers: list[int] | np.ndarray | torch.Tensor,
     s6: float = 1.0,
     s8: float = 0.5883,
     a1: float = 0.5719,
     a2: float = 3.6017,
-    device=None,
-    dtype=None,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
 ) -> SimpleDftD3:
     """
     Create a SimpleDftD3 dispersion calculator.
 
     Parameters
     ----------
-    atomic_numbers : list or array of int
+    atomic_numbers : list[int] or array-like
         Atomic numbers of each atom.
     s6, s8, a1, a2 : float
         BJ-damping parameters.  ``a2`` in **Bohr**.
-    device, dtype : optional
+    device : torch.device, optional
+        Device used for the internal tensors.
+    dtype : torch.dtype, optional
+        Floating-point dtype used for the internal tensors.
 
     Returns
     -------
-    SimpleDftD3 instance
+    SimpleDftD3
+        Dispersion calculator configured for the supplied species.
     """
     return SimpleDftD3(
         atomic_numbers=atomic_numbers,

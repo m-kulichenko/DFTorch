@@ -1,7 +1,10 @@
+from typing import Any
+
 import torch
-from ._io import read_xyz, read_pdb
+
 from ._atomic_density_matrix import atomic_density_matrix, atomic_density_matrix_batch
 from ._cell import normalize_cell, normalize_cell_batch, wrap_positions
+from ._io import read_pdb, read_xyz
 
 
 class Structure(torch.nn.Module):
@@ -56,15 +59,36 @@ class Structure(torch.nn.Module):
 
     def __init__(
         self,
-        dftorch_params,
-        const,
+        dftorch_params: dict,
+        const: Any,
         device: str = "cpu",
-        species=None,
-        coordinates=None,
+        species: torch.Tensor | None = None,
+        coordinates: torch.Tensor | None = None,
         ignore_spin: bool = False,
         *args,
         **kwargs,
     ) -> None:
+        """Initialise a single-structure DFTB container.
+
+        Parameters
+        ----------
+        dftorch_params : dict
+            Calculation parameters, including the input filename, electronic
+            temperature, optional cell, and charge/spin settings.
+        const : Any
+            Constants database providing basis dimensions, masses, Hubbard
+            parameters, and on-site energies.
+        device : str, default "cpu"
+            Device used to allocate tensors.
+        species : torch.Tensor, optional
+            Atomic numbers with shape ``(1, Nats)`` or ``(Nats,)``. When omitted,
+            species are read from ``dftorch_params["FILENAME"]``.
+        coordinates : torch.Tensor, optional
+            Cartesian coordinates with shape ``(1, Nats, 3)`` or ``(Nats, 3)`` in
+            Angstrom. When omitted, coordinates are read from the input file.
+        ignore_spin : bool, default False
+            Skip the even-electron check for closed-shell systems.
+        """
         super().__init__(*args, **kwargs)
 
         self.req_grad_xyz = dftorch_params.get("GRAD_XYZ", False)
@@ -321,13 +345,27 @@ class StructureBatch(torch.nn.Module):
 
     def __init__(
         self,
-        dftorch_params,
-        const,
+        dftorch_params: dict,
+        const: Any,
         device: str = "cpu",
         ignore_spin: bool = False,
         *args,
         **kwargs,
     ) -> None:
+        """Initialise a batched structure container.
+
+        Parameters
+        ----------
+        dftorch_params : dict
+            Calculation parameters with ``FILENAME`` set to a list of input files.
+        const : Any
+            Constants database providing basis dimensions, masses, Hubbard
+            parameters, and on-site energies.
+        device : str, default "cpu"
+            Device used to allocate tensors.
+        ignore_spin : bool, default False
+            Skip the even-electron check for closed-shell systems.
+        """
         super().__init__(*args, **kwargs)
 
         self.batch_size = len(dftorch_params["FILENAME"])

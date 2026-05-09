@@ -1,8 +1,8 @@
 """Patch _slater_koster_pair.py for ML direct injection."""
 
+import pathlib
 import re
 import sys
-import pathlib
 
 FILE = pathlib.Path(
     "/home/maxim/Projects/DFTB/DFTorch/src/dftorch/_slater_koster_pair.py"

@@ -33,7 +33,6 @@ from typing import Optional
 
 import torch
 
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Low-level helper functions (translated from DFTB+ thirdorder.F90)
 # All inputs/outputs are in *atomic units* (Hartree, Bohr) unless noted.
@@ -44,7 +43,7 @@ _MIN_HUB_DIFF = 1.0e-6  # Hartree
 
 
 # ── f(τ_A, τ_B, r) and derivatives ──────────────────────────────────────
-def _ff(tauA, tauB, r):
+def _ff(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """f(τ_A, τ_B, r) – auxiliary for short-range γ when τ_A ≠ τ_B."""
     t2 = tauA**2 - tauB**2
     return 0.5 * tauA * tauB**4 / t2**2 - (tauB**6 - 3.0 * tauA**2 * tauB**4) / (
@@ -52,7 +51,7 @@ def _ff(tauA, tauB, r):
     )
 
 
-def _fpT1(tauA, tauB, r):
+def _fpT1(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """df/dτ_A."""
     t2 = tauA**2 - tauB**2
     return -0.5 * (
@@ -60,86 +59,88 @@ def _fpT1(tauA, tauB, r):
     ) / t2**3 - 12.0 * tauA**3 * tauB**4 / (t2**4 * r)
 
 
-def _fpT2(tauB, tauA, r):
+def _fpT2(tauB: torch.Tensor, tauA: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """df(τ_B,τ_A,r)/dτ_A – note argument ordering."""
     t2 = tauB**2 - tauA**2
     return 2.0 * tauB**3 * tauA**3 / t2**3 + 12.0 * tauB**4 * tauA**3 / (t2**4 * r)
 
 
 # ── g(τ, r) and derivatives ─────────────────────────────────────────────
-def _gg(tau, r):
+def _gg(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """g(τ, r) – auxiliary for short-range γ when τ_A = τ_B = τ."""
     return (48.0 + 33.0 * tau * r + 9.0 * tau**2 * r**2 + tau**3 * r**3) / (48.0 * r)
 
 
-def _gpT(tau, r):
+def _gpT(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dg/dτ."""
     return (33.0 + 18.0 * tau * r + 3.0 * tau**2 * r**2) / 48.0
 
 
 # ── short-range functions S₁, S₂ ────────────────────────────────────────
-def _short_1(tauA, tauB, r):
+def _short_1(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """S₁(τ_A,τ_B,r): short-range SCC when τ_A ≠ τ_B and r ≠ 0."""
     return torch.exp(-tauA * r) * _ff(tauA, tauB, r) + torch.exp(-tauB * r) * _ff(
         tauB, tauA, r
     )
 
 
-def _short_2(tau, r):
+def _short_2(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """S₂(τ,r): short-range SCC when τ_A = τ_B = τ and r ≠ 0."""
     return torch.exp(-tau * r) * _gg(tau, r)
 
 
-def _shortpT_1(tauA, tauB, r):
+def _shortpT_1(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dS₁/dτ_A."""
     return torch.exp(-tauA * r) * (
         _fpT1(tauA, tauB, r) - r * _ff(tauA, tauB, r)
     ) + torch.exp(-tauB * r) * _fpT2(tauB, tauA, r)
 
 
-def _shortpT_2(tau, r):
+def _shortpT_2(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dS₂/dτ."""
     return torch.exp(-tau * r) * (_gpT(tau, r) - r * _gg(tau, r))
 
 
 # ── Short-range radial derivatives (for gradient) ───────────────────────
-def _fpR(tauA, tauB, r):
+def _fpR(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """df/dr."""
     t2 = tauA**2 - tauB**2
     return (tauB**6 - 3.0 * tauB**4 * tauA**2) / (r**2 * t2**3)
 
 
-def _gpR(tau, r):
+def _gpR(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dg/dr."""
     return (-48.0 + 9.0 * (tau * r) ** 2 + 2.0 * (tau * r) ** 3) / (48.0 * r**2)
 
 
-def _shortpR_1(tauA, tauB, r):
+def _shortpR_1(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dS₁/dr."""
     return torch.exp(-tauA * r) * (
         _fpR(tauA, tauB, r) - tauA * _ff(tauA, tauB, r)
     ) + torch.exp(-tauB * r) * (_fpR(tauB, tauA, r) - tauB * _ff(tauB, tauA, r))
 
 
-def _shortpR_2(tau, r):
+def _shortpR_2(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """dS₂/dr."""
     return torch.exp(-tau * r) * (_gpR(tau, r) - tau * _gg(tau, r))
 
 
 # ── dτ/dU derivatives for gamma3 ────────────────────────────────────────
-def _fpT1pR(tauA, tauB, r):
+def _fpT1pR(tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """d²f/dτ_A·dr."""
     t2 = tauA**2 - tauB**2
     return 12.0 * tauA**3 * tauB**4 / (r**2 * t2**4)
 
 
-def _fpT2pR(tauB, tauA, r):
+def _fpT2pR(tauB: torch.Tensor, tauA: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """d²f(τ_B,τ_A,r)/dτ_A·dr."""
     t2 = tauB**2 - tauA**2
     return -12.0 * tauA**3 * tauB**4 / (r**2 * t2**4)
 
 
-def _shortpTpR_1(tauA, tauB, r):
+def _shortpTpR_1(
+    tauA: torch.Tensor, tauB: torch.Tensor, r: torch.Tensor
+) -> torch.Tensor:
     """d²S₁/dτ_A·dr."""
     return torch.exp(-tauA * r) * (
         _ff(tauA, tauB, r) * (tauA * r - 1.0)
@@ -149,7 +150,7 @@ def _shortpTpR_1(tauA, tauB, r):
     ) + torch.exp(-tauB * r) * (_fpT2pR(tauB, tauA, r) - tauB * _fpT2(tauB, tauA, r))
 
 
-def _shortpTpR_2(tau, r):
+def _shortpTpR_2(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """d²S₂/dτ·dr."""
     return torch.exp(-tau * r) * (
         (tau * r - 1.0) * _gg(tau, r)
@@ -159,35 +160,41 @@ def _shortpTpR_2(tau, r):
     )
 
 
-def _gpTpR(tau, r):
+def _gpTpR(tau: torch.Tensor, r: torch.Tensor) -> torch.Tensor:
     """d²g/dτ·dr."""
     return (3.0 * tau + tau**2 * r) / 8.0
 
 
 # ── Damping functions h(U_A, U_B, r, ξ) and derivatives ─────────────────
-def _hh(Ua, Ub, r, xi):
+def _hh(Ua: torch.Tensor, Ub: torch.Tensor, r: torch.Tensor, xi: float) -> torch.Tensor:
     """Damping function h = exp(−((U_A+U_B)/2)^ξ · r²)."""
     return torch.exp(-((0.5 * (Ua + Ub)) ** xi) * r**2)
 
 
-def _hpU(Ua, Ub, r, xi):
+def _hpU(
+    Ua: torch.Tensor, Ub: torch.Tensor, r: torch.Tensor, xi: float
+) -> torch.Tensor:
     """dh/dU_A."""
     return -0.5 * xi * r**2 * (0.5 * (Ua + Ub)) ** (xi - 1.0) * _hh(Ua, Ub, r, xi)
 
 
-def _hpR(Ua, Ub, r, xi):
+def _hpR(
+    Ua: torch.Tensor, Ub: torch.Tensor, r: torch.Tensor, xi: float
+) -> torch.Tensor:
     """dh/dr."""
     return -2.0 * r * (0.5 * (Ua + Ub)) ** xi * _hh(Ua, Ub, r, xi)
 
 
-def _hpUpR(Ua, Ub, r, xi):
+def _hpUpR(
+    Ua: torch.Tensor, Ub: torch.Tensor, r: torch.Tensor, xi: float
+) -> torch.Tensor:
     """d²h/dU_A·dr."""
     avg = 0.5 * (Ua + Ub)
     return xi * r * avg ** (xi - 1.0) * (r**2 * avg**xi - 1.0) * _hh(Ua, Ub, r, xi)
 
 
 # ── dγ/dU_A (on-site limit r=0 with U_A ≠ U_B) ─────────────────────────
-def _dGdUr0(tauA, tauB):
+def _dGdUr0(tauA: torch.Tensor, tauB: torch.Tensor) -> torch.Tensor:
     """dγ/dU for r = 0 when τ_A ≠ τ_B (Eq. S7 in Gaus et al. 2015)."""
     invS = 1.0 / (tauA + tauB)
     return (
@@ -209,7 +216,13 @@ def _dGdUr0(tauA, tauB):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _gamma2pU_vec(Ua, Ub, r_bohr, damped_mask, xi):
+def _gamma2pU_vec(
+    Ua: torch.Tensor,
+    Ub: torch.Tensor,
+    r_bohr: torch.Tensor,
+    damped_mask: torch.Tensor,
+    xi: float | None,
+) -> torch.Tensor:
     """
     Vectorized dγ_AB/dU_A for an array of pairs.
 
@@ -282,7 +295,13 @@ def _gamma2pU_vec(Ua, Ub, r_bohr, damped_mask, xi):
     return result
 
 
-def _gamma2pUpR_vec(Ua, Ub, r_bohr, damped_mask, xi):
+def _gamma2pUpR_vec(
+    Ua: torch.Tensor,
+    Ub: torch.Tensor,
+    r_bohr: torch.Tensor,
+    damped_mask: torch.Tensor,
+    xi: float | None,
+) -> torch.Tensor:
     """
     Vectorized d²γ_AB/(dU_A·dr) for an array of pairs (radial derivative
     of gamma2pU, needed for gradient contribution).
@@ -429,7 +448,7 @@ class ThirdOrder:
         neighbor_J: torch.Tensor,
         dR_ang: torch.Tensor,
         dR_dxyz: torch.Tensor,
-    ):
+    ) -> None:
         """Build Γ³_ab and Γ³_ba matrices from current coordinates.
 
         Parameters
@@ -712,7 +731,14 @@ class ThirdOrderBatch:
     ``refresh()`` re-stacks the matrices.
     """
 
-    def __init__(self, to_list: list):
+    def __init__(self, to_list: list[ThirdOrder]) -> None:
+        """Initialise a batched third-order wrapper from single-structure objects.
+
+        Parameters
+        ----------
+        to_list : list[ThirdOrder]
+            Per-structure third-order correction objects with matching shapes.
+        """
         self.B = len(to_list)
         self._list = to_list
         t0 = to_list[0]
@@ -721,7 +747,7 @@ class ThirdOrderBatch:
         self.Nats = t0.Nats
         self.refresh()
 
-    def refresh(self):
+    def refresh(self) -> None:
         """Re-stack matrices from individual ThirdOrder objects."""
         self.gamma3ab = torch.stack([t.gamma3ab for t in self._list])  # (B,N,N)
         self.gamma3ba = torch.stack([t.gamma3ba for t in self._list])  # (B,N,N)
@@ -729,7 +755,7 @@ class ThirdOrderBatch:
         self.gamma3ba_pR = torch.stack([t.gamma3ba_pR for t in self._list])  # (B,N,N)
         self.diff_xyz = torch.stack([t.diff_xyz for t in self._list])  # (B,3,N,N)
 
-    def get_shifts(self, q):
+    def get_shifts(self, q: torch.Tensor) -> torch.Tensor:
         """Third-order Hamiltonian shift.  q: (B,N) → (B,N)."""
         # t1 = 2 * (gamma3ab @ q) * q  element-wise
         g3ab_q = torch.bmm(self.gamma3ab, q.unsqueeze(-1)).squeeze(-1)  # (B,N)
@@ -738,7 +764,7 @@ class ThirdOrderBatch:
         t2 = torch.bmm(self.gamma3ba, (q**2).unsqueeze(-1)).squeeze(-1)
         return (1.0 / 3.0) * (t1 + t2)
 
-    def get_dshifts_dq(self, q, v):
+    def get_dshifts_dq(self, q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Linearised shift response for Krylov.  q,v: (B,N) → (B,N)."""
         g3ab_v = torch.bmm(self.gamma3ab, v.unsqueeze(-1)).squeeze(-1)
         g3ab_q = torch.bmm(self.gamma3ab, q.unsqueeze(-1)).squeeze(-1)
@@ -746,12 +772,14 @@ class ThirdOrderBatch:
         dt2 = 2.0 * torch.bmm(self.gamma3ba, (q * v).unsqueeze(-1)).squeeze(-1)
         return (1.0 / 3.0) * (dt1 + dt2)
 
-    def get_energy(self, q):
+    def get_energy(self, q: torch.Tensor) -> torch.Tensor:
         """Third-order energy.  q: (B,N) → (B,)."""
         shift = self.get_shifts(q)
         return (1.0 / 3.0) * (shift * q).sum(dim=1)
 
-    def get_energy_xlbomd(self, q_in, q_out):
+    def get_energy_xlbomd(
+        self, q_in: torch.Tensor, q_out: torch.Tensor
+    ) -> torch.Tensor:
         """XL-BOMD third-order energy.  q_in, q_out: (B,N) → (B,)."""
         s1 = (
             (1.0 / 3.0)

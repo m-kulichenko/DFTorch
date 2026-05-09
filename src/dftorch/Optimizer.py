@@ -22,9 +22,8 @@ from typing import Optional
 import torch
 
 from ._cell import wrap_positions
-from ._io import write_XYZ_trajectory, write_pdb_frame
+from ._io import write_pdb_frame, write_XYZ_trajectory
 from .ESDriver import ESDriver
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  FIRE  (Fast Inertial Relaxation Engine)
@@ -49,7 +48,27 @@ class _FIREState:
         f_dec: float = 0.5,
         f_alpha: float = 0.99,
         n_min: int = 5,
-    ):
+    ) -> None:
+        """Initialise FIRE integration state.
+
+        Parameters
+        ----------
+        ndof : int
+            Number of optimised degrees of freedom.
+        device : torch.device
+            Device used for the state vector.
+        dtype : torch.dtype
+            Tensor dtype used for the state vector.
+        dt_start, dt_max : float
+            Initial and maximum FIRE time-step.
+        alpha_start : float
+            Initial velocity-mixing parameter.
+        f_inc, f_dec, f_alpha : float
+            FIRE control coefficients for time-step and mixing updates.
+        n_min : int
+            Number of consecutive positive-power steps before increasing the
+            time-step.
+        """
         self.v = torch.zeros(ndof, device=device, dtype=dtype)
         self.dt = dt_start
         self.dt_max = dt_max
@@ -112,7 +131,22 @@ class _LBFGSState:
         dtype: torch.dtype,
         memory: int = 20,
         maxstep: float = 0.2,
-    ):
+    ) -> None:
+        """Initialise limited-memory BFGS state.
+
+        Parameters
+        ----------
+        ndof : int
+            Number of optimised degrees of freedom.
+        device : torch.device
+            Device used for stored history vectors.
+        dtype : torch.dtype
+            Tensor dtype used for stored history vectors.
+        memory : int, default 20
+            Maximum number of ``(s, y)`` history pairs.
+        maxstep : float, default 0.2
+            Trust-region cap applied to the proposed Cartesian step.
+        """
         self.memory = memory
         self.maxstep = maxstep
         self.s_list: list[torch.Tensor] = []
@@ -203,13 +237,25 @@ class GeoOpt:
     >>> opt.run(structure, dftorch_params, fmax=0.01, free_mask=mask)
     """
 
-    def __init__(self, es_driver: ESDriver, const, method: str = "LBFGS"):
+    def __init__(self, es_driver: ESDriver, const: object, method: str = "LBFGS"):
+        """Initialise a geometry optimiser.
+
+        Parameters
+        ----------
+        es_driver : ESDriver
+            Electronic-structure driver used to evaluate energies, forces, and
+            optional stress.
+        const : object
+            Constants database used by the electronic-structure driver.
+        method : str, default "LBFGS"
+            Optimisation algorithm. Supported values are ``"FIRE"`` and
+            ``"LBFGS"``.
+        """
         self.es_driver = es_driver
         self.const = const
         self.method = method.upper()
-        assert self.method in ("FIRE", "LBFGS"), (
-            f"Unknown method '{method}'. Use 'FIRE' or 'LBFGS'."
-        )
+        if self.method not in ("FIRE", "LBFGS"):
+            raise ValueError(f"Unknown method '{method}'. Use 'FIRE' or 'LBFGS'.")
 
         # History arrays (filled during run)
         self.E_array: Optional[torch.Tensor] = None

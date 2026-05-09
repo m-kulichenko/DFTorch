@@ -1,36 +1,47 @@
+import math
+import time
+
 import torch
+
+from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
+from dftorch._spin import get_h_spin, get_spin_energy
+
+from ._coulomb_matrix import coulomb_matrix_vectorized
+from ._dftd3 import create_dftd3
+from ._energy import energy
+from ._forces import Forces, Forces_PME, forces_spin
+from ._forces_batch import forces_batch
+from ._gbsa import GBSABatch, create_gbsa
 from ._h0ands import H0_and_S_vectorized, H0_and_S_vectorized_batch
-from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,
 )
-from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
-from ._scf import scf_x_os, SCFx, SCFx_batch, delta_scf_x_os
-from ._energy import energy
-from ._forces import Forces, forces_spin, Forces_PME
-from ._forces_batch import forces_batch
-from ._coulomb_matrix import coulomb_matrix_vectorized
-from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
-from dftorch._spin import get_spin_energy, get_h_spin
+from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch
+from ._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
 from ._stress import get_total_stress_analytical
-from ._gbsa import create_gbsa, GBSABatch
-from ._dftd3 import create_dftd3
-from ._thirdorder import create_thirdorder, ThirdOrderBatch
-
-
-import math
-import time
+from ._thirdorder import ThirdOrderBatch, create_thirdorder
+from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
 
 
 class ESDriver(torch.nn.Module):
     def __init__(
         self,
-        dftorch_params,
+        dftorch_params: dict,
         device: torch.device,
         *args,
         **kwargs,
     ):
+        """Initialise a single-structure electronic-structure driver.
+
+        Parameters
+        ----------
+        dftorch_params : dict
+            Runtime parameters controlling cutoffs, SCF settings, and optional
+            corrections such as DFT-D3 or solvation.
+        device : torch.device
+            Device on which calculations will run.
+        """
         super().__init__(*args, **kwargs)
         self.dftorch_params = dftorch_params
         self.electronic_rcut = dftorch_params.get("RCUT_ELECTRONIC", 10.0)
@@ -40,21 +51,26 @@ class ESDriver(torch.nn.Module):
     def forward(
         self, structure, const, do_scf=True, verbose: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute total energy and forces for_ given density matrix.
+        """Compute total energy and forces for a given structure.
 
         Parameters
         ----------
-        density_matrix : (HDIM, HDIM) torch.Tensor
-            Density matrix in AO basis.
-        verbose : bool
-            If True, print timing info from neighbor list routines.
+        structure : Structure
+            Atomic structure with positions, cell, and basis information.
+        const : Constants
+            Slater-Koster parameters and element data.
+        do_scf : bool, default True
+            If True, run the self-consistent charge (SCC) loop. If False,
+            evaluate energy and forces at the current charge state (useful for
+            non-SCC DFTB or for shadow-energy MD restart steps).
+        verbose : bool, default False
+            If True, print timing info from neighbor-list construction.
 
         Returns
         -------
-        total_energy : torch.Tensor (scalar)
-            Total energy (electronic + repulsive).
-        forces : (Nats, 3) torch.Tensor
+        e_tot : torch.Tensor
+            Total energy (electronic + repulsive + corrections), scalar.
+        forces : torch.Tensor, shape (Nats, 3)
             Atomic forces in eV/Å.
         """
 
@@ -161,7 +177,7 @@ class ESDriver(torch.nn.Module):
             structure.C = None
             structure.dCC = None
             # TODO: Full off-diagonal DFTB3 with PME requires building a
-            # separate neighbor list for_ the short-range Γ³ matrix.
+            # separate neighbor list for the short-range Γ³ matrix.
             # For now, PME uses diagonal-only DFTB3.
             structure.thirdorder = None
         else:
@@ -226,7 +242,7 @@ class ESDriver(torch.nn.Module):
                 structure.dU_dq is not None
                 and self.dftorch_params.get("dftb3_diagonal_only", False) is False
             ):
-                # Compute pairwise distances/unit-vectors for_ the masked pairs
+                # Compute pairwise distances/unit-vectors for the masked pairs
                 Ra = torch.stack(
                     (
                         structure.RX.unsqueeze(-1),
@@ -566,12 +582,12 @@ class ESDriver(torch.nn.Module):
 
         # with torch.no_grad():
         if 1:
-            # Compute solvation shift for_ force calculation
+            # Compute solvation shift for force calculation
             solv_shift = None
             if structure.gbsa is not None:
                 solv_shift = structure.gbsa.get_shifts(structure.q)
 
-            # Compute third-order shift for_ force calculation
+            # Compute third-order shift for force calculation
             to_shift = None
             if structure.thirdorder is not None:
                 to_shift = structure.thirdorder.get_shifts(structure.q)
@@ -1117,11 +1133,21 @@ class ESDriver(torch.nn.Module):
 class ESDriverBatch(torch.nn.Module):
     def __init__(
         self,
-        dftorch_params,
+        dftorch_params: dict,
         device: torch.device,
         *args,
         **kwargs,
     ):
+        """Initialise a batched electronic-structure driver.
+
+        Parameters
+        ----------
+        dftorch_params : dict
+            Runtime parameters controlling cutoffs, SCF settings, and optional
+            corrections for the batched calculation.
+        device : torch.device
+            Device on which calculations will run.
+        """
         super().__init__(*args, **kwargs)
         self.dftorch_params = dftorch_params
         self.electronic_rcut = dftorch_params.get("RCUT_ELECTRONIC", 10.0)
@@ -1137,32 +1163,32 @@ class ESDriverBatch(torch.nn.Module):
         q_init=None,
         gbsa_batch_precomputed=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute total energy and forces for_ given density matrix.
+        """Compute total energy and forces for a batch of structures.
 
         Parameters
         ----------
-        density_matrix : (HDIM, HDIM) torch.Tensor
-            Density matrix in AO basis.
-        verbose : bool
-            If True, print timing info from neighbor list routines.
+        structure : StructureBatch
+            Batched atomic structures with positions, cell, and basis information.
+        const : Constants
+            Slater-Koster parameters and element data.
+        do_scf : bool, default True
+            If True, run the self-consistent charge (SCC) loop.
+        verbose : bool, default False
+            If True, print timing info from neighbor-list construction.
         q_init : torch.Tensor, optional
             Initial charges for the SCF cycle. Shape (N,) for a single reference
             (broadcast to all batch elements) or (B, N). Skips the expensive
             initial eigendecomposition when provided.
         gbsa_batch_precomputed : GBSABatch, optional
-            Pre-computed GBSABatch object to reuse for all batch elements.
-            When provided, skips the expensive per-structure GBSA construction
-            (Born radii, SASA, Born matrix) and uses the pre-computed geometry-
-            dependent quantities directly.  Useful for finite-difference Hessian
-            calculations where displacements are tiny and GBSA geometry barely
-            changes.
+            Pre-computed GBSABatch object to reuse across call sites.
+            Useful for finite-difference Hessian calculations where GBSA
+            geometry changes are negligible between displacement steps.
 
         Returns
         -------
-        total_energy : torch.Tensor (scalar)
-            Total energy (electronic + repulsive).
-        forces : (Nats, 3) torch.Tensor
+        e_tot : torch.Tensor
+            Total energies per structure, shape (B,).
+        forces : torch.Tensor, shape (B, Nats, 3)
             Atomic forces in eV/Å.
         """
 
@@ -1346,7 +1372,7 @@ class ESDriverBatch(torch.nn.Module):
                         structure.TYPE[b],
                         h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                     )
-                    # Build pairwise data for_ this structure from the Coulomb neighbor list.
+                    # Build pairwise data for this structure from the Coulomb neighbor list.
                     # We rebuild a quick pairwise data from the full Coulomb matrix C[b].
                     # Actually, we need to build from coords. Use a simple all-pairs approach.
                     Nats = structure.Nats
@@ -1375,7 +1401,7 @@ class ESDriverBatch(torch.nn.Module):
                     to.update_coords(rxb, ryb, rzb, None, ni, nj, dR_m, dR_dxyz_m)
                     _to_list.append(to)
                 structure.thirdorder_batch = ThirdOrderBatch(_to_list)
-                structure.thirdorder_list = _to_list  # keep for_ MD rebuild
+                structure.thirdorder_list = _to_list  # keep for MD rebuild
             else:
                 structure.thirdorder_batch = None
                 structure.thirdorder_list = None
@@ -1409,7 +1435,7 @@ class ESDriverBatch(torch.nn.Module):
                     )
                     _gbsa_list.append(gbsa_b)
                 structure.gbsa_batch = GBSABatch(_gbsa_list)
-                structure.gbsa_list = _gbsa_list  # keep for_ rebuild in MD
+                structure.gbsa_list = _gbsa_list  # keep for rebuild in MD
 
                 toc = time.time()
                 print(f"GBSA initialization time: {toc - tic:.2f} seconds")
@@ -1493,13 +1519,12 @@ class ESDriverBatch(torch.nn.Module):
                     coords_batch = torch.stack(
                         [structure.RX, structure.RY, structure.RZ], dim=2
                     )  # (B, N, 3)
-                    e_solv_list = []
-                    for b in range(structure.batch_size):
-                        e_solv_list.append(
-                            structure.gbsa_batch._list[b].get_energy_differentiable(
-                                coords_batch[b], structure.q[b]
-                            )
+                    e_solv_list = [
+                        structure.gbsa_batch._list[b].get_energy_differentiable(
+                            coords_batch[b], structure.q[b]
                         )
+                        for b in range(structure.batch_size)
+                    ]
                     structure.e_solv = torch.stack(e_solv_list)
                 else:
                     # Non-differentiable path (default)
@@ -1537,12 +1562,12 @@ class ESDriverBatch(torch.nn.Module):
 
         # with torch.no_grad():
         if 1:
-            # ── Solvation shift for_ force calculation (vectorised) ───────
+            # ── Solvation shift for force calculation (vectorised) ───────
             solv_shift = None
             if structure.gbsa_batch is not None:
                 solv_shift = structure.gbsa_batch.get_shifts(structure.q)  # (B, N)
 
-            # ── ThirdOrder shift for_ force calculation (vectorised) ──────
+            # ── ThirdOrder shift for force calculation (vectorised) ──────
             to_shift = None
             if structure.thirdorder_batch is not None:
                 to_shift = structure.thirdorder_batch.get_shifts(structure.q)  # (B, N)

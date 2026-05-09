@@ -1,0 +1,20 @@
+# Default state for all rules
+default: true
+
+# MD013/line-length - disable line length limit
+MD013: false
+
+# MD033/no-inline-html - allow HTML in markdown
+MD033:
+  allowed_elements: ["br", "details", "summary", "sup", "sub"]
+
+# MD041/first-line-heading - disable; README starts with badges/logo
+MD041: false
+
+# MD024/no-duplicate-heading - allow same heading text in different sections
+MD024:
+  siblings_only: true
+
+# MD029/ol-prefix - ordered list style
+MD029:
+  style: "one_or_ordered"

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Final
 
-import torch
 import numpy as np
+import torch
 
 symbol_to_number: Final[dict[str, int]] = {
     "H": 1,

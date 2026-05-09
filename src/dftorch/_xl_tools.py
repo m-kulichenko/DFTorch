@@ -1,19 +1,19 @@
+from typing import Any, Dict, Optional, Tuple
+
 import torch
 
-
-from ._fermi_prt import (
-    fermi_prt_D1_only,
-    fermi_prt_batch_D1_only,
-)  # noqa: F401
 from ._dm_fermi_x import (
     dm_fermi_x,
-    dm_fermi_x_os,  # noqa: F401
     dm_fermi_x_batch,
+    dm_fermi_x_os,  # noqa: F401
     dm_fermi_x_os_shared,
     nonaufbau_constraints,
 )
+from ._fermi_prt import (
+    fermi_prt_batch_D1_only,
+    fermi_prt_D1_only,
+)  # noqa: F401
 from ._spin import get_h_spin_diag
-from typing import Any, Optional, Tuple, Dict
 from ._tools import _maybe_compile
 
 
@@ -141,8 +141,65 @@ def calc_q_os(
     torch.Tensor,
 ]:
     """
-    Open-shell version of calc_q.
+    Build _scf quantities from AO-level inputs for an open-shell (spin-polarized) system.
+
+    Parameters
     ----------
+    H0 : torch.Tensor, shape (2, n_orb, n_orb)
+        Zero-order Hamiltonian for α (index 0) and β (index 1) channels.
+    H_spin : torch.Tensor, shape (n_orb, n_orb)
+        Spin Hamiltonian matrix (atom/shell resolved).
+    U : torch.Tensor, shape (n_orb,)
+        AO-mapped on-site Hubbard U.
+    n : torch.Tensor, shape (n_orb,)
+        AO-mapped net Mulliken charges from the previous SCC iteration.
+    CoulPot : torch.Tensor, shape (n_orb,)
+        AO-level Coulomb potential.
+    S : torch.Tensor, shape (n_orb, n_orb)
+        AO overlap matrix.
+    Z : torch.Tensor, shape (2, n_orb, n_orb)
+        Symmetric orthogonalizer per spin channel.
+    Te : float
+        Electronic temperature in Kelvin.
+    Nocc : int
+        Total number of occupied spin-orbitals.
+    Znuc : torch.Tensor, shape (Nats,)
+        Nuclear charges.
+    atom_ids : torch.Tensor, shape (n_orb,), dtype int
+        AO to atom mapping.
+    atom_ids_sr : torch.Tensor, shape (n_shells_total,), dtype int
+        Shell to atom mapping.
+    el_per_shell : torch.Tensor, shape (n_shells_total,)
+        Number of electrons per shell used for initial charge.
+    dU_dq : torch.Tensor, shape (n_orb,), optional
+        Third-order DFTB3 dU/dq contribution.
+    shared_mu : bool, default False
+        If True, use a shared chemical potential across α and β channels.
+    deltaSCF : bool, default False
+        If True, apply delta-SCF excited-state constraints.
+    dftorch_params : dict, optional
+        Parameter dict (required when ``deltaSCF=True``).
+
+    Returns
+    -------
+    q_sr : torch.Tensor, shape (2, n_shells_total)
+        Spin-resolved per-shell Mulliken charges (α and β).
+    H : torch.Tensor, shape (2, n_orb, n_orb)
+        Full spin-polarized Hamiltonian.
+    Hcoul : torch.Tensor, shape (n_orb, n_orb)
+        Charge-only part of the Coulomb Hamiltonian.
+    D : torch.Tensor, shape (2, n_orb, n_orb)
+        Density matrix per spin channel.
+    Dorth : torch.Tensor, shape (2, n_orb, n_orb)
+        Density matrix in orthogonal basis.
+    Q : torch.Tensor, shape (2, n_orb, n_orb)
+        Eigenvectors per spin channel.
+    e : torch.Tensor, shape (2, n_orb)
+        Eigenvalues per spin channel.
+    f : torch.Tensor, shape (2, n_orb)
+        Fermi–Dirac occupations per spin channel.
+    mu0 : torch.Tensor, shape (2,)
+        Chemical potential per spin channel.
     """
     Hcoul_diag = U * n + CoulPot
     if dU_dq is not None:
@@ -213,9 +270,54 @@ def calc_q_batch(
     torch.Tensor,
 ]:
     """
-    Build _scf quantities from AO-level inputs and return updated atomic charges.
+    Build _scf quantities from AO-level inputs and return updated atomic charges (batched).
+
     Parameters
     ----------
+    H0 : torch.Tensor, shape (B, n_orb, n_orb)
+        Zero-order Hamiltonian matrix for each structure in the batch.
+    U : torch.Tensor, shape (B, n_orb)
+        AO-mapped on-site Hubbard U values (U[atom_ids]).
+    n : torch.Tensor, shape (B, n_orb)
+        AO-mapped atomic Mulliken charges from the previous SCC iteration.
+    CoulPot : torch.Tensor, shape (B, n_orb)
+        AO-level Coulomb potential (e.g., from PME or direct Coulomb).
+    S : torch.Tensor, shape (B, n_orb, n_orb)
+        AO overlap matrix.
+    Z : torch.Tensor, shape (B, n_orb, n_orb)
+        Symmetric orthogonalizer S^(-1/2), with Z.T @ S @ Z ≈ I.
+    Te : float
+        Electronic temperature in Kelvin.
+    Nocc : int
+        Number of occupied orbitals (electrons / 2 for closed shell).
+    Znuc : torch.Tensor, shape (B, Nats)
+        Nuclear charges (positive integers).
+    atom_ids : torch.Tensor, shape (B, n_orb), dtype int
+        Map from AO index to atom index within each structure.
+    dU_dq : torch.Tensor, shape (B, n_orb), optional
+        Third-order DFTB3 derivative dU/dq; adds a correction to
+        the diagonal Coulomb term.
+
+    Returns
+    -------
+    q : torch.Tensor, shape (B, Nats)
+        Updated atomic Mulliken charges.
+    H : torch.Tensor, shape (B, n_orb, n_orb)
+        Full DFTB Hamiltonian H0 + H_Coul.
+    Hcoul : torch.Tensor, shape (B, n_orb, n_orb)
+        Coulomb part of the Hamiltonian.
+    D : torch.Tensor, shape (B, n_orb, n_orb)
+        Density matrix in AO basis.
+    Dorth : torch.Tensor, shape (B, n_orb, n_orb)
+        Density matrix in orthogonal basis.
+    Q : torch.Tensor, shape (B, n_orb, n_orb)
+        Orthogonal eigenvectors.
+    e : torch.Tensor, shape (B, n_orb)
+        Eigenvalues in the orthogonal basis.
+    f : torch.Tensor, shape (B, n_orb)
+        Fermi–Dirac occupation numbers.
+    mu0 : torch.Tensor, shape (B,)
+        Chemical potential per structure.
     """
     Hcoul_diag = U * n + CoulPot
 
@@ -372,9 +474,9 @@ calc_dq_batch = _maybe_compile(calc_dq_batch)
 
 
 def kernel_update_lr(
-    RX,
-    RY,
-    RZ,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
     lattice_vecs: torch.Tensor,
     TYPE: torch.Tensor,
     n_atoms: int,
@@ -562,9 +664,9 @@ def kernel_update_lr(
 
 
 def kernel_update_lr_os(
-    RX,
-    RY,
-    RZ,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
     lattice_vecs: torch.Tensor,
     TYPE: torch.Tensor,
     n_atoms: int,
@@ -823,8 +925,8 @@ def kernel_update_lr_os(
 def kernel_update_lr_batch(
     n_atoms: int,
     Hubbard_U_gathered: torch.Tensor,
-    dftorch_params,
-    FelTol,
+    dftorch_params: dict,
+    FelTol: float,
     KK0: torch.Tensor,
     Res: torch.Tensor,
     q: torch.Tensor,

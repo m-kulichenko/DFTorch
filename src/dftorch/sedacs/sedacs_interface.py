@@ -1,30 +1,29 @@
 from __future__ import annotations
+
 import time
+
+import numpy as np
 import torch
 import torch.distributed as dist
-import numpy as np
+from sedacs.graph import (
+    compute_added,
+    compute_removed,
+    get_initial_graph,
+    symmetrize_graph,
+    update_graph,
+)
+from sedacs.graph_partition import get_coreHaloIndices, graph_partition
 
-from dftorch.ewald_pme.neighbor_list import NeighborState
+from dftorch import Constants, Structure
+from dftorch._h0ands import H0_and_S_vectorized
+from dftorch._nearestneighborlist import vectorized_nearestneighborlist
 from dftorch._tools import (
     calculate_dist_dips,
     fractional_matrix_power_symm,
     ordered_pairs_from_TYPE,
 )
-from dftorch import Structure, Constants
-
-from dftorch._h0ands import H0_and_S_vectorized
-
 from dftorch.ewald_pme import calculate_PME_ewald
-from sedacs.graph import (
-    compute_added,
-    compute_removed,
-    update_graph,
-    symmetrize_graph,
-    get_initial_graph,
-)
-from sedacs.graph_partition import get_coreHaloIndices, graph_partition
-
-from dftorch._nearestneighborlist import vectorized_nearestneighborlist
+from dftorch.ewald_pme.neighbor_list import NeighborState
 
 
 def get_nl(structure, dftorch_params):
@@ -1113,11 +1112,12 @@ def repulsion(
         return Vr, f_rep, sigma_rep
     return Vr, f_rep, None
 
+
 def prepare_structure(dftorch_params, device):
     ### Prepare DFTB+DFTorch parameters, structure, neighbor list, and graph partitioning ###
     const = Constants(dftorch_params).to(device)
     structure = Structure(dftorch_params, const, device=device)
     dftorch_params["CELL"] = structure.cell
     structure.SpecClustNN = 10
-    structure.interface = 'dftorch'
+    structure.interface = "dftorch"
     return structure, dftorch_params

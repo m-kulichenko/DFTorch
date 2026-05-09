@@ -105,7 +105,6 @@ dependencies = [
     { name = "nvalchemi-toolkit-ops" },
     { name = "pandas" },
     { name = "scipy" },
-    { name = "setuptools" },
     { name = "torch" },
 ]
 
@@ -123,11 +122,6 @@ sedacs = [
     { name = "toml" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "mpi4py", marker = "extra == 'sedacs'" },
@@ -137,18 +131,14 @@ requires-dist = [
     { name = "nvalchemi-toolkit-ops" },
     { name = "pandas" },
     { name = "pre-commit", marker = "extra == 'dev'" },
-    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "scikit-learn", marker = "extra == 'sedacs'" },
     { name = "scipy" },
-    { name = "setuptools" },
     { name = "toml", marker = "extra == 'sedacs'" },
     { name = "torch" },
 ]
 provides-extras = ["dev", "sedacs"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=7.4" }]
 
 [[package]]
 name = "distlib"

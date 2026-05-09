@@ -1,13 +1,14 @@
 from __future__ import annotations
-import math
-import torch
 
-from ._tools import _maybe_compile
+import math
+
+import torch
 
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
 )
 from ._slater_koster_pair import Slater_Koster_Pair_SKF_vectorized
+from ._tools import _maybe_compile
 
 
 def _cell_volume(cell: torch.Tensor) -> torch.Tensor:

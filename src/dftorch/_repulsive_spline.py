@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import torch
+
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,

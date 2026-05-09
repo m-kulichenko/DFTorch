@@ -1,18 +1,52 @@
 # ruff: noqa
+from __future__ import annotations
+
 import os
-import numpy as np
 import re
+from typing import Any
+
+import numpy as np
+import torch
 
 from dftorch._cell import _cell_to_pdb_cryst1
 
 
-def _ensure_parent_dir(filename):
+def _ensure_parent_dir(filename: str) -> None:
+    """Create the parent directory for an output file when needed.
+
+    Parameters
+    ----------
+    filename : str
+        Output path whose parent directory should exist.
+    """
     parent = os.path.dirname(filename)
     if parent:
         os.makedirs(parent, exist_ok=True)
 
 
-def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
+def write_XYZ_trajectory(
+    filename: str,
+    structure: Any,
+    comment: str,
+    step: int = 0,
+    Ftot: torch.Tensor | None = None,
+) -> None:
+    """Append one frame to an XYZ trajectory file.
+
+    Parameters
+    ----------
+    filename : str
+        Output XYZ trajectory path.
+    structure : Any
+        Structure-like object exposing ``Nats``, ``RX``, ``RY``, ``RZ``, and ``TYPE``.
+    comment : str
+        Free-form comment written on the XYZ comment line.
+    step : int, default 0
+        Frame index written to the comment line.
+    Ftot : torch.Tensor, optional
+        Per-atom forces of shape ``(Nats, 3)``. When provided, the force columns
+        are appended after the coordinates.
+    """
     _ensure_parent_dir(filename)
     with open(filename, "a+") as f:
         num_atoms = structure.Nats
@@ -35,17 +69,34 @@ def write_XYZ_trajectory(filename, structure, comment, step=0, Ftot=None):
 
 
 def write_velocity_trajectory(
-    filename,
-    structure,
-    VX,
-    VY,
-    VZ,
-    charges=None,
-    n_charges=None,
-    comment="",
-    step=0,
-):
+    filename: str,
+    structure: Any,
+    VX: torch.Tensor,
+    VY: torch.Tensor,
+    VZ: torch.Tensor,
+    charges: torch.Tensor | None = None,
+    n_charges: torch.Tensor | None = None,
+    comment: str = "",
+    step: int = 0,
+) -> None:
     """Append one velocity frame as a PDB-like fixed-width record.
+
+    Parameters
+    ----------
+    filename : str
+        Output trajectory path.
+    structure : Any
+        Structure-like object exposing ``Nats``, ``TYPE``, and optionally ``cell``.
+    VX, VY, VZ : torch.Tensor
+        Per-atom velocity components of shape ``(Nats,)``.
+    charges : torch.Tensor, optional
+        Per-atom charge values appended after the element column.
+    n_charges : torch.Tensor, optional
+        Auxiliary per-atom charges appended after ``charges``.
+    comment : str, default ""
+        Frame comment written as a REMARK record.
+    step : int, default 0
+        Model index written to the PDB output.
 
     Notes
     -----
@@ -218,24 +269,35 @@ SYMBOL_TO_NUMBER = {
 NUMBER_TO_SYMBOL = {v: k for k, v in SYMBOL_TO_NUMBER.items()}
 
 
-def write_pdb_frame(filename, structure, cell=None, step=0, comment="", mode="a"):
+def write_pdb_frame(
+    filename: str,
+    structure: Any,
+    cell: torch.Tensor | None = None,
+    step: int = 0,
+    comment: str = "",
+    mode: str = "a",
+) -> None:
     """
     Append one MD frame to a PDB trajectory file.
     Each frame is wrapped in MODEL/ENDMDL records — readable by PyMOL, VMD, Chimera.
 
     Parameters
     ----------
-    filename  : str            output .pdb path
-    structure : Structure      DFTorch structure object
-    cell      : tensor|None
+    filename : str
+        Output ``.pdb`` path.
+    structure : Any
+        DFTorch structure-like object.
+    cell : torch.Tensor, optional
         Periodic cell specification in Angstrom:
         - shape (3,)   for orthorhombic box lengths [Lx, Ly, Lz]
         - shape (3,3)  for triclinic lattice vectors
         Written as CRYST1 if given.
-    step      : int            MD step number
-    comment   : str            free-form metadata string — written as REMARK,
-                               identical to the XYZ comment line content
-    mode      : str            'w' for first frame, 'a' to append
+    step : int, default 0
+        MD step number.
+    comment : str, default ""
+        Free-form metadata string written as a REMARK record.
+    mode : str, default "a"
+        File mode. Use ``"w"`` for the first frame and ``"a"`` to append.
     """
     _ensure_parent_dir(filename)
     with open(filename, mode) as f:
@@ -274,13 +336,40 @@ def write_pdb_frame(filename, structure, cell=None, step=0, comment="", mode="a"
         f.write("ENDMDL\n")
 
 
-def finalise_pdb(filename):
-    """Write terminal END record. Call once after all frames are written."""
+def finalise_pdb(filename: str) -> None:
+    """Append the terminal ``END`` record to a PDB trajectory.
+
+    Parameters
+    ----------
+    filename : str
+        PDB path to finalise.
+    """
     with open(filename, "a") as f:
         f.write("END\n")
 
 
-def write_XYZ(filename, structure, comment, step=0, Ftot=None):
+def write_XYZ(
+    filename: str,
+    structure: Any,
+    comment: str,
+    step: int = 0,
+    Ftot: torch.Tensor | None = None,
+) -> None:
+    """Append a single XYZ frame from a structure object.
+
+    Parameters
+    ----------
+    filename : str
+        Output XYZ path.
+    structure : Any
+        Structure-like object exposing ``Nats``, ``RX``, ``RY``, ``RZ``, and ``TYPE``.
+    comment : str
+        Frame comment written after the atom-count line.
+    step : int, default 0
+        Step number included in the comment line.
+    Ftot : torch.Tensor, optional
+        Per-atom forces of shape ``(Nats, 3)`` written after coordinates.
+    """
     with open(filename, "a+") as f:
         num_atoms = structure.Nats
         f.write(f"{structure.Nats}\n")
@@ -301,7 +390,33 @@ def write_XYZ(filename, structure, comment, step=0, Ftot=None):
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
-def write_xyz_from_xyz(filename, TYPE, RX, RY, RZ, comment, step=0, Ftot=None):
+def write_xyz_from_xyz(
+    filename: str,
+    TYPE: torch.Tensor,
+    RX: torch.Tensor,
+    RY: torch.Tensor,
+    RZ: torch.Tensor,
+    comment: str,
+    step: int = 0,
+    Ftot: torch.Tensor | None = None,
+) -> None:
+    """Append a single XYZ frame from raw coordinate tensors.
+
+    Parameters
+    ----------
+    filename : str
+        Output XYZ path.
+    TYPE : torch.Tensor
+        Atomic numbers of shape ``(Nats,)``.
+    RX, RY, RZ : torch.Tensor
+        Cartesian coordinates of shape ``(Nats,)`` in Angstrom.
+    comment : str
+        Frame comment written after the atom-count line.
+    step : int, default 0
+        Step number included in the comment line.
+    Ftot : torch.Tensor, optional
+        Per-atom forces of shape ``(Nats, 3)`` written after coordinates.
+    """
     with open(filename, "a+") as f:
         num_atoms = len(TYPE)
         f.write(f"{num_atoms}\n")
@@ -322,9 +437,21 @@ def write_xyz_from_xyz(filename, TYPE, RX, RY, RZ, comment, step=0, Ftot=None):
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
-def read_xyz(files, sort=True):
-    """
-    reads xyz structure from a list (files) of files names
+def read_xyz(files: list[str], sort: bool = True) -> tuple[np.ndarray, np.ndarray]:
+    """Read one or more XYZ files into arrays of species and coordinates.
+
+    Parameters
+    ----------
+    files : list[str]
+        XYZ file paths, one structure per file.
+    sort : bool, default True
+        If ``True``, atoms are sorted by descending atomic number.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        Atomic numbers with shape ``(nfiles, natoms)`` and coordinates with shape
+        ``(nfiles, natoms, 3)`` in Angstrom.
     """
 
     COORDINATES = []
@@ -337,7 +464,7 @@ def read_xyz(files, sort=True):
         try:
             int(lines[2].split()[0])
             atoms_are_number = True
-        except:
+        except ValueError:
             atoms_are_number = False
         for i in range(2, 2 + Natoms):
             # species.append(int(lines[i].split()[0]))
@@ -373,7 +500,9 @@ def read_xyz(files, sort=True):
 # ── Element-symbol → atomic-number lookup (covers Z = 1–54) ──────────
 
 
-def read_pdb(files, sort=True):
+def read_pdb(
+    files: list[str], sort: bool = True
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """
     Read geometry from PDB files.
 
@@ -500,7 +629,7 @@ def read_pdb(files, sort=True):
     return SPECIES, COORDINATES, cell_matrix
 
 
-def read_pdb_remarks(file):
+def read_pdb_remarks(file: str) -> dict[str, str]:
     """
     Extract REMARK metadata from a PDB file.
 
@@ -531,12 +660,19 @@ def read_pdb_remarks(file):
     return remarks
 
 
-def read_xyz_traj_data(file):
-    """
-    Reads data from xyz trajectory comment lines at each step
-    e.g. "Step 0, Etot = -145495.406250 eV, Epot = -145702.171875 eV, Ekin = 206.764328 eV, T = 399.90 K, Res = 0.000000, mu = -2.5353 eV"
-    Returns a dict with 'step' (int array) and any parsed named quantities as numpy arrays.
-    Missing values are filled with NaN.
+def read_xyz_traj_data(file: str) -> dict[str, np.ndarray]:
+    """Parse scalar metadata from XYZ trajectory comment lines.
+
+    Parameters
+    ----------
+    file : str
+        XYZ trajectory path.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Mapping containing ``step`` and any parsed ``key=value`` series as NumPy
+        arrays. Missing values are filled with ``NaN``.
     """
 
     steps = []
@@ -576,7 +712,7 @@ def read_xyz_traj_data(file):
         ):
             try:
                 found[key] = float(val)
-            except Exception:
+            except ValueError:
                 found[key] = np.nan
 
         # update existing keys with either found value or NaN

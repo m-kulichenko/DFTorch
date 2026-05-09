@@ -40,8 +40,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 try:
-    from torch_geometric.nn import TransformerConv, global_add_pool
     from torch_geometric.data import Batch
+    from torch_geometric.nn import TransformerConv, global_add_pool
 
     _HAS_PYG = True
 except ImportError:
@@ -117,7 +117,24 @@ class SKGraphNet(nn.Module):
         n_conv: int = 3,
         n_heads: int = 4,
         n_readout_layers: int = 3,
-    ):
+    ) -> None:
+        """Initialise the dual-head graph network.
+
+        Parameters
+        ----------
+        n_species : int
+            Number of supported atomic species.
+        embed_dim : int, default 8
+            Embedding dimension for atomic species.
+        hidden : int, default 64
+            Hidden feature dimension used throughout the network.
+        n_conv : int, default 3
+            Number of TransformerConv blocks.
+        n_heads : int, default 4
+            Number of attention heads per TransformerConv block.
+        n_readout_layers : int, default 3
+            Number of linear layers in each readout head.
+        """
         super().__init__()
         if not _HAS_PYG:
             raise ImportError(
@@ -201,7 +218,7 @@ class SKGraphNet(nn.Module):
         """½(1 + cos(π · clamp(r_norm, max=1))).  Zero for r ≥ r_cut."""
         return 0.5 * (1.0 + torch.cos(math.pi * r_norm.clamp(max=1.0)))
 
-    def forward(self, batch):
+    def forward(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(pred_H, pred_S)`` each of shape ``(B,)`` **with cosine
         cutoff already applied**."""
         x = torch.cat([self.embed(batch.z), batch.l_oh], dim=-1)
@@ -229,7 +246,7 @@ class SKGraphNet(nn.Module):
             -1
         ) * cos_cut
 
-    def forward_bare(self, batch):
+    def forward_bare(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
         """Return ``(bare_H, bare_S)`` each of shape ``(B,)`` **without**
         cosine cutoff.  Useful for gradient computation via autograd
         where we need ``d(bare)/d(r_norm)``."""
@@ -258,7 +275,24 @@ def _build_pyg_batch(
     bond_oh: torch.Tensor,
     r_norm: torch.Tensor,
 ) -> "Batch":
-    """Construct a PyG ``Batch`` of 2-node graphs from flat tensors."""
+    """Construct a PyG ``Batch`` of two-node graphs from flat tensors.
+
+    Parameters
+    ----------
+    Z1_idx, Z2_idx : torch.Tensor
+        Species embedding indices of shape ``(B,)``.
+    l1_oh, l2_oh : torch.Tensor
+        One-hot angular-momentum encodings of shape ``(B, 3)``.
+    bond_oh : torch.Tensor
+        One-hot bond-type encodings of shape ``(B, 3)``.
+    r_norm : torch.Tensor
+        Normalised distances of shape ``(B, 1)``.
+
+    Returns
+    -------
+    Batch
+        PyG batch containing ``B`` independent two-node graphs.
+    """
     B = Z1_idx.shape[0]
     device = Z1_idx.device
     z = torch.stack([Z1_idx, Z2_idx], dim=1).reshape(-1)
@@ -443,7 +477,7 @@ def build_pair_type_rcut(
 # ── Core: evaluate one SK channel lazily for masked pairs ─────────────────
 def ml_eval_channel(
     ml_ctx: dict,
-    mask,
+    mask: torch.Tensor | slice,
     channel: int,
     SH_shift: int,
     direction: str = "IJ",

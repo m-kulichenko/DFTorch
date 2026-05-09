@@ -1,45 +1,43 @@
+import time
+
+import numpy as np
 import torch
 import torch.distributed as dist
-import time
-import numpy as np
-
-from dftorch._io import write_XYZ_trajectory, write_pdb_frame, write_velocity_trajectory
-from dftorch.MD import MDXL, initialize_velocities
-from dftorch.ewald_pme import (
-    calculate_PME_ewald,
-    init_PME_data,
-    calculate_alpha_and_num_grids,
-)
-from dftorch.ewald_pme.neighbor_list import NeighborState
-from dftorch._cell import wrap_positions
-
-from dftorch._tools import calculate_dist_dips
-
 from sedacs.chemical_potential import get_mu
-
-from . import (
-    pack_lol_int,
-    unpack_lol_int,
-    bcast_1d_int,
-    gather_1d_to_rank0,
-    graph_diff_and_update,
-    symmetrize_graph_safe,
-    kernel_global,
-    get_energy_on_rank,
-    get_forces_on_rank,
-    get_subsy_on_rank,
-    get_evals_dvals,
-    calc_q_on_rank,
-    repulsion,
+from sedacs.graph import (
+    adaptive_halo_expansion,
+    collect_graph_from_rho,
 )
-
 from sedacs.graph_partition import (
     get_coreHaloIndices,
     graph_partition,
 )
-from sedacs.graph import (
-    collect_graph_from_rho,
-    adaptive_halo_expansion,
+
+from dftorch._cell import wrap_positions
+from dftorch._io import write_pdb_frame, write_velocity_trajectory, write_XYZ_trajectory
+from dftorch._tools import calculate_dist_dips
+from dftorch.ewald_pme import (
+    calculate_alpha_and_num_grids,
+    calculate_PME_ewald,
+    init_PME_data,
+)
+from dftorch.ewald_pme.neighbor_list import NeighborState
+from dftorch.MD import MDXL, initialize_velocities
+
+from . import (
+    bcast_1d_int,
+    calc_q_on_rank,
+    gather_1d_to_rank0,
+    get_energy_on_rank,
+    get_evals_dvals,
+    get_forces_on_rank,
+    get_subsy_on_rank,
+    graph_diff_and_update,
+    kernel_global,
+    pack_lol_int,
+    repulsion,
+    symmetrize_graph_safe,
+    unpack_lol_int,
 )
 
 
@@ -77,7 +75,9 @@ def _repartition_local_parts(
 
     if rank == 0:
         graph_np = _full_graph_to_numpy(full_graph)
-        coords_np = torch.stack((structure.RX, structure.RY, structure.RZ)).T.cpu().numpy()
+        coords_np = (
+            torch.stack((structure.RX, structure.RY, structure.RZ)).T.cpu().numpy()
+        )
         parts = graph_partition(
             structure,
             structure,
@@ -204,7 +204,6 @@ class MDXL_Graph(MDXL):
                     self.int_dtype,
                     device,
                 )
-
 
             for i in range(works_per_rank):
                 ch[i], core_size[i], nh = get_coreHaloIndices(
@@ -403,8 +402,6 @@ class MDXL_Graph(MDXL):
             disps, dists, nl = calculate_dist_dips(
                 positions, nbr_state, dftorch_params["COULOMB_CUTOFF"]
             )
-            nl_shape = torch.tensor(list(nl.shape), dtype=self.int_dtype, device=device)
-
             ewald_e1, forces1, CoulPot = calculate_PME_ewald(
                 positions.detach().clone(),
                 self.n,
@@ -701,7 +698,8 @@ class MDXL_Graph(MDXL):
             tic2_1 = time.perf_counter()
 
             print(
-                comm_string + ", t = {:.1f} s".format(
+                comm_string
+                + ", t = {:.1f} s".format(
                     time.perf_counter() - start_time,
                 )
             )

@@ -1,32 +1,33 @@
-from ._cell import wrap_positions
-from .ESDriver import ESDriverBatch
-from ._energy import energy_shadow
-from ._forces_batch import forces_shadow_batch
-from ._forces import forces_shadow, forces_shadow_pme, forces_spin
-
-# from ._kernel_fermi import _kernel_fermi
-from ._xl_tools import (
-    kernel_update_lr,
-    kernel_update_lr_os,
-    kernel_update_lr_batch,
-    calc_q,
-    calc_q_os,
-    calc_q_batch,
-)
-from ._spin import get_h_spin, get_spin_energy_shadow
-from ._stress import get_total_stress_analytical
-from ._gbsa import create_gbsa, GBSABatch
+import time
+from typing import Any, Optional, Tuple
 
 import torch
 
-from typing import Any, Tuple, Optional
-import time
-from ._io import write_XYZ_trajectory, write_pdb_frame, write_velocity_trajectory
 from dftorch._tools import calculate_dist_dips, normalize_coulomb_settings
+
+from ._cell import wrap_positions
+from ._energy import energy_shadow
+from ._forces import forces_shadow, forces_shadow_pme, forces_spin
+from ._forces_batch import forces_shadow_batch
+from ._gbsa import GBSABatch, create_gbsa
+from ._io import write_pdb_frame, write_velocity_trajectory, write_XYZ_trajectory
+from ._spin import get_h_spin, get_spin_energy_shadow
+from ._stress import get_total_stress_analytical
+
+# from ._kernel_fermi import _kernel_fermi
+from ._xl_tools import (
+    calc_q,
+    calc_q_batch,
+    calc_q_os,
+    kernel_update_lr,
+    kernel_update_lr_batch,
+    kernel_update_lr_os,
+)
+from .ESDriver import ESDriverBatch
 
 
 class MDXL:
-    """Extended-Lagrangian Born–Oppenheimer MD for_ closed- and open-shell systems.
+    """Extended-Lagrangian Born–Oppenheimer MD for closed- and open-shell systems.
 
     The class auto-detects the spin mode from the ``structure`` passed to
     :meth:`run` (open-shell ↔ ``structure.Nocc`` is a 2-element tensor) and
@@ -35,6 +36,18 @@ class MDXL:
     """
 
     def __init__(self, es_driver: ESDriverBatch, const, temperature_K: float):
+        """Initialise an XL-BOMD integrator.
+
+        Parameters
+        ----------
+        es_driver : ESDriverBatch
+            Electronic-structure driver used for SCF, forces, and stress.
+        const : object
+            Constants database used throughout the MD propagation.
+        temperature_K : float
+            Target temperature in Kelvin used for initial velocities and any
+            thermostatting.
+        """
 
         self.NoRank = False
         self.do_full_kernel = False
@@ -48,9 +61,9 @@ class MDXL:
         self.C2 = -8
         self.C3 = -3
         self.C4 = 4
-        self.C5 = -1  # Coefficients for_ modified Verlet integration
+        self.C5 = -1  # Coefficients for modified Verlet integration
         self.kappa = 1.82
-        self.alpha = 0.018  # Coefficients for_ modified Verlet integration
+        self.alpha = 0.018  # Coefficients for modified Verlet integration
 
         # Langevin thermostat parameters
         self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
@@ -104,12 +117,12 @@ class MDXL:
         self.langevin_gamma = gamma
         self.langevin_enabled = True
 
-    def _langevin_kick(self, structure, dt):
+    def _langevin_kick(self, structure: Any, dt: float) -> None:
         """
         Apply Langevin friction + random force as a velocity correction.
         Called once per half-step (splitting scheme).
 
-        The impulse for_ half-step dt/2:
+        The impulse for half-step dt/2:
           v <- v * c1 + c2 * xi / sqrt(M)
         where
           c1 = exp(-gamma * dt/2)
@@ -151,7 +164,7 @@ class MDXL:
         compressibility: float = 4.57e-5,
     ):
         """
-        Enable Berendsen barostat for_ NPT ensemble.
+        Enable Berendsen barostat for NPT ensemble.
 
         Parameters
         ----------
@@ -179,7 +192,7 @@ class MDXL:
         self.target_pressure = target_pressure / GPa_per_eVA3  # GPa → eV/Å³
         self.barostat_tau = tau
         self.barostat_isotropic = isotropic
-        # Convert compressibility from 1/bar → Å³/eV for_ internal use
+        # Convert compressibility from 1/bar → Å³/eV for internal use
         self.barostat_compressibility = compressibility * bar_per_eVA3  # Å³/eV
 
     def _compute_stress_tensor(self, structure, dftorch_params):
@@ -194,7 +207,7 @@ class MDXL:
 
         Returns the 3×3 stress tensor in eV/Å³.
         """
-        # Atom-resolved extrapolated charges for_ the shadow stress.
+        # Atom-resolved extrapolated charges for the shadow stress.
         # CS: self.n is already atom-resolved (Nats,).
         # OS: self.n is shell-resolved (2, Nshells); sum over spin then
         #     scatter to atoms.
@@ -248,7 +261,7 @@ class MDXL:
         P_scalar = torch.trace(P_inst) / 3.0
         GPa_per_eVA3 = 160.21766208
 
-        # Store for_ logging (GPa)
+        # Store for logging (GPa)
         self._P_inst_GPa = P_scalar * GPa_per_eVA3
         self._P_tensor = P_inst * GPa_per_eVA3
 
@@ -288,11 +301,11 @@ class MDXL:
         R = wrap_positions(R, structure.cell, structure.cell_inv)
         structure.RX, structure.RY, structure.RZ = R.unbind(dim=-1)
 
-        # Rebuild PME data for_ the new cell (if using PME Coulomb)
+        # Rebuild PME data for the new cell (if using PME Coulomb)
         if self._dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import (
-                init_PME_data,
                 calculate_alpha_and_num_grids,
+                init_PME_data,
             )
 
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
@@ -309,13 +322,32 @@ class MDXL:
 
     def run(
         self,
-        structure,
-        dftorch_params,
-        num_steps,
-        dt,
-        dump_interval=1,
-        traj_filename="md_trj",
-    ):
+        structure: Any,
+        dftorch_params: dict,
+        num_steps: int,
+        dt: float,
+        dump_interval: int = 1,
+        traj_filename: str = "md_trj",
+    ) -> None:
+        """Run an extended-Lagrangian molecular dynamics trajectory.
+
+        Parameters
+        ----------
+        structure : Any
+            Structure object carrying the current geometry, charges, forces,
+            and SCF state.
+        dftorch_params : dict
+            DFTorch runtime parameters controlling Coulomb treatment,
+            thermostat/barostat settings, and output behaviour.
+        num_steps : int
+            Number of MD steps to propagate.
+        dt : float
+            Time step in femtoseconds.
+        dump_interval : int, default 1
+            Write trajectory and velocity output every ``dump_interval`` steps.
+        traj_filename : str, default "md_trj"
+            Prefix used for ``.xyz``, ``.pdb``, and ``.vel`` output files.
+        """
         # Detect open-shell from structure.Nocc:
         # CS: int or 1-element tensor, OS: 2-element tensor [Nocc_alpha, Nocc_beta]
         self._os = (
@@ -323,7 +355,7 @@ class MDXL:
         )
         normalize_coulomb_settings(dftorch_params, structure.cell, context="MDXL.run")
 
-        # Store params for_ barostat (needs them during step)
+        # Store params for barostat (needs them during step)
         self._dftorch_params = dftorch_params
 
         if self.VX is None:
@@ -359,7 +391,7 @@ class MDXL:
             else:
                 self.K0Res = structure.KK @ (q - self.n)
 
-        # Generate atom index for_ each orbital
+        # Generate atom index for each orbital
         self.atom_ids = torch.repeat_interleave(
             torch.arange(len(structure.n_orbitals_per_atom), device=structure.device),
             structure.n_orbitals_per_atom,
@@ -383,8 +415,8 @@ class MDXL:
 
         if dftorch_params["COUL_METHOD"] == "PME":
             from .ewald_pme import (
-                init_PME_data,
                 calculate_alpha_and_num_grids,
+                init_PME_data,
             )
 
             self.CALPHA, grid_dimensions = calculate_alpha_and_num_grids(
@@ -422,8 +454,32 @@ class MDXL:
             )
 
     def step(
-        self, structure, dftorch_params, md_step, dt, dump_interval, traj_filename
-    ):
+        self,
+        structure: Any,
+        dftorch_params: dict,
+        md_step: int,
+        dt: float,
+        dump_interval: int,
+        traj_filename: str,
+    ) -> None:
+        """Advance the XL-BOMD state by one time step.
+
+        Parameters
+        ----------
+        structure : Any
+            Structure object carrying the current geometry, charges, forces,
+            and SCF state.
+        dftorch_params : dict
+            DFTorch runtime parameters used during the SCF/force update.
+        md_step : int
+            Current MD step index.
+        dt : float
+            Time step in femtoseconds.
+        dump_interval : int
+            Output cadence for trajectory writing.
+        traj_filename : str
+            Output file prefix for trajectory artefacts.
+        """
         if self.cuda_sync:
             torch.cuda.synchronize()
         start_time = time.perf_counter()
@@ -652,7 +708,7 @@ class MDXL:
             disps = None
             dists = None
 
-        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
+        # ── GBSA implicit solvation: rebuild for new geometry ────────────
         if dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
             structure.gbsa = create_gbsa(
                 structure,
@@ -888,7 +944,7 @@ class MDXL:
                 structure.n_shells_per_atom,
             )
 
-        # Atom-resolved charges used for_ energy / forces
+        # Atom-resolved charges used for energy / forces
         if self._os:
             q_e = q_tot_atom  # SCF charges
             n_e = n_tot_atom  # extrapolated charges
@@ -1158,6 +1214,18 @@ MDXLOS = MDXL
 
 class MDXLBatch:
     def __init__(self, es_driver: ESDriverBatch, const, temperature_K: float):
+        """Initialise a batched XL-BOMD integrator.
+
+        Parameters
+        ----------
+        es_driver : ESDriverBatch
+            Batched electronic-structure driver used during propagation.
+        const : object
+            Constants database used throughout the MD propagation.
+        temperature_K : float
+            Target temperature in Kelvin used for initial velocities and any
+            thermostatting.
+        """
 
         self.NoRank = False
         self.do_full_kernel = False
@@ -1171,9 +1239,9 @@ class MDXLBatch:
         self.C2 = -8
         self.C3 = -3
         self.C4 = 4
-        self.C5 = -1  # Coefficients for_ modified Verlet integration
+        self.C5 = -1  # Coefficients for modified Verlet integration
         self.kappa = 1.82
-        self.alpha = 0.018  # Coefficients for_ modified Verlet integration
+        self.alpha = 0.018  # Coefficients for modified Verlet integration
 
         # Langevin thermostat parameters
         self.langevin_gamma = 0.0  # friction coefficient in 1/fs (0 = off)
@@ -1236,12 +1304,12 @@ class MDXLBatch:
         self.langevin_gamma = gamma
         self.langevin_enabled = True
 
-    def _langevin_kick(self, structure, dt):
+    def _langevin_kick(self, structure: Any, dt: float) -> None:
         """
         Apply Langevin friction + random force as a velocity correction (batched).
         Called once per half-step (splitting scheme).
 
-        The impulse for_ half-step dt/2:
+        The impulse for half-step dt/2:
           v <- v * c1 + c2 * xi / sqrt(M)
         where
           c1 = exp(-gamma * dt/2)
@@ -1285,7 +1353,7 @@ class MDXLBatch:
         compressibility: float = 4.57e-5,
     ):
         """
-        Enable Berendsen barostat for_ NPT ensemble (batched).
+        Enable Berendsen barostat for NPT ensemble (batched).
 
         Parameters
         ----------
@@ -1365,7 +1433,7 @@ class MDXLBatch:
         P_scalar = torch.diagonal(P_inst, dim1=-2, dim2=-1).sum(dim=-1) / 3.0  # (B,)
         GPa_per_eVA3 = 160.21766208
 
-        # Store for_ logging (GPa)
+        # Store for logging (GPa)
         self._P_inst_GPa = P_scalar * GPa_per_eVA3  # (B,)
 
         # Berendsen prefactor: β dt / (3 τ_P)
@@ -1416,7 +1484,7 @@ class MDXLBatch:
             dftorch_params, structure.cell, context="MDXLBatch.run"
         )
 
-        # Store params for_ barostat (needs them during step)
+        # Store params for barostat (needs them during step)
         self._dftorch_params = dftorch_params
 
         if self.VX is None:
@@ -1441,7 +1509,7 @@ class MDXLBatch:
                 -1
             )
 
-        # Generate atom index for_ each orbital
+        # Generate atom index for each orbital
         counts = structure.n_orbitals_per_atom  # shape (B, N)
         cum_counts = torch.cumsum(counts, dim=1)  # cumulative sums per batch
         total_orbs = structure.H0.shape[-1]
@@ -1643,7 +1711,7 @@ class MDXLBatch:
 
         CoulPot = torch.matmul(structure.C, self.n.unsqueeze(-1)).squeeze(-1)
 
-        # ── GBSA implicit solvation: rebuild for_ new geometry ────────────
+        # ── GBSA implicit solvation: rebuild for new geometry ────────────
         if dftorch_params.get("SOLVENT_PARAM_FILE", None) is not None:
             _gbsa_list = []
             for b in range(structure.batch_size):
@@ -1989,7 +2057,7 @@ def initialize_velocities(
     remove_angmom : bool
         If True, remove net angular momentum about the center of mass.
     generator : torch.Generator, optional
-        RNG for_ reproducible sampling.
+        RNG for reproducible sampling.
 
     Returns
     -------
@@ -2017,7 +2085,7 @@ def initialize_velocities(
     eC = 1.602176634e-19
     MVV2KE = (amu_kg * (ang2m / fs2s) ** 2) / eC  # ≈ 103.642691 eV per (amu * (Å/fs)^2)
 
-    # Sampling stddev (0 for_ zero-mass)
+    # Sampling stddev (0 for zero-mass)
     kT = torch.as_tensor(kB_eV_per_K * temperature_K, device=device, dtype=dtype)
     inv_m = torch.where(mpos, 1.0 / masses_amu, torch.zeros_like(masses_amu))
     std = torch.sqrt(torch.clamp(kT * inv_m / MVV2KE, min=0)).to(dtype)
@@ -2059,7 +2127,7 @@ def initialize_velocities(
             )
         ).sum(dim=0)  # (3,3)
 
-        # Solve I * omega = L; use pinv for_ robustness
+        # Solve I * omega = L; use pinv for robustness
         # If I is near-singular (e.g., colinear atoms), pinv safely handles it.
         omega = torch.linalg.pinv(I) @ L  # (3,)
 
@@ -2118,7 +2186,7 @@ def initialize_velocities_batch(
     eC = 1.602176634e-19
     MVV2KE = (amu_kg * (ang2m / fs2s) ** 2) / eC  # ≈ 103.642691 eV per (amu * (Å/fs)^2)
 
-    # Sampling stddev (0 for_ zero-mass)
+    # Sampling stddev (0 for zero-mass)
     kT = torch.as_tensor(kB_eV_per_K * temperature_K, device=device, dtype=dtype)
     inv_m = torch.where(mpos, 1.0 / masses_amu, torch.zeros_like(masses_amu))
     std = torch.sqrt(torch.clamp(kT.unsqueeze(-1) * inv_m / MVV2KE, min=0)).to(dtype)
@@ -2163,7 +2231,7 @@ def initialize_velocities_batch(
             )
         ).sum(dim=1)  # (3,3)
 
-        # Solve I * omega = L; use pinv for_ robustness
+        # Solve I * omega = L; use pinv for robustness
         # If I is near-singular (e.g., colinear atoms), pinv safely handles it.
         omega = torch.bmm(torch.linalg.pinv(I), L.unsqueeze(-1)).squeeze(-1)
         # Remove rotation: v <- v + r x omega  (since r x omega = - omega x r)

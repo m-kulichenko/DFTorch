@@ -1,49 +1,65 @@
+from __future__ import annotations
+
+from typing import Any
+
 import torch
+
 from ._fermi_prt import Canon_DM_PRT
 
 
-def _kernel_fermi(structure, mu0, T, Nr_atoms, H, C, S, Z, Q, e, gbsa=None):
-    """
-    Build the charge-response kernel for Krylov/Anderson _scf acceleration.
+def _kernel_fermi(
+    structure: Any,
+    mu0: torch.Tensor | float,
+    T: torch.Tensor | float,
+    Nr_atoms: int,
+    H: torch.Tensor,
+    C: torch.Tensor,
+    S: torch.Tensor,
+    Z: torch.Tensor,
+    Q: torch.Tensor,
+    e: torch.Tensor,
+    gbsa: Any | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the atomic charge-response kernel for SCF mixing.
 
-    This computes the atomic charge response matrix dq_dn with elements
-      dq_dn[J, I] = ∂q_I / ∂n_J
-    by applying a unit perturbation on atomic population n_J, forming the
-    induced Coulomb/Hubbard AO Hamiltonian perturbation dH, and obtaining
-    the density response D1 via canonical Fermi perturbation theory in the
-    orthogonalized AO basis. The _scf kernel returned is
-      KK = (dq_dn^T − I)^{-1},
-    which maps residuals on atomic charges to a mixed update.
+    This routine applies a unit perturbation to each atomic charge degree of
+    freedom, computes the induced AO Hamiltonian perturbation, and evaluates
+    the first-order density response via canonical finite-temperature
+    perturbation theory. The resulting charge-response matrix is converted
+    into the mixing kernel ``(dq_dn.T - I)^(-1)``.
 
-    Args:
-        structure: Structure with fields
-            - n_orbitals_per_atom (list/1D tensor int)
-            - Hubbard_U (Nats,)
-        mu0 (tensor or float): Chemical potential at the current _scf point.
-        T (tensor or float): Electronic temperature (Kelvin).
-        Nr_atoms (int): Number of atoms (Nats).
-        H (tensor): Current AO Hamiltonian, shape (NAO, NAO).
-        C (tensor): Coulomb interaction matrix between atoms, shape (Nats, Nats).
-        S (tensor): AO overlap matrix, shape (NAO, NAO).
-        Z (tensor): Symmetric inverse square root of S, Z = S^{-1/2}, shape (NAO, NAO).
-        Q (tensor): Eigenvectors of the orthogonalized Hamiltonian (columns), shape (NAO, NAO).
-        e (tensor): Eigenvalues corresponding to Q, shape (NAO,).
+    Parameters
+    ----------
+    structure : Any
+        Structure-like object exposing ``n_orbitals_per_atom`` and ``Hubbard_U``.
+    mu0 : torch.Tensor or float
+        Chemical potential at the current SCF point.
+    T : torch.Tensor or float
+        Electronic temperature in Kelvin.
+    Nr_atoms : int
+        Number of atoms.
+    H : torch.Tensor
+        AO Hamiltonian of shape ``(n_orb, n_orb)``.
+    C : torch.Tensor
+        Atomic Coulomb interaction matrix of shape ``(Nats, Nats)``.
+    S : torch.Tensor
+        AO overlap matrix of shape ``(n_orb, n_orb)``.
+    Z : torch.Tensor
+        Symmetric orthogonalizer ``S^{-1/2}``.
+    Q : torch.Tensor
+        Eigenvectors of the orthogonalized Hamiltonian.
+    e : torch.Tensor
+        Eigenvalues corresponding to ``Q``.
+    gbsa : Any, optional
+        Optional solvation object exposing ``get_shifts``.
 
-    Returns:
-        KK (tensor): _scf kernel, shape (Nats, Nats), KK = (dq_dn^T − I)^{-1}.
-        D0 (tensor): Unperturbed density matrix in the orthogonal basis as returned by Canon_DM_PRT.
-
-    Notes:
-        - For each atom J, a unit perturbation on n_J produces an AO-diagonal
-          shift U_i δ_{i∈J} and a Coulomb shift (C @ δ_J) at each AO via atom mapping.
-          The AO perturbation is symmetrized with S: dH = 0.5(d* S + S* d).
-        - Response D1 is computed in the orthogonal basis and back-transformed to AO.
-          Atomic charge response is accumulated from 2·diag(D1 @ S) over AOs per atom.
-        - A factor 2 is used for spin degeneracy.
-        - Complexity is roughly O(Nats · NAO^3) due to repeated linear responses.
-
-    Shape/dtype/device:
-        All tensors are expected on H.device with consistent dtype; outputs follow inputs.
+    Returns
+    -------
+    KK : torch.Tensor
+        Charge-mixing kernel of shape ``(Nats, Nats)``.
+    D0 : torch.Tensor
+        Unperturbed density matrix in the orthogonal basis returned by
+        :func:`Canon_DM_PRT`.
     """
     dq_dn = torch.zeros(Nr_atoms, Nr_atoms, device=H.device)
     dq_J = torch.zeros(Nr_atoms, device=H.device)
