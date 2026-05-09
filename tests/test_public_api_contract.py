@@ -22,12 +22,12 @@ def test_public_api_contract():
 def test_public_api_imports():
     # This should remain the supported import path.
     from dftorch import (  # noqa: F401
+        MDXL,
+        MDXLOS,
         Constants,
         ESDriver,
         ESDriverBatch,
-        MDXL,
         MDXLBatch,
-        MDXLOS,
         Structure,
         StructureBatch,
     )

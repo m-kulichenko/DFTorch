@@ -1,9 +1,9 @@
 def test_public_api_imports():
     from dftorch import (
-        Constants,
-        Structure,
-        ESDriver,
         MDXL,
+        Constants,
+        ESDriver,
+        Structure,
     )
 
     assert Constants is not None

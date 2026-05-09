@@ -8,21 +8,22 @@
 # % dipole = sum_i R_{i} q_i                                          %
 # %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-import torch
-import warnings
 import logging
 import os
+import warnings
+
+import torch
 
 # to disable torchdynamo completely. Faster for smaller systems and single-point calculations.
 os.environ["TORCHDYNAMO_DISABLE"] = "1"  # hard-disable capture
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from dftorch.Constants import Constants
-from dftorch.Structure import Structure
-from dftorch.MD import MDXLOS
 from dftorch.ESDriver import ESDriver
+from dftorch.MD import MDXLOS
+from dftorch.Structure import Structure
 
 ### Configure torch and torch.compile ###
 # Silence warnings and module logs

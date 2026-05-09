@@ -5,8 +5,9 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 os.environ.setdefault("TORCHINDUCTOR_DISABLE", "1")
 
-import pytest
 import pathlib
+
+import pytest
 
 
 def test_import_dftorch():
@@ -25,10 +26,10 @@ def test_import_key_modules():
         _energy,
         _forces,
         _h0ands,
+        _nearestneighborlist,
         _scf,
         _slater_koster_pair,
         _tools,
-        _nearestneighborlist,
     )
 
 
@@ -50,8 +51,8 @@ def test_nearestneighborlist_small_xyz(device):
 
     torch.set_default_dtype(torch.float64)
 
-    from dftorch.Constants import Constants
     from dftorch._nearestneighborlist import vectorized_nearestneighborlist
+    from dftorch.Constants import Constants
 
     # Minimal coordinates for 3 atoms in a triangle
     Rx = torch.tensor([0.0, 1.0, 0.0])

@@ -16,6 +16,7 @@ def test_io():
     assert xyz_path.is_file(), f"Missing required test geometry: {xyz_path}"
 
     import torch
+
     from dftorch._io import read_xyz
 
     torch.set_default_dtype(torch.float64)

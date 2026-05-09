@@ -5,8 +5,9 @@ os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 os.environ.setdefault("TORCH_COMPILE_DISABLE", "1")
 os.environ.setdefault("TORCHINDUCTOR_DISABLE", "1")
 
-import pytest
 import pathlib
+
+import pytest
 
 
 @pytest.mark.parametrize("device", ["cpu"])
@@ -31,8 +32,8 @@ def test_energy_smoke_import_and_call(device):
     torch.set_default_dtype(torch.float64)
 
     from dftorch.Constants import Constants
-    from dftorch.Structure import Structure
     from dftorch.ESDriver import ESDriver
+    from dftorch.Structure import Structure
 
     dftorch_params = {
         "FILENAME": str(xyz_path),
