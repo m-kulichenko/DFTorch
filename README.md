@@ -116,6 +116,39 @@ from dftorch import (
 
 All other modules are internal implementation details and may change.
 
+
+### Minimal Example
+
+```python
+import torch
+import os
+torch.set_default_dtype(torch.float64)
+
+# To disable torchdynamo completely. Faster for smaller systems and single-point calculations. Set to True to test torch.compile.
+ENABLE_TORCH_COMPILE = False
+os.environ["DFTORCH_ENABLE_COMPILE"] = "1" if ENABLE_TORCH_COMPILE else "0"
+if ENABLE_TORCH_COMPILE: os.environ.pop("TORCHDYNAMO_DISABLE", None)
+else: os.environ["TORCHDYNAMO_DISABLE"] = "1"
+
+from dftorch import Constants, Structure, ESDriver
+
+dftorch_params = {
+    "FILENAME": "COORD.pdb",
+    "SKFPATH": "sk_orig/mio-1-1/mio-1-1/",  # Path to SKF files
+    "T_ELECTRONIC": 1000.0,  # Electronic temperature in Kelvin for Fermi smearing
+    "RCUT_ELECTRONIC": 7.0,  # Electronic cutoff in Angstroms. Should be >= largest cutoff in SKF files for the element pairs present in the system.
+    "RCUT_REPULSIVE": 4.0,   # Repulsive cutoff in Angstroms. Should be >= largest cutoff in SKF files for the element pairs present in the system.
+    "COUL_METHOD": "PME",    # Coulomb method. 'PME' for Particle Mesh Ewald.
+}
+
+device = "cuda" if torch.cuda.is_available() else "cpu" # Use GPU if available, otherwise CPU
+const = Constants(dftorch_params).to(device) # Constants container with parameters
+structure1 = Structure(dftorch_params, const, device=device) # Initialize structure from input file (COORD.pdb)
+es_driver = ESDriver(dftorch_params, device=device) # Initialize electronic structure driver
+es_driver(structure1, const) # Compute electronic structure and forces, with SCF convergence
+print(f"  {'E_total':22s} {structure1.e_tot:12.6f} Ev")
+```
+
 ### Methane Combustion Demo
 - DFTB2, mio-1-1
 - 100 $CH_4$ + 200 $O_2$.
