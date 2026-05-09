@@ -10,12 +10,14 @@ DFTorch is a Density Functional Tight Binding (DFTB) implementation in PyTorch.
 cd DFTorch
 uv venv --python 3.11
 uv pip install .
+uv sync
 ```
 
 or for compatibility with [sedacs](https://github.com/lanl/sedacs)
 
 ```bash
 uv pip install -e ".[sedacs]"
+uv sync
 ```
 
 Run tests:
@@ -37,7 +39,9 @@ installation, run it by importing `dftorch` from a Python script, a notebook,
 or an interactive Python session.
 
 If you installed with `uv`, use `uv run` so commands execute inside the
-project environment without manually activating `.venv`.
+project environment without manually activating `.venv`. The installation
+commands above build DFTorch from `pyproject.toml` rather than syncing from
+`uv.lock`.
 
 ```bash
 uv run python
