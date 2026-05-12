@@ -15,6 +15,9 @@ experiments/*.bib
 experiments/*.hsd
 experiments/*.vel
 experiments/batch_md/
+experiments/*.png
+experiments/*.dat
+
 
 
 !experiments/1_tutorial.ipynb
