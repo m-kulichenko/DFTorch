@@ -75,9 +75,11 @@ class Constants(torch.nn.Module):
                 )  # Input coordinate file
 
         else:
-            species, _ = read_xyz(
-                dftorch_params["FILENAME"], sort=False
-            )  # Input coordinate file
+            files = dftorch_params["FILENAME"]
+            if all(f.lower().endswith(".pdb") for f in files):
+                species, _, _ = read_pdb(files, sort=False)
+            else:
+                species, _ = read_xyz(files, sort=False)  # Input coordinate file
         TYPE = torch.tensor(species.flatten())
 
         from ._bond_integral import get_skf_tensors

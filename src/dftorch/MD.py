@@ -2012,7 +2012,7 @@ class MDXLBatch:
             if self.barostat_enabled:
                 P_str = f", P = {self._P_inst_GPa[b].item():.4f} GPa, V = {V[b].item():.2f} Å³"
             print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
+                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.2f} s".format(
                     Energ[b].item(),
                     self.EPOT[b].item(),
                     self.EKIN[b].item(),
@@ -2172,7 +2172,9 @@ def initialize_velocities_batch(
     dtype = structure.RX.dtype
     N = structure.Nats
 
-    if len(temperature_K) == 1 and batch_size > 1:
+    # Accept 0-D scalars, 1-element 1-D tensors, or plain floats/ints.
+    temperature_K = torch.as_tensor(temperature_K, device=device, dtype=dtype).reshape(-1)
+    if temperature_K.shape[0] == 1 and batch_size > 1:
         temperature_K = temperature_K.expand(batch_size)
 
     masses_amu = structure.Mnuc.to(device=device, dtype=dtype)
