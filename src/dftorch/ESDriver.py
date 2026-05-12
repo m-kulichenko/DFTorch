@@ -853,8 +853,6 @@ class ESDriver(torch.nn.Module):
         ``structure.frequencies_cm``, ``structure.normal_modes``, and
         ``structure.freq_results``.
         """
-        import numpy as np
-
         if hessian is None:
             if not hasattr(structure, "hessian") or structure.hessian is None:
                 raise RuntimeError(
@@ -863,91 +861,87 @@ class ESDriver(torch.nn.Module):
                 )
             hessian = structure.hessian
 
-        hess = hessian.detach().cpu().numpy()
-        masses = structure.Mnuc.detach().cpu().numpy()  # (N,) amu
+        dev = hessian.device
+        dtype = hessian.dtype
+
+        masses = structure.Mnuc.to(device=dev, dtype=dtype)  # (N,) amu
         N_at = structure.Nats
         n3 = 3 * N_at
 
         # DOF ordering: [X0..X_{N-1}, Y0..Y_{N-1}, Z0..Z_{N-1}]
-        mass_dof = np.tile(masses, 3)  # (3N,)
-        sqrt_m = np.sqrt(mass_dof)
+        mass_dof = masses.repeat(3)  # (3N,)
+        sqrt_m = mass_dof.sqrt()  # (3N,)
 
         # Mass-weighted Hessian:  H̃_ij = H_ij / sqrt(m_i · m_j)
-        H_mw = hess / np.outer(sqrt_m, sqrt_m)
+        H_mw = hessian / torch.outer(sqrt_m, sqrt_m)
 
         if proj_tr:
             # ── Project out translations & rotations (Sayvetz) ───────
             # Build the 6 (or 5 for linear) T/R vectors in mass-weighted
             # Cartesian space, orthogonalise, and project them out of H̃.
-            coords = np.stack(
-                [
-                    structure.RX.detach().cpu().numpy(),
-                    structure.RY.detach().cpu().numpy(),
-                    structure.RZ.detach().cpu().numpy(),
-                ],
-                axis=1,
+            coords = torch.stack([structure.RX, structure.RY, structure.RZ], dim=1).to(
+                device=dev, dtype=dtype
             )  # (N, 3)
 
             # Center of mass
             total_mass = masses.sum()
-            com = (masses[:, None] * coords).sum(axis=0) / total_mass
+            com = (masses[:, None] * coords).sum(dim=0) / total_mass
             rc = coords - com  # (N, 3) relative to COM
+
+            sm = masses.sqrt()  # (N,)
+            x, y, z = rc[:, 0], rc[:, 1], rc[:, 2]
 
             tr_vecs = []
 
-            # 3 translations: d_c = sqrt(m_i) * delta_{c, comp}
+            # 3 translations: d_c = sqrt(m_i) * e_c
             for c in range(3):
-                v = np.zeros(n3)
-                v[c * N_at : (c + 1) * N_at] = sqrt_m[:N_at]
+                v = torch.zeros(n3, device=dev, dtype=dtype)
+                v[c * N_at : (c + 1) * N_at] = sm
                 tr_vecs.append(v)
 
-            # 3 rotations: d_{Rx} = sqrt(m) * (y ẑ - z ŷ), etc.
-            # In [X..., Y..., Z...] ordering:
+            # 3 rotations (Sayvetz):
             #   Rx: dY_i = +sqrt(m_i)*z_i,  dZ_i = -sqrt(m_i)*y_i
             #   Ry: dZ_i = +sqrt(m_i)*x_i,  dX_i = -sqrt(m_i)*z_i
             #   Rz: dX_i = +sqrt(m_i)*y_i,  dY_i = -sqrt(m_i)*x_i
-            sm = np.sqrt(masses)
-            x, y, z = rc[:, 0], rc[:, 1], rc[:, 2]
-
             for axis in range(3):
-                v = np.zeros(n3)
+                v = torch.zeros(n3, device=dev, dtype=dtype)
                 if axis == 0:  # Rx
-                    v[1 * N_at : 2 * N_at] = sm * z  # dY
-                    v[2 * N_at : 3 * N_at] = -sm * y  # dZ
+                    v[1 * N_at : 2 * N_at] = sm * z
+                    v[2 * N_at : 3 * N_at] = -sm * y
                 elif axis == 1:  # Ry
-                    v[2 * N_at : 3 * N_at] = sm * x  # dZ
-                    v[0 * N_at : 1 * N_at] = -sm * z  # dX
+                    v[2 * N_at : 3 * N_at] = sm * x
+                    v[0 * N_at : 1 * N_at] = -sm * z
                 else:  # Rz
-                    v[0 * N_at : 1 * N_at] = sm * y  # dX
-                    v[1 * N_at : 2 * N_at] = -sm * x  # dY
+                    v[0 * N_at : 1 * N_at] = sm * y
+                    v[1 * N_at : 2 * N_at] = -sm * x
                 tr_vecs.append(v)
 
-            # Orthonormalize via QR (drops linearly dependent vectors
-            # automatically — e.g. for linear molecules only 5 remain)
-            D = np.column_stack(tr_vecs)  # (3N, 6)
-            Q, R_qr = np.linalg.qr(D, mode="reduced")
-            # Keep columns whose R diagonal is non-negligible
-            keep = np.abs(np.diag(R_qr)) > 1e-10
-            Q = Q[:, keep]  # (3N, n_tr)  n_tr = 5 or 6
+            # Orthonormalize via QR; drop columns with negligible R diagonal
+            D = torch.stack(tr_vecs, dim=1)  # (3N, 6)
+            Q, R_qr = torch.linalg.qr(D, mode="reduced")
+            keep = R_qr.diagonal().abs() > 1e-10
+            Q = Q[:, keep]  # (3N, n_tr)
 
             # Projector onto vibrational subspace:  P = I - Q Qᵀ
-            P = np.eye(n3) - Q @ Q.T
+            P = torch.eye(n3, device=dev, dtype=dtype) - Q @ Q.T
             H_mw = P @ H_mw @ P
 
-        # Diagonalize
-        eigvals, eigvecs = np.linalg.eigh(H_mw)
+        # Diagonalize with torch (stays on device)
+        eigvals, eigvecs = torch.linalg.eigh(H_mw)
 
         # Convert eigenvalues → cm⁻¹
         _eV = 1.602176634e-19  # J
         _amu = 1.66053906660e-27  # kg
         _ang = 1e-10  # m
         _c = 2.99792458e10  # cm/s
-        factor = np.sqrt(_eV / (_ang**2 * _amu)) / (2.0 * np.pi * _c)
+        factor = float(
+            torch.tensor(_eV / (_ang**2 * _amu)).sqrt() / (2.0 * torch.pi * _c)
+        )
         # ≈ 521.471 cm⁻¹ per sqrt(eV/(Å²·amu))
 
-        freqs_cm = np.sign(eigvals) * np.sqrt(np.abs(eigvals)) * factor
+        freqs_cm = eigvals.sign() * eigvals.abs().sqrt() * factor
 
-        n_imag = int((freqs_cm < -10.0).sum())
+        n_imag = int((freqs_cm < -10.0).sum().item())
 
         results = {
             "eigenvalues": eigvals,

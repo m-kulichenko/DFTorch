@@ -142,9 +142,9 @@ dftorch_params = {
 
 device = "cuda" if torch.cuda.is_available() else "cpu" # Use GPU if available, otherwise CPU
 const = Constants(dftorch_params).to(device) # Constants container with parameters
-structure1 = Structure(dftorch_params, const, device=device) # Initialize structure from input file (COORD.pdb)
+structure1 = Structure(dftorch_params, const, device=device) # Initialize structure
 es_driver = ESDriver(dftorch_params, device=device) # Initialize electronic structure driver
-es_driver(structure1, const) # Compute electronic structure and forces, with SCF convergence
+es_driver(structure1, const) # Compute electronic structure
 print(f"  {'E_total':22s} {structure1.e_tot:12.6f} Ev")
 ```
 
