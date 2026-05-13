@@ -6,6 +6,55 @@ import torch
 
 from ._tools import _maybe_compile
 
+# Pairs whose eigenvalue difference is smaller than this are treated as
+# degenerate: the 1/(λᵢ−λⱼ) term in the eigenvector gradient is zeroed out
+# to avoid NaN/inf when backpropagating through symmetric/padded systems.
+DEGEN_THRESHOLD: float = float(torch.finfo(torch.float64).eps ** 0.6)  # ≈1.3e-10
+
+
+class _degen_symeig(torch.autograd.Function):
+    """Batched symmetric eigensolver with degenerate-safe backward.
+
+    Forward: identical to ``torch.linalg.eigh``.
+
+    Backward: the ill-posed ``1/(λᵢ−λⱼ)`` terms are **zeroed out** when
+    ``|λᵢ−λⱼ| ≤ DEGEN_THRESHOLD``, preventing NaN/inf gradients through
+    degenerate eigenspaces (e.g. symmetric molecules or padded orbitals).
+
+    Handles both single ``(N, N)`` and batched ``(B, N, N)`` inputs.
+    Based on M. F. Kasim, arXiv:2011.04366 (2020).
+    """
+
+    @staticmethod
+    def forward(ctx, A: torch.Tensor):
+        eival, eivec = torch.linalg.eigh(A, UPLO="U")
+        ctx.save_for_backward(eival, eivec)
+        return eival, eivec
+
+    @staticmethod
+    def backward(ctx, grad_eival, grad_eivec):
+        eival, eivec = ctx.saved_tensors
+        eivecT = eivec.transpose(-2, -1).conj()
+
+        if grad_eivec is not None:
+            # (..., N, N) difference matrix — works for both batched and single
+            delta = eival.unsqueeze(-2) - eival.unsqueeze(-1)
+            idx = torch.abs(delta) > DEGEN_THRESHOLD
+            delta_inv = torch.zeros_like(delta)
+            delta_inv[idx] = delta[idx].reciprocal()
+            dC_proj = delta_inv * torch.matmul(eivecT, grad_eivec)
+            CdCCT = torch.matmul(eivec, torch.matmul(dC_proj, eivecT))
+        else:
+            CdCCT = torch.zeros_like(eivec)
+
+        dA = CdCCT
+        if grad_eival is not None:
+            CdLCT = torch.matmul(eivec, grad_eival.unsqueeze(-1) * eivecT)
+            dA = dA + CdLCT
+
+        dA = (dA + dA.transpose(-2, -1).conj()) * 0.5
+        return dA
+
 
 def dm_fermi_x(
     H0: torch.Tensor,
@@ -329,15 +378,70 @@ def dm_fermi_x_batch(
     return P0, v, h, f, mu0
 
 
+def dm_fermi_x_batch_degen(
+    H0: torch.Tensor,
+    T: float,
+    nocc: int,
+    mu_0: Optional[float],
+    eps: float,
+    MaxIt: int,
+    debug: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Like :func:`dm_fermi_x_batch` but with a degenerate-safe eigensolver.
+
+    Replaces ``torch.linalg.eigh`` with :class:`_degen_symeig`, which zeros out
+    the ``1/(λᵢ−λⱼ)`` gradient terms for eigenvalue pairs closer than
+    ``DEGEN_THRESHOLD``.  Use this variant when training on symmetric molecules
+    or batches that contain degenerate orbitals.
+
+    Parameters / returns are identical to :func:`dm_fermi_x_batch`.
+    """
+    h, v = _degen_symeig.apply(H0)
+    if mu_0 is None:
+        mu0 = 0.5 * (
+            h.gather(1, (nocc.unsqueeze(0).T - 1)) + h.gather(1, nocc.unsqueeze(0).T)
+        ).squeeze(-1)
+    else:
+        mu0 = torch.as_tensor(mu_0, dtype=h.dtype, device=h.device)
+
+    kB = torch.tensor(8.61739e-5, dtype=h.dtype, device=h.device)  # eV/K
+    beta = 1.0 / (kB * T)
+    occ_err_val = torch.zeros_like(
+        nocc, dtype=torch.float64, device=nocc.device
+    ) + float("inf")
+    cnt = 0
+    while (occ_err_val > eps).any() and (cnt < MaxIt):
+        f = 1.0 / (torch.exp(beta * (h - mu0.unsqueeze(-1))) + 1.0)
+        dOcc = beta * torch.sum(f * (1.0 - f), dim=1)
+        Occ = torch.sum(f, dim=1)
+        occ_err_val = abs(nocc - Occ)
+        active = occ_err_val > 1e-9
+        if active.any():
+            denom = torch.maximum(dOcc, torch.full_like(dOcc, 1e-14))
+            mu0 = mu0 + ((nocc - Occ) / denom) * active
+        cnt += 1
+    if cnt == MaxIt:
+        print(
+            "Warning: dm_fermi_batch_degen did not converge in {} iterations, occ error = {}".format(
+                MaxIt, occ_err_val
+            )
+        )
+
+    P0 = (v * f.unsqueeze(-2)) @ v.transpose(-2, -1)
+    return P0, v, h, f, mu0
+
+
 dm_fermi_x_eager = dm_fermi_x
 dm_fermi_x_os_eager = dm_fermi_x_os
 dm_fermi_x_os_shared_eager = dm_fermi_x_os_shared
 dm_fermi_x_batch_eager = dm_fermi_x_batch
+dm_fermi_x_batch_degen_eager = dm_fermi_x_batch_degen
 
 dm_fermi_x = _maybe_compile(dm_fermi_x)
 dm_fermi_x_os = _maybe_compile(dm_fermi_x_os)
 dm_fermi_x_os_shared = _maybe_compile(dm_fermi_x_os_shared)
 dm_fermi_x_batch = _maybe_compile(dm_fermi_x_batch)
+dm_fermi_x_batch_degen = _maybe_compile(dm_fermi_x_batch_degen)
 
 
 def nonaufbau_constraints(

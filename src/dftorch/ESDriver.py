@@ -1472,7 +1472,7 @@ class ESDriverBatch(torch.nn.Module):
                 structure.C,
                 gbsa_batch=structure.gbsa_batch,
                 thirdorder_batch=structure.thirdorder_batch,
-                q_init=q_init,
+                q_init=q_init if q_init is not None else structure.q,
             )
 
             (

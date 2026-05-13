@@ -5,6 +5,7 @@ import torch
 from ._dm_fermi_x import (
     dm_fermi_x,
     dm_fermi_x_batch,
+    dm_fermi_x_batch_degen,
     dm_fermi_x_os,  # noqa: F401
     dm_fermi_x_os_shared,
     nonaufbau_constraints,
@@ -258,6 +259,7 @@ def calc_q_batch(
     Znuc: torch.Tensor,
     atom_ids: torch.Tensor,
     dU_dq: Optional[torch.Tensor] = None,
+    degen: bool = False,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -331,7 +333,8 @@ def calc_q_batch(
     Hcoul = 0.5 * (Hcoul_diag.unsqueeze(-1) * S + S * Hcoul_diag.unsqueeze(-2))
     H = H0 + Hcoul
     H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H, Z))
-    Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
+    _dm_solver = dm_fermi_x_batch_degen if degen else dm_fermi_x_batch
+    Dorth, Q, e, f, mu0 = _dm_solver(
         H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50, debug=False
     )
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))

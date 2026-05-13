@@ -1,3 +1,4 @@
+import contextlib
 import time
 from collections import deque
 from typing import Any, Dict, Optional, Tuple
@@ -7,6 +8,7 @@ import torch
 from ._dm_fermi_x import (
     dm_fermi_x,
     dm_fermi_x_batch,
+    dm_fermi_x_batch_degen,
     dm_fermi_x_os,
     nonaufbau_constraints,
 )
@@ -318,7 +320,12 @@ def SCFx(
         dists = None
         CALPHA = None
 
-    with torch.no_grad():
+    _no_grad_ctx = (
+        contextlib.nullcontext()
+        if dftorch_params.get("SCF_GRAD", False)
+        else torch.no_grad()
+    )
+    with _no_grad_ctx:
         # if 1:
 
         # Initial density matrix
@@ -638,7 +645,12 @@ def scf_x_os(
         dists = None
         CALPHA = None
 
-    with torch.no_grad():
+    _no_grad_ctx = (
+        contextlib.nullcontext()
+        if dftorch_params.get("SCF_GRAD", False)
+        else torch.no_grad()
+    )
+    with _no_grad_ctx:
         # if 1:
         # Initial density matrix
         print("  Initial dm_fermi")
@@ -1006,8 +1018,12 @@ def SCFx_batch(
     else:
         dU_dq_gathered = None
 
-    # with torch.no_grad():
-    if 1:
+    _no_grad_ctx = (
+        contextlib.nullcontext()
+        if dftorch_params.get("SCF_GRAD", False)
+        else torch.no_grad()
+    )
+    with _no_grad_ctx:
         RX_gathered = RX.gather(1, atom_ids)
         RY_gathered = RY.gather(1, atom_ids)
         RZ_gathered = RZ.gather(1, atom_ids)
@@ -1017,9 +1033,11 @@ def SCFx_batch(
         Hdipole = 0.5 * (torch.matmul(Hdipole, S) + torch.matmul(S, Hdipole))
         H0 = H0 + Hdipole
 
+        _scf_degen = dftorch_params.get("SCF_DEGEN", False)
+        _dm_solver = dm_fermi_x_batch_degen if _scf_degen else dm_fermi_x_batch
         if q_init is None:
             H_ortho = torch.matmul(Z.transpose(-1, -2), torch.matmul(H0, Z))
-            Dorth, Q, e, f, mu0 = dm_fermi_x_batch(
+            Dorth, Q, e, f, mu0 = _dm_solver(
                 H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
             )
             print("  Initial mu", mu0)
@@ -1095,6 +1113,7 @@ def SCFx_batch(
                 Znuc,
                 atom_ids,
                 dU_dq_gathered if thirdorder_batch is None else None,
+                degen=_scf_degen,
             )
             Res = q - q_old
             ResNorm = torch.norm(Res, dim=1)
@@ -1279,7 +1298,12 @@ def delta_scf_x_os(
         dists = None
         CALPHA = None
 
-    with torch.no_grad():
+    _no_grad_ctx = (
+        contextlib.nullcontext()
+        if dftorch_params.get("SCF_GRAD", False)
+        else torch.no_grad()
+    )
+    with _no_grad_ctx:
         # if 1:
         # Initial density matrix
         print("  Initial dm_fermi")
