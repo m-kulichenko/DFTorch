@@ -9,7 +9,7 @@ import torch
 
 from ._tools import ordered_pairs_from_TYPE
 
-symbol_to_number: Final[dict[str, int]] = {
+symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the skf file header to the number of protons
     "H": 1,
     "He": 2,
     "Li": 3,
@@ -69,7 +69,7 @@ symbol_to_number: Final[dict[str, int]] = {
     "La": 57,
 }
 
-_CHANNELS: Final[list[str]] = [
+_CHANNELS: Final[list[str]] = [ #Probably orbitals? Might need to add f orbitals here
     "Hdd0",
     "Hdd1",
     "Hdd2",
@@ -93,7 +93,7 @@ _CHANNELS: Final[list[str]] = [
 ]
 
 
-def load_bond_integral_parameters(
+def load_bond_integral_parameters( #
     neighbor_I: torch.Tensor,
     neighbor_J: torch.Tensor,
     TYPE: torch.Tensor,
@@ -486,7 +486,7 @@ def channels_to_matrix(
     return torch.stack([channels[ch] for ch in order], dim=1)
 
 
-def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor:
+def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor: #Probably have to compute for f orbitals too
     """Compute cubic spline coefficients for all channels.
 
     Parameters
@@ -646,7 +646,7 @@ def read_wfc_hsd(
         MAX_ANG_OCC[Z] = max_ang_occ
 
 
-def get_skf_tensors(
+def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
     TYPE: torch.Tensor, skfpath: str
 ) -> tuple[
     torch.Tensor,

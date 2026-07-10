@@ -50,9 +50,9 @@ class Constants(torch.nn.Module):
 
         super().__init__()
 
-        self.skfpath = dftorch_params["SKFPATH"]
+        self.skfpath = dftorch_params["SKFPATH"] #Where to read the skf file from
         self.magnetic_hubbard_ldep = dftorch_params.get("MAGNETIC_HUBBARD_LDEP", False)
-        self.dftb3 = dftorch_params.get("DFTB3", False)
+        self.dftb3 = dftorch_params.get("DFTB3", False) 
         self.grad_param = dftorch_params.get("GRAD_PARAM", False)
         self.symbol_to_number = symbol_to_number
         self.label = label
@@ -64,7 +64,7 @@ class Constants(torch.nn.Module):
         self.atomic_num = torch.nn.Parameter(atomic_num, requires_grad=False)
         self.mass = torch.nn.Parameter(mass, requires_grad=False)
 
-        if isinstance(dftorch_params["FILENAME"], str):
+        if isinstance(dftorch_params["FILENAME"], str): #Whether or not to read pdb or xyz
             if dftorch_params["FILENAME"].lower().endswith(".pdb"):
                 species, _, _ = read_pdb(
                     [dftorch_params["FILENAME"]], sort=False
@@ -75,11 +75,12 @@ class Constants(torch.nn.Module):
                 )  # Input coordinate file
 
         else:
-            files = dftorch_params["FILENAME"]
+            files = dftorch_params["FILENAME"] #GET THE SPECIES LIST FROM THE XYZ FILES
             if all(f.lower().endswith(".pdb") for f in files):
                 species, _, _ = read_pdb(files, sort=False)
             else:
-                species, _ = read_xyz(files, sort=False)  # Input coordinate file
+                species, _ = read_xyz(files, sort=False)  # Input coordinate file 
+
         TYPE = torch.tensor(species.flatten())
         pairs_tensor, _, _ = ordered_pairs_from_TYPE(TYPE)
         pair_lookup = torch.full(
@@ -93,7 +94,7 @@ class Constants(torch.nn.Module):
                 pairs_tensor.shape[0], dtype=torch.long, device=TYPE.device
             )
 
-        from ._bond_integral import get_skf_tensors
+        from ._bond_integral import get_skf_tensors #TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
 
         (
             R_tensor,
@@ -108,14 +109,14 @@ class Constants(torch.nn.Module):
             TORE,
             N_S,
             N_P,
-            N_D,
+            N_D, #NEED NF too, HOW MANY F ELECTRONS IN EACH ORBITAL
             ES,
             EP,
             ED,
             US,
             UP,
-            UD,
-        ) = get_skf_tensors(TYPE, self.skfpath)
+            UD, #MIGHT NEED UF too right
+        ) = get_skf_tensors(TYPE, self.skfpath) #Gets all the parameters from the SKF files, important to load F orbitals
 
         try:
             w_shell = load_spinw_to_matrix(
@@ -167,7 +168,7 @@ class Constants(torch.nn.Module):
         self.Ud = torch.nn.Parameter(UD, requires_grad=self.grad_param)
         self.Es = torch.nn.Parameter(ES, requires_grad=self.grad_param)
         self.Ep = torch.nn.Parameter(EP, requires_grad=self.grad_param)
-        self.Ed = torch.nn.Parameter(ED, requires_grad=self.grad_param)
+        self.Ed = torch.nn.Parameter(ED, requires_grad=self.grad_param) #ARYAN NOTE F ORBITAL
 
         # ── DFTB3: Hubbard derivatives dU/dq ─────────────────────────────
         if self.dftb3:
@@ -1082,7 +1083,7 @@ class ConstantsTest(torch.nn.Module):
         self.max_ang = torch.nn.Parameter(max_ang, requires_grad=False)
         self.n_s = torch.nn.Parameter(n_s, requires_grad=False)
         self.n_p = torch.nn.Parameter(n_p, requires_grad=False)
-        self.n_d = torch.nn.Parameter(n_d, requires_grad=False)
+        self.n_d = torch.nn.Parameter(n_d, requires_grad=False) #ARYAN NOTE F ORBITAL
 
         # self.skfpath = skfpath
 

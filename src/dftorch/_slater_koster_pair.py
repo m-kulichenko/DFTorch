@@ -218,7 +218,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     )
     #######
 
-    # H-H
+    # H-H (ARYAN NOTE I THINK THIS MEANS S-S)
     ######### dH/dx
     HSSS_dxyz = HSSS_dR * dR_dxyz
     dH0.index_add_(
@@ -227,7 +227,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     _sg(None, 0, 0, HSSS_dxyz)
     #########
 
-    # H-X
+    # H-X (ARYAN NOTE THIS MEANS S-P)
     ###### HSPS_all
     tmp_mask = (
         pair_mask_HX
@@ -295,7 +295,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     _sg(tmp_mask, 3, 0, HPSS_ps_N_dxyz)
     #########
 
-    # X-X
+    # X-X (Means P-P)
     tmp_mask = pair_mask_XX | pair_mask_YY | pair_mask_XY | pair_mask_YX
     L_XX = L[tmp_mask]
     M_XX = M[tmp_mask]

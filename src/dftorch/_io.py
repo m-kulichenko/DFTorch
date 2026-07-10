@@ -437,7 +437,7 @@ def write_xyz_from_xyz(
                 f.write(f"{symbol} {x:.6f} {y:.6f} {z:.6f}\n")
 
 
-def read_xyz(files: list[str], sort: bool = True) -> tuple[np.ndarray, np.ndarray]:
+def read_xyz(files: list[str], sort: bool = True) -> tuple[np.ndarray, np.ndarray]: #IMPORTANT TO READ IN THE ATOM DATA
     """Read one or more XYZ files into arrays of species and coordinates.
 
     Parameters
@@ -494,7 +494,7 @@ def read_xyz(files: list[str], sort: bool = True) -> tuple[np.ndarray, np.ndarra
     SPECIES = COORDINATES[:, :, 0].astype(int)
     COORDINATES = COORDINATES[:, :, 1:4]
 
-    return SPECIES, COORDINATES
+    return SPECIES, COORDINATES #So I have a list of all the species I see
 
 
 # ── Element-symbol → atomic-number lookup (covers Z = 1–54) ──────────

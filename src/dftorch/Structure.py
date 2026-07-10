@@ -211,6 +211,8 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
+
+        #Defines if open shell or closed shell, and calculates the number of occupied orbitals for each case
         if dftorch_params.get("UNRESTRICTED", False):  # open-shell
             tot_el = torch.tensor(
                 [int(const.tore[self.TYPE].sum() - self.charge)], device=device
@@ -249,7 +251,7 @@ class Structure(torch.nn.Module):
 
         # Build a per-atom template in the standard AO order: [s, px, py, pz, dxy, dyz, dzx, dx2-y2, dz2]
         # (All p orbitals get EpA; all d orbitals get EdA.)
-        template = torch.stack(
+        template = torch.stack( #ARYAN NOTE ADD F ORBITALS HERE TOO
             (
                 EsA,  # s
                 EpA,
@@ -275,7 +277,7 @@ class Structure(torch.nn.Module):
         self.diagonal = template[mask]  # 1-D tensor
         self.HDIM = self.diagonal.shape[-1]  # Total number of basis functions in system
 
-        UsA = const.U[self.TYPE]  # (Nr_atoms,)
+        UsA = const.U[self.TYPE]  # (Nr_atoms,) #ARYAN NOTE F ORBITALS NEEEDED
         UpA = const.Up[self.TYPE]  # (Nr_atoms,)
         UdA = const.Ud[self.TYPE]  # (Nr_atoms,)
         ns = const.n_s[self.TYPE]  # (Nr_atoms,)
@@ -462,7 +464,7 @@ class StructureBatch(torch.nn.Module):
 
         self.Hubbard_U = const.U[self.TYPE]
 
-        # Shell on-site energies per atom (pulled from dicts)
+        # Shell on-site energies per atom (pulled from dicts) #ARYAN NOTE NEED F ELECTRONS
         EsA = const.Es[self.TYPE]  # (batch, Nats)
         EpA = const.Ep[self.TYPE]  # (batch, Nats)
         EdA = const.Ed[self.TYPE]  # (batch, Nats)
@@ -472,7 +474,7 @@ class StructureBatch(torch.nn.Module):
         # 4  -> main-group sp: s + 3*p
         # 9  -> transition-metal spd: s + 3*p + 5*d
         self.has_p = const.n_orb[self.TYPE] >= 4
-        self.has_d = const.n_orb[self.TYPE] == 9
+        self.has_d = const.n_orb[self.TYPE] == 9 #ARYAN NOTE NEED F
 
         # Vectorized orbital energy template (batch, Nats, 9)
         template = torch.stack(
@@ -538,7 +540,7 @@ class StructureBatch(torch.nn.Module):
         UdA = const.Ud[self.TYPE]
         ns = const.n_s[self.TYPE]
         np = const.n_p[self.TYPE]
-        nd = const.n_d[self.TYPE]
+        nd = const.n_d[self.TYPE] #ARYAN NOTE
         # Shell template (batch,Nats,3)
         template_shell = torch.stack((UsA, UpA, UdA), dim=2)
         template_ang = torch.stack(
@@ -578,7 +580,7 @@ class StructureBatch(torch.nn.Module):
             self.TYPE,
             const,
             self.has_p,
-            self.has_d,
+            self.has_d, #ARYAN NOTE NEED F
         )
         self.D0 = 0.5 * self.D0
 
