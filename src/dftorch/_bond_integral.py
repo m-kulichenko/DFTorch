@@ -9,7 +9,7 @@ import torch
 
 from ._tools import ordered_pairs_from_TYPE
 
-symbol_to_number: Final[dict[str, int]] = { #XConverts the first number in the skf file header to the number of protons, NOTE should add more elements
+symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the skf file header to the number of protons, NOTE should add more elements
     "H": 1,
     "He": 2,
     "Li": 3,

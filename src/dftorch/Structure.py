@@ -4,9 +4,211 @@ from typing import Any
 
 import torch
 
-from ._atomic_density_matrix import atomic_density_matrix, atomic_density_matrix_batch
 from ._cell import normalize_cell, normalize_cell_batch, wrap_positions
 from ._io import read_pdb, read_xyz
+
+
+SHELL_DIMS = (1, 3, 5, 7)
+SHELL_LOCAL_STARTS = (0, 1, 4, 9)
+SHELL_TYPE_IDS = (1, 2, 3, 4)  # 1=s, 2=p, 3=d, 4=f
+
+# Local AO layout used throughout the f-orbital implementation.
+# The f labels follow the cubic-harmonic ordering used for f-electron
+# Slater-Koster tables:
+#   fx3        = x(5*x^2 - 3*r^2)
+#   fy3        = y(5*y^2 - 3*r^2)
+#   fz3        = z(5*z^2 - 3*r^2)
+#   fx_y2_z2   = x(y^2 - z^2)
+#   fy_z2_x2   = y(z^2 - x^2)
+#   fz_x2_y2   = z(x^2 - y^2)
+#   fxyz       = xyz
+AO_LABEL_TEMPLATE = (
+    "s",
+    "px",
+    "py",
+    "pz",
+    "dxy",
+    "dyz",
+    "dzx",
+    "dx2_y2",
+    "dz2",
+    "fx3",
+    "fy3",
+    "fz3",
+    "fx_y2_z2",
+    "fy_z2_x2",
+    "fz_x2_y2",
+    "fxyz",
+)
+
+AO_SHELL_TEMPLATE = (
+    1,
+    2,
+    2,
+    2,
+    3,
+    3,
+    3,
+    3,
+    3,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+    4,
+)
+
+
+def _as_batched_species_and_coordinates(
+    species: torch.Tensor | Any,
+    coordinates: torch.Tensor | Any,
+    device: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return species as ``(B,N)`` and coordinates as ``(B,N,3)`` tensors."""
+    if isinstance(species, torch.Tensor):
+        species_t = species.to(device=device, dtype=torch.int64)
+    else:
+        species_t = torch.as_tensor(species, device=device, dtype=torch.int64)
+
+    if isinstance(coordinates, torch.Tensor):
+        coordinates_t = coordinates.to(device=device, dtype=torch.get_default_dtype())
+    else:
+        coordinates_t = torch.as_tensor(
+            coordinates, device=device, dtype=torch.get_default_dtype()
+        )
+
+    if species_t.dim() == 1:
+        species_t = species_t.unsqueeze(0)
+    if coordinates_t.dim() == 2:
+        coordinates_t = coordinates_t.unsqueeze(0)
+
+    return species_t, coordinates_t
+
+
+def _ao_mask_from_shell_present(shell_present: torch.Tensor) -> torch.Tensor:
+    """Expand ``(...,4)`` shell flags into a ``(...,16)`` AO-position mask."""
+    mask = torch.zeros(
+        (*shell_present.shape[:-1], len(AO_LABEL_TEMPLATE)),
+        dtype=torch.bool,
+        device=shell_present.device,
+    )
+    mask[..., 0] = shell_present[..., 0]
+    mask[..., 1:4] = shell_present[..., 1].unsqueeze(-1)
+    mask[..., 4:9] = shell_present[..., 2].unsqueeze(-1)
+    mask[..., 9:16] = shell_present[..., 3].unsqueeze(-1)
+    return mask
+
+
+def _shell_local_start(shell_present: torch.Tensor) -> torch.Tensor:
+    """Return local AO starts for s/p/d/f shells, using -1 for absent shells."""
+    starts = torch.tensor(
+        SHELL_LOCAL_STARTS,
+        dtype=torch.int64,
+        device=shell_present.device,
+    )
+    starts = starts.expand(*shell_present.shape[:-1], 4)
+    return torch.where(shell_present, starts, torch.full_like(starts, -1))
+
+
+def _shell_local_end(shell_present: torch.Tensor) -> torch.Tensor:
+    """Return local AO ends for s/p/d/f shells, using -1 for absent shells."""
+    starts = _shell_local_start(shell_present)
+    dims = torch.tensor(SHELL_DIMS, dtype=torch.int64, device=shell_present.device)
+    ends = starts + dims.expand_as(starts) - 1
+    return torch.where(shell_present, ends, torch.full_like(ends, -1))
+
+
+def _global_shell_start(
+    shell_present: torch.Tensor,
+    shell_local_start: torch.Tensor,
+    atom_ao_start: torch.Tensor,
+) -> torch.Tensor:
+    """Convert local shell starts into structure-local or batch-global AO starts."""
+    starts = shell_local_start + atom_ao_start.unsqueeze(-1)
+    return torch.where(shell_present, starts, torch.full_like(starts, -1))
+
+
+def _global_shell_end(
+    shell_present: torch.Tensor,
+    shell_local_end: torch.Tensor,
+    atom_ao_start: torch.Tensor,
+) -> torch.Tensor:
+    """Convert local shell ends into structure-local or batch-global AO ends."""
+    ends = shell_local_end + atom_ao_start.unsqueeze(-1)
+    return torch.where(shell_present, ends, torch.full_like(ends, -1))
+
+
+def _flatten_ao_labels(shell_present: torch.Tensor) -> list[str]:
+    """Return flattened AO labels for a single structure in atom-major order."""
+    mask = _ao_mask_from_shell_present(shell_present).detach().cpu()
+    labels: list[str] = []
+    for atom_mask in mask:
+        labels.extend(label for label, present in zip(AO_LABEL_TEMPLATE, atom_mask) if present)
+    return labels
+
+
+def _ao_shell_types_from_mask(ao_mask: torch.Tensor) -> torch.Tensor:
+    """Return flattened shell type IDs for all present AO positions."""
+    template = torch.tensor(
+        AO_SHELL_TEMPLATE, dtype=torch.int64, device=ao_mask.device
+    ).expand(*ao_mask.shape[:-1], len(AO_SHELL_TEMPLATE))
+    return template[ao_mask]
+
+
+def _atomic_density_matrix_from_shells(
+    H_INDEX_START: torch.Tensor,
+    HDIM: int,
+    TYPE: torch.Tensor,
+    const: Any,
+    shell_present: torch.Tensor,
+    shell_ao_start: torch.Tensor,
+) -> torch.Tensor:
+    """Build the initial atom-density vector from explicit shell metadata."""
+    D_atomic = torch.zeros(
+        HDIM, device=H_INDEX_START.device, dtype=torch.get_default_dtype()
+    )
+    shell_occ = (const.n_s, const.n_p, const.n_d, const.n_f)
+
+    for shell_idx, shell_dim in enumerate(SHELL_DIMS):
+        present = shell_present[:, shell_idx]
+        if not present.any():
+            continue
+        starts = shell_ao_start[present, shell_idx]
+        occ = shell_occ[shell_idx][TYPE[present]] / float(shell_dim)
+        for local_idx in range(shell_dim):
+            D_atomic[starts + local_idx] = occ
+
+    return D_atomic
+
+
+def _atomic_density_matrix_batch_from_shells(
+    batch_size: int,
+    H_INDEX_START: torch.Tensor,
+    HDIM: int,
+    TYPE: torch.Tensor,
+    const: Any,
+    shell_present: torch.Tensor,
+    shell_ao_start: torch.Tensor,
+) -> torch.Tensor:
+    """Batched initial atom-density matrix from explicit shell metadata."""
+    D_atomic = torch.zeros(
+        batch_size, HDIM, device=H_INDEX_START.device, dtype=torch.get_default_dtype()
+    )
+    shell_occ = (const.n_s, const.n_p, const.n_d, const.n_f)
+
+    for shell_idx, shell_dim in enumerate(SHELL_DIMS):
+        present = shell_present[:, :, shell_idx]
+        if not present.any():
+            continue
+        batch_idx, atom_idx = present.nonzero(as_tuple=True)
+        starts = shell_ao_start[batch_idx, atom_idx, shell_idx]
+        occ = shell_occ[shell_idx][TYPE[batch_idx, atom_idx]] / float(shell_dim)
+        for local_idx in range(shell_dim):
+            D_atomic[batch_idx, starts + local_idx] = occ
+
+    return D_atomic
 
 
 class Structure(torch.nn.Module):
@@ -14,49 +216,10 @@ class Structure(torch.nn.Module):
     Container for a DFTB structure holding atom types, coordinates, box, and
     derived per-atom/basis indexing information.
 
-    Parameters
-    ----------
-    cell : sequence or torch.Tensor
-        Periodic cell specification. May be:
-        - shape (3,) for orthorhombic box lengths in Å
-        - shape (3,3) for a full triclinic cell matrix in Å
-    const : object
-        Constants database with fields (n_orb, mass, tore, U, Es, Ep, Ed, Up, Ud,
-        n_s, n_p, n_d, max_ang, etc.).
-    charge : int, default 0
-        Total system charge (affects electron count Nocc).
-    device : str, default 'cpu'
-        Device label stored for convenience.
+    The local AO order is nested shell order:
 
-    Attributes
-    ----------
-    TYPE, RX, RY, RZ, cell : as passed
-    lattice_vecs : (3,3) torch.Tensor
-        Diagonal lattice vectors built from cell.
-    Nats : int
-        Number of atoms.
-    n_orbitals_per_atom : (N,) torch.Tensor
-        Basis size per atom.
-    H_INDEX_START / H_INDEX_END : (N,) torch.Tensor
-        Start/end indices of each atom’s AO block in flattened ordering.
-    Mnuc, Znuc : (N,) torch.Tensor
-        Atomic masses and nuclear charges.
-    Nocc : int
-        Spin-summed occupied electron count after charge adjustment.
-    Hubbard_U : (N,) torch.Tensor
-        Atom-resolved Hubbard U values.
-    diagonal : (sum_i n_orb[i],) torch.Tensor
-        On-site energies in AO order [s, p..., d...] filtered per atom.
-    HDIM : int
-        Total number of AOs.
-    Hubbard_U_sr : (n_shell_total,) torch.Tensor
-        Shell-resolved Hubbard U (s/p/d present per atom).
-    shell_types : (n_shell_total,) torch.Tensor
-        Angular shell identifiers (1=s,2=p,3=d).
-    el_per_shell : (n_shell_total,) torch.Tensor
-        Electrons per shell for each atom.
-    H_INDEX_START_U / H_INDEX_END_U : (N,) torch.Tensor
-        Start/end indices for shell-resolved data.
+    ``s, px, py, pz, dxy, dyz, dzx, dx2_y2, dz2,``
+    ``fx3, fy3, fz3, fx_y2_z2, fy_z2_x2, fz_x2_y2, fxyz``.
     """
 
     def __init__(
@@ -70,27 +233,7 @@ class Structure(torch.nn.Module):
         *args,
         **kwargs,
     ) -> None:
-        """Initialise a single-structure DFTB container.
-
-        Parameters
-        ----------
-        dftorch_params : dict
-            Calculation parameters, including the input filename, electronic
-            temperature, optional cell, and charge/spin settings.
-        const : Any
-            Constants database providing basis dimensions, masses, Hubbard
-            parameters, and on-site energies.
-        device : str, default "cpu"
-            Device used to allocate tensors.
-        species : torch.Tensor, optional
-            Atomic numbers with shape ``(1, Nats)`` or ``(Nats,)``. When omitted,
-            species are read from ``dftorch_params["FILENAME"]``.
-        coordinates : torch.Tensor, optional
-            Cartesian coordinates with shape ``(1, Nats, 3)`` or ``(Nats, 3)`` in
-            Angstrom. When omitted, coordinates are read from the input file.
-        ignore_spin : bool, default False
-            Skip the even-electron check for closed-shell systems.
-        """
+        """Initialise a single-structure DFTB container."""
         super().__init__(*args, **kwargs)
 
         self.req_grad_xyz = dftorch_params.get("GRAD_XYZ", False)
@@ -111,22 +254,11 @@ class Structure(torch.nn.Module):
                 cell = dftorch_params.get("CELL", None)
                 species, coordinates = read_xyz(
                     [dftorch_params["FILENAME"]], sort=False
-                )  # Input coordinate file
+                )
 
-        # self.TYPE = torch.tensor(species[0], dtype=torch.int64, device=device)
-
-        if isinstance(coordinates, torch.Tensor):
-            coordinates = coordinates.to(device=device, dtype=torch.get_default_dtype())
-        else:
-            coordinates = torch.as_tensor(
-                coordinates, device=device, dtype=torch.get_default_dtype()
-            )
-
-        if isinstance(species, torch.Tensor):
-            species = species.to(device=device, dtype=torch.int64)
-        else:
-            species = torch.as_tensor(species, device=device, dtype=torch.int64)
-
+        species, coordinates = _as_batched_species_and_coordinates(
+            species, coordinates, device
+        )
         self.TYPE = species[0]
 
         self.RX = (
@@ -155,7 +287,6 @@ class Structure(torch.nn.Module):
                 R = torch.stack((self.RX, self.RY, self.RZ), dim=-1)
                 R_wrapped = wrap_positions(R, self.cell, self.cell_inv)
 
-            # Create new leaf tensors at the wrapped positions
             self.RX = (
                 R_wrapped[..., 0].clone().detach().requires_grad_(self.req_grad_xyz)
             )
@@ -167,12 +298,10 @@ class Structure(torch.nn.Module):
             )
 
             if self.req_grad_cell:
-                # Save leaf references for force extraction
                 self._RX_leaf = self.RX
                 self._RY_leaf = self.RY
                 self._RZ_leaf = self.RZ
 
-                # Detach the old cell, create a fresh leaf for cell gradients
                 cell_ref = self.cell.detach()
                 positions = torch.stack((self.RX, self.RY, self.RZ), dim=-1)
                 frac_coords = positions @ torch.linalg.inv(cell_ref)
@@ -183,9 +312,7 @@ class Structure(torch.nn.Module):
                 cart_coords = frac_coords @ self.cell
                 self.RX, self.RY, self.RZ = cart_coords.unbind(dim=-1)
 
-        self.coordinates = torch.stack(
-            (self.RX, self.RY, self.RZ),
-        )
+        self.coordinates = torch.stack((self.RX, self.RY, self.RZ))
 
         self.Nats = len(self.TYPE)
         self.const = const
@@ -211,9 +338,7 @@ class Structure(torch.nn.Module):
 
         self.Mnuc = const.mass[self.TYPE]
         self.Znuc = const.tore[self.TYPE]
-
-        #Defines if open shell or closed shell, and calculates the number of occupied orbitals for each case
-        if dftorch_params.get("UNRESTRICTED", False):  # open-shell
+        if dftorch_params.get("UNRESTRICTED", False):
             tot_el = torch.tensor(
                 [int(const.tore[self.TYPE].sum() - self.charge)], device=device
             )
@@ -235,117 +360,106 @@ class Structure(torch.nn.Module):
             self.Nocc = int(tot_el / 2)
         self.Hubbard_U = const.U[self.TYPE]
 
-        # Shell on-site energies per atom (pulled from your dicts)
-        EsA = const.Es[self.TYPE]  # (Nr_atoms,)
-        EpA = const.Ep[self.TYPE]  # (Nr_atoms,)
-        EdA = const.Ed[self.TYPE]  # (Nr_atoms,)
+        self.shell_present = const.shell_present[self.TYPE].to(dtype=torch.bool)
+        self.has_s = self.shell_present[:, 0]
+        self.has_p = self.shell_present[:, 1]
+        self.has_d = self.shell_present[:, 2]
+        self.has_f = self.shell_present[:, 3]
 
-        # Which shells exist for each atom, based on your basis size:
-        # 1  -> H-like: s
-        # 4  -> main-group sp: s + 3*p
-        # 9  -> transition-metal spd: s + 3*p + 5*d
-        self.has_p = const.n_orb[self.TYPE] >= 4  # p present for 4 or 9
-        self.has_d = const.n_orb[self.TYPE] == 9  # d present only for 9 here
-        # (Optional: if you ever use sd-only (6 orbitals), set has_d |= (const.n_orb[self.TYPE] == 6)
-        #            and exclude p for that case.)
-
-        # Build a per-atom template in the standard AO order: [s, px, py, pz, dxy, dyz, dzx, dx2-y2, dz2]
-        # (All p orbitals get EpA; all d orbitals get EdA.)
-        template = torch.stack( #ARYAN NOTE ADD F ORBITALS HERE TOO
-            (
-                EsA,  # s
-                EpA,
-                EpA,
-                EpA,  # p triplet
-                EdA,
-                EdA,
-                EdA,
-                EdA,
-                EdA,  # d quintet
-            ),
-            dim=1,  # shape: (Nr_atoms, 9)
+        self.shell_local_start = _shell_local_start(self.shell_present)
+        self.shell_local_end = _shell_local_end(self.shell_present)
+        self.shell_ao_start = _global_shell_start(
+            self.shell_present, self.shell_local_start, self.H_INDEX_START
+        )
+        self.shell_ao_end = _global_shell_end(
+            self.shell_present, self.shell_local_end, self.H_INDEX_START
         )
 
-        # Per-atom mask telling which of the 9 positions are actually present
-        mask = torch.zeros_like(template, dtype=torch.bool)  # (Nr_atoms, 9)
-        mask[:, 0] = True  # s always present
-        mask[:, 1:4] = self.has_p.unsqueeze(1).expand(-1, 3)  # p block present?
-        mask[:, 4:9] = self.has_d.unsqueeze(1).expand(-1, 5)  # d block present?
+        # Shell on-site energies per atom.
+        EsA = const.Es[self.TYPE]
+        EpA = const.Ep[self.TYPE]
+        EdA = const.Ed[self.TYPE]
+        EfA = const.Ef[self.TYPE]
 
-        # Flatten row-by-row keeping only present orbitals for each atom.
-        # Result length = sum_i n_orb[i]
-        self.diagonal = template[mask]  # 1-D tensor
-        self.HDIM = self.diagonal.shape[-1]  # Total number of basis functions in system
-
-        UsA = const.U[self.TYPE]  # (Nr_atoms,) #ARYAN NOTE F ORBITALS NEEEDED
-        UpA = const.Up[self.TYPE]  # (Nr_atoms,)
-        UdA = const.Ud[self.TYPE]  # (Nr_atoms,)
-        ns = const.n_s[self.TYPE]  # (Nr_atoms,)
-        np = const.n_p[self.TYPE]  # (Nr_atoms,)
-        nd = const.n_d[self.TYPE]  # (Nr_atoms,)
-
+        # Per-atom AO template in the fixed 16-position local order.
         template = torch.stack(
-            (UsA, UpA, UdA),
-            dim=1,
-        )  # shape: (Nr_atoms, 9)
-
-        template_ang = torch.stack(
             (
-                torch.ones_like(UsA, dtype=torch.int64),  # s
-                torch.ones_like(UsA, dtype=torch.int64) + 1,  # p
-                torch.ones_like(UsA, dtype=torch.int64) + 2,  # d
+                EsA,
+                EpA,
+                EpA,
+                EpA,
+                EdA,
+                EdA,
+                EdA,
+                EdA,
+                EdA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
             ),
             dim=1,
-        )  # shape: (Nr_atoms, 9)
+        )
+        ao_mask = _ao_mask_from_shell_present(self.shell_present)
 
-        template_el_per_shell = torch.stack((ns, np, nd), dim=1)  # shape: (Nr_atoms, 9)
+        self.diagonal = template[ao_mask]
+        self.HDIM = self.diagonal.shape[-1]
+        self.ao_shell_types = _ao_shell_types_from_mask(ao_mask)
+        self.ao_labels = _flatten_ao_labels(self.shell_present)
 
-        mask = torch.zeros_like(template, dtype=torch.bool)  # (Nr_atoms, 3)
-        mask[:, 0] = True  # s always present
-        mask[:, 1] = self.has_p
-        mask[:, 2] = self.has_d
-        self.Hubbard_U_sr = template[mask]  # shell-resolved Hubbard U
-        self.shell_types = template_ang[mask]  # shell types (s=1,p=2,d=3)
-        self.el_per_shell = template_el_per_shell[mask]  #
-        self.n_shells_per_atom = const.max_ang[self.TYPE]
+        UsA = const.U[self.TYPE]
+        UpA = const.Up[self.TYPE]
+        UdA = const.Ud[self.TYPE]
+        UfA = const.Uf[self.TYPE]
+        ns = const.n_s[self.TYPE]
+        np = const.n_p[self.TYPE]
+        nd = const.n_d[self.TYPE]
+        nf = const.n_f[self.TYPE]
+
+        template_U = torch.stack((UsA, UpA, UdA, UfA), dim=1)
+        template_ang = torch.stack(
+            (
+                torch.ones_like(UsA, dtype=torch.int64),
+                torch.ones_like(UsA, dtype=torch.int64) + 1,
+                torch.ones_like(UsA, dtype=torch.int64) + 2,
+                torch.ones_like(UsA, dtype=torch.int64) + 3,
+            ),
+            dim=1,
+        )
+        template_el_per_shell = torch.stack((ns, np, nd, nf), dim=1)
+
+        shell_mask = self.shell_present
+        self.Hubbard_U_sr = template_U[shell_mask]
+        self.shell_types = template_ang[shell_mask]
+        self.el_per_shell = template_el_per_shell[shell_mask]
+        self.n_shells_per_atom = self.shell_present.sum(dim=1).to(torch.int64)
         self.H_INDEX_START_U = torch.zeros(self.Nats, dtype=torch.int64, device=device)
         self.H_INDEX_START_U[1:] = torch.cumsum(self.n_shells_per_atom, dim=0)[:-1]
         self.H_INDEX_END_U = self.H_INDEX_START_U + self.n_shells_per_atom - 1
 
-        self.D0 = atomic_density_matrix(
-            self.H_INDEX_START, self.HDIM, self.TYPE, const, self.has_p, self.has_d
+        self.D0 = _atomic_density_matrix_from_shells(
+            self.H_INDEX_START,
+            self.HDIM,
+            self.TYPE,
+            const,
+            self.shell_present,
+            self.shell_ao_start,
         )
         self.D0 = 0.5 * self.D0
         self.q_spin_sr = None
         self.q = None
 
         if const.dftb3:
-            self.dU_dq = const.dU_dq[self.TYPE]  # (Nr_atoms,)
+            self.dU_dq = const.dU_dq[self.TYPE]
         else:
             self.dU_dq = None
 
 
 class StructureBatch(torch.nn.Module):
-    """Batch container for multiple structures.
-    Generates per-structure diagonal (on-site orbital energies) supporting heterogeneous atom counts.
-    After construction:
-      If batch_size == 1:
-          self.diagonal -> 1D tensor (sum_i n_orb[i])
-          self.HDIM -> int
-      Else:
-          self.diagonal -> list[ torch.Tensor ]
-          self.HDIM -> list[int]
-          self.diagonal_padded -> (batch_size, max_HDIM) zero-padded
-
-    Parameters
-    ----------
-    cell : sequence or torch.Tensor
-        Periodic cell specification. May be:
-        - shape (3,) for one shared orthorhombic box
-        - shape (3,3) for one shared triclinic cell
-        - shape (B,3) for per-structure orthorhombic boxes
-        - shape (B,3,3) for per-structure triclinic cells
-    """
+    """Batch container for multiple structures with explicit s/p/d/f shell metadata."""
 
     def __init__(
         self,
@@ -356,24 +470,10 @@ class StructureBatch(torch.nn.Module):
         *args,
         **kwargs,
     ) -> None:
-        """Initialise a batched structure container.
-
-        Parameters
-        ----------
-        dftorch_params : dict
-            Calculation parameters with ``FILENAME`` set to a list of input files.
-        const : Any
-            Constants database providing basis dimensions, masses, Hubbard
-            parameters, and on-site energies.
-        device : str, default "cpu"
-            Device used to allocate tensors.
-        ignore_spin : bool, default False
-            Skip the even-electron check for closed-shell systems.
-        """
+        """Initialise a batched structure container."""
         super().__init__(*args, **kwargs)
 
         self.batch_size = len(dftorch_params["FILENAME"])
-        # Auto-detect PDB vs XYZ from first file extension
         if (
             dftorch_params["FILENAME"]
             and isinstance(dftorch_params["FILENAME"][0], str)
@@ -381,29 +481,15 @@ class StructureBatch(torch.nn.Module):
         ):
             species, coordinates, _ = read_pdb(dftorch_params["FILENAME"], sort=False)
         else:
-            species, coordinates = read_xyz(
-                dftorch_params["FILENAME"], sort=False
-            )  # Input coordinate file
-        self.TYPE = torch.tensor(species, dtype=torch.int64, device=device)
+            species, coordinates = read_xyz(dftorch_params["FILENAME"], sort=False)
+
+        self.TYPE, coordinates = _as_batched_species_and_coordinates(
+            species, coordinates, device
+        )
         self.req_grad_xyz = dftorch_params.get("GRAD_XYZ", False)
-        self.RX = torch.tensor(
-            coordinates[:, :, 0],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
-        )
-        self.RY = torch.tensor(
-            coordinates[:, :, 1],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
-        )
-        self.RZ = torch.tensor(
-            coordinates[:, :, 2],
-            device=device,
-            dtype=torch.get_default_dtype(),
-            requires_grad=self.req_grad_xyz,
-        )
+        self.RX = coordinates[:, :, 0].clone().detach().requires_grad_(self.req_grad_xyz)
+        self.RY = coordinates[:, :, 1].clone().detach().requires_grad_(self.req_grad_xyz)
+        self.RZ = coordinates[:, :, 2].clone().detach().requires_grad_(self.req_grad_xyz)
 
         cell = dftorch_params.get("CELL", None)
         self.cell = (
@@ -421,13 +507,11 @@ class StructureBatch(torch.nn.Module):
         self.lattice_vecs = self.cell
 
         if self.cell is not None:
-            R = torch.stack((self.RX, self.RY, self.RZ), dim=-1)  # (B,N,3)
+            R = torch.stack((self.RX, self.RY, self.RZ), dim=-1)
             R = wrap_positions(R, self.cell, self.cell_inv)
             self.RX, self.RY, self.RZ = R.unbind(dim=-1)
 
-        self.coordinates = torch.stack(
-            (self.RX, self.RY, self.RZ),
-        )
+        self.coordinates = torch.stack((self.RX, self.RY, self.RZ))
 
         self.Nats = self.TYPE.shape[-1]
         self.const = const
@@ -445,7 +529,7 @@ class StructureBatch(torch.nn.Module):
             )
 
         self.device = device
-        self.n_orbitals_per_atom = const.n_orb[self.TYPE]  # (batch, Nats)
+        self.n_orbitals_per_atom = const.n_orb[self.TYPE]
         self.H_INDEX_START = torch.zeros(
             self.batch_size, self.Nats, dtype=torch.int64, device=device
         )
@@ -464,102 +548,110 @@ class StructureBatch(torch.nn.Module):
 
         self.Hubbard_U = const.U[self.TYPE]
 
-        # Shell on-site energies per atom (pulled from dicts) #ARYAN NOTE NEED F ELECTRONS
-        EsA = const.Es[self.TYPE]  # (batch, Nats)
-        EpA = const.Ep[self.TYPE]  # (batch, Nats)
-        EdA = const.Ed[self.TYPE]  # (batch, Nats)
+        self.shell_present = const.shell_present[self.TYPE].to(dtype=torch.bool)
+        self.has_s = self.shell_present[:, :, 0]
+        self.has_p = self.shell_present[:, :, 1]
+        self.has_d = self.shell_present[:, :, 2]
+        self.has_f = self.shell_present[:, :, 3]
 
-        # Which shells exist for each atom, based on your basis size:
-        # 1  -> H-like: s
-        # 4  -> main-group sp: s + 3*p
-        # 9  -> transition-metal spd: s + 3*p + 5*d
-        self.has_p = const.n_orb[self.TYPE] >= 4
-        self.has_d = const.n_orb[self.TYPE] == 9 #ARYAN NOTE NEED F
+        self.shell_local_start = _shell_local_start(self.shell_present)
+        self.shell_local_end = _shell_local_end(self.shell_present)
+        self.shell_ao_start = _global_shell_start(
+            self.shell_present, self.shell_local_start, self.H_INDEX_START
+        )
+        self.shell_ao_end = _global_shell_end(
+            self.shell_present, self.shell_local_end, self.H_INDEX_START
+        )
 
-        # Vectorized orbital energy template (batch, Nats, 9)
+        EsA = const.Es[self.TYPE]
+        EpA = const.Ep[self.TYPE]
+        EdA = const.Ed[self.TYPE]
+        EfA = const.Ef[self.TYPE]
+
         template = torch.stack(
             (
-                EsA,  # s
+                EsA,
                 EpA,
                 EpA,
-                EpA,  # p
+                EpA,
                 EdA,
                 EdA,
                 EdA,
                 EdA,
-                EdA,  # d
+                EdA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
+                EfA,
             ),
             dim=2,
         )
-        mask = torch.zeros_like(template, dtype=torch.bool)
-        mask[:, :, 0] = True
-        mask[:, :, 1:4] = self.has_p.unsqueeze(-1)
-        mask[:, :, 4:9] = self.has_d.unsqueeze(-1)
-        # Flat masked (structure-major) for global indexing
-        self.diagonal_flat = template[mask]  # 1D (total_AOs,)
-        self.HDIM_struct = self.n_orbitals_per_atom.sum(dim=1)  # (batch,)
+        ao_mask = _ao_mask_from_shell_present(self.shell_present)
+
+        self.diagonal_flat = template[ao_mask]
+        self.HDIM_struct = self.n_orbitals_per_atom.sum(dim=1)
         self.HDIM_total = int(self.diagonal_flat.shape[0])
-        # Build 2D padded diagonal (batch, max_HDIM)
         max_HDIM = int(self.HDIM_struct.max().item())
         self.diagonal = torch.zeros(
             self.batch_size, max_HDIM, dtype=template.dtype, device=self.device
         )
-        # Vectorized scatter fill
-        # Compute per-structure prefix offsets
-        struct_offsets = (
-            torch.cumsum(self.HDIM_struct, dim=0) - self.HDIM_struct
-        )  # (batch,)
-        # Build index map for each structure
-        idx_ranges = torch.arange(self.HDIM_total, device=self.device)
-        # Map each global AO to its structure via searchsorted
-        # (construct boundaries)
-        boundaries = struct_offsets + self.HDIM_struct
-        # For each structure b: valid global indices g satisfy struct_offsets[b] <= g < boundaries[b]
-        # Expand to (batch, total_AOs) boolean mask
-        g = idx_ranges.unsqueeze(0)
-        in_struct = (g >= struct_offsets.unsqueeze(1)) & (g < boundaries.unsqueeze(1))
-        # For each structure extract its slice without looping: masked_select then pad by assignment
-        # Compute local positions = global - struct_offset
-        local_pos = (g - struct_offsets.unsqueeze(1)) * in_struct
-        # Mask invalid positions
-        local_pos[~in_struct] = 0
-        # Expand diagonal_flat to broadcast and scatter
-        vals_expanded = self.diagonal_flat.unsqueeze(0).expand(self.batch_size, -1)
-        # Scatter only where in_struct true
-        self.diagonal.scatter_(
-            1,
-            local_pos[in_struct].view(self.batch_size, -1),
-            vals_expanded[in_struct].view(self.batch_size, -1),
+
+        cursor = 0
+        self.ao_labels: list[list[str]] = []
+        self.ao_shell_types = torch.zeros(
+            self.batch_size, max_HDIM, dtype=torch.int64, device=self.device
         )
-        # Global AO start/end per atom
+        ao_shell_types_flat = _ao_shell_types_from_mask(ao_mask)
+        for batch_idx in range(self.batch_size):
+            hdim_b = int(self.HDIM_struct[batch_idx].item())
+            self.diagonal[batch_idx, :hdim_b] = self.diagonal_flat[
+                cursor : cursor + hdim_b
+            ]
+            self.ao_shell_types[batch_idx, :hdim_b] = ao_shell_types_flat[
+                cursor : cursor + hdim_b
+            ]
+            self.ao_labels.append(_flatten_ao_labels(self.shell_present[batch_idx]))
+            cursor += hdim_b
+        self.ao_shell_types_flat = ao_shell_types_flat
+
+        struct_offsets = torch.cumsum(self.HDIM_struct, dim=0) - self.HDIM_struct
         self.H_INDEX_START_GLOBAL = self.H_INDEX_START + struct_offsets.unsqueeze(-1)
         self.H_INDEX_END_GLOBAL = self.H_INDEX_END + struct_offsets.unsqueeze(-1)
+        self.shell_ao_start_global = _global_shell_start(
+            self.shell_present, self.shell_local_start, self.H_INDEX_START_GLOBAL
+        )
+        self.shell_ao_end_global = _global_shell_end(
+            self.shell_present, self.shell_local_end, self.H_INDEX_START_GLOBAL
+        )
 
         UsA = const.U[self.TYPE]
         UpA = const.Up[self.TYPE]
         UdA = const.Ud[self.TYPE]
+        UfA = const.Uf[self.TYPE]
         ns = const.n_s[self.TYPE]
         np = const.n_p[self.TYPE]
-        nd = const.n_d[self.TYPE] #ARYAN NOTE
-        # Shell template (batch,Nats,3)
-        template_shell = torch.stack((UsA, UpA, UdA), dim=2)
+        nd = const.n_d[self.TYPE]
+        nf = const.n_f[self.TYPE]
+
+        template_shell = torch.stack((UsA, UpA, UdA, UfA), dim=2)
         template_ang = torch.stack(
             (
                 torch.ones_like(UsA, dtype=torch.int64),
                 torch.ones_like(UsA, dtype=torch.int64) + 1,
                 torch.ones_like(UsA, dtype=torch.int64) + 2,
+                torch.ones_like(UsA, dtype=torch.int64) + 3,
             ),
             dim=2,
         )
-        template_el_per_shell = torch.stack((ns, np, nd), dim=2)
-        mask_shell = torch.zeros_like(template_shell, dtype=torch.bool)
-        mask_shell[:, :, 0] = True
-        mask_shell[:, :, 1] = self.has_p
-        mask_shell[:, :, 2] = self.has_d
-        self.Hubbard_U_sr = template_shell[mask_shell]  # flat shells tensor
-        self.shell_types = template_ang[mask_shell]
-        self.el_per_shell = template_el_per_shell[mask_shell]
-        self.n_shells_per_atom = const.max_ang[self.TYPE]  # (batch,Nats)
+        template_el_per_shell = torch.stack((ns, np, nd, nf), dim=2)
+        shell_mask = self.shell_present
+        self.Hubbard_U_sr = template_shell[shell_mask]
+        self.shell_types = template_ang[shell_mask]
+        self.el_per_shell = template_el_per_shell[shell_mask]
+        self.n_shells_per_atom = self.shell_present.sum(dim=2).to(torch.int64)
         self.H_INDEX_START_U = torch.zeros_like(
             self.n_shells_per_atom, dtype=torch.int64, device=device
         )
@@ -573,19 +665,19 @@ class StructureBatch(torch.nn.Module):
         self.H_INDEX_END_U_GLOBAL = self.H_INDEX_END_U + shell_offsets.unsqueeze(-1)
 
         self.HDIM = self.diagonal.shape[-1]
-        self.D0 = atomic_density_matrix_batch(
+        self.D0 = _atomic_density_matrix_batch_from_shells(
             self.batch_size,
             self.H_INDEX_START,
             self.HDIM,
             self.TYPE,
             const,
-            self.has_p,
-            self.has_d, #ARYAN NOTE NEED F
+            self.shell_present,
+            self.shell_ao_start,
         )
         self.D0 = 0.5 * self.D0
 
         if const.dftb3:
-            self.dU_dq = const.dU_dq[self.TYPE]  # (Nr_atoms,)
+            self.dU_dq = const.dU_dq[self.TYPE]
         else:
             self.dU_dq = None
 

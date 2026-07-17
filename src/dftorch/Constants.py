@@ -1,12 +1,14 @@
 from typing import Any
 
+import os
+
 import numpy as np
 import torch
 
 from ._elements import atomic_num, label, mass, symbol_to_number
 from ._io import read_pdb, read_xyz
 from ._tools import load_hubbard_derivs, load_spinw_to_matrix, ordered_pairs_from_TYPE
-from ._bond_integral import get_skf_tensors #TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
+from ._bond_integral import get_skf_tensors  # TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
 
 
 
@@ -61,7 +63,7 @@ class Constants(torch.nn.Module):
         self.atomic_num = atomic_num
 
         self.shell_dim = torch.nn.Parameter(
-            torch.tensor([0, 1, 3, 5], dtype=torch.int64), requires_grad=False
+            torch.tensor([0, 1, 3, 5, 7], dtype=torch.int64), requires_grad=False
         )
         self.atomic_num = torch.nn.Parameter(atomic_num, requires_grad=False)
         self.mass = torch.nn.Parameter(mass, requires_grad=False)
@@ -109,18 +111,22 @@ class Constants(torch.nn.Module):
             TORE,
             N_S,
             N_P,
-            N_D, #NEED NF too, HOW MANY F ELECTRONS IN EACH ORBITAL
+            N_D,
+            N_F,
             ES,
             EP,
             ED,
+            EF,
             US,
             UP,
-            UD, #MIGHT NEED UF too right
-        ) = get_skf_tensors(TYPE, self.skfpath) #Gets all the parameters from the SKF files, important to load F orbitals, need to edit SKF tensors
+            UD,
+            UF,
+            SHELL_PRESENT,
+        ) = get_skf_tensors(TYPE, self.skfpath)  # Gets all the parameters from the SKF files, including f-shell data.
 
         try:
             w_shell = load_spinw_to_matrix(
-                self.skfpath + "spinw.txt", device=TYPE.device
+                os.path.join(self.skfpath, "spinw.txt"), device=TYPE.device
             )
             self.w_shell = torch.nn.Parameter(w_shell, requires_grad=False)
             w_atom = torch.zeros(self.w_shell.shape[0], device=TYPE.device)
@@ -162,18 +168,20 @@ class Constants(torch.nn.Module):
         self.n_s = torch.nn.Parameter(N_S, requires_grad=False)
         self.n_p = torch.nn.Parameter(N_P, requires_grad=False)
         self.n_d = torch.nn.Parameter(N_D, requires_grad=False)
+        self.n_f = torch.nn.Parameter(N_F, requires_grad=False)
+        self.shell_present = torch.nn.Parameter(SHELL_PRESENT, requires_grad=False)
 
         self.U = torch.nn.Parameter(US, requires_grad=self.grad_param)
         self.Up = torch.nn.Parameter(UP, requires_grad=self.grad_param)
         self.Ud = torch.nn.Parameter(UD, requires_grad=self.grad_param)
+        self.Uf = torch.nn.Parameter(UF, requires_grad=self.grad_param)
         self.Es = torch.nn.Parameter(ES, requires_grad=self.grad_param)
         self.Ep = torch.nn.Parameter(EP, requires_grad=self.grad_param)
-        self.Ed = torch.nn.Parameter(ED, requires_grad=self.grad_param) #ARYAN NOTE F ORBITAL
+        self.Ed = torch.nn.Parameter(ED, requires_grad=self.grad_param)
+        self.Ef = torch.nn.Parameter(EF, requires_grad=self.grad_param)
 
         # ── DFTB3: Hubbard derivatives dU/dq ─────────────────────────────
         if self.dftb3:
-            import os
-
             _hubbard_path = os.path.join(self.skfpath, "hubbard_derivative.txt")
             try:
                 dU_dq = load_hubbard_derivs(_hubbard_path, device=TYPE.device)
@@ -1066,8 +1074,18 @@ class ConstantsTest(torch.nn.Module):
             ],
         )
 
+        n_f = torch.zeros_like(n_s)
+        Uf_dict = torch.zeros_like(U_dict)
+        Ef_dict = torch.zeros_like(Es_dict)
+        max_ang_occ = max_ang.clone()
+        shell_present = torch.zeros((max_ang.shape[0], 4), dtype=torch.bool)
+        shell_present[:, 0] = max_ang >= 1
+        shell_present[:, 1] = max_ang >= 2
+        shell_present[:, 2] = max_ang >= 3
+        shell_present[:, 3] = max_ang >= 4
+
         self.shell_dim = torch.nn.Parameter(
-            torch.tensor([0, 1, 3, 5], dtype=torch.int64), requires_grad=False
+            torch.tensor([0, 1, 3, 5, 7], dtype=torch.int64), requires_grad=False
         )
 
         self.n_orb = torch.nn.Parameter(n_orb, requires_grad=False)
@@ -1077,18 +1095,21 @@ class ConstantsTest(torch.nn.Module):
         self.U = torch.nn.Parameter(U_dict, requires_grad=False)
         self.Up = torch.nn.Parameter(Up_dict, requires_grad=False)
         self.Ud = torch.nn.Parameter(Ud_dict, requires_grad=False)
+        self.Uf = torch.nn.Parameter(Uf_dict, requires_grad=False)
         self.Es = torch.nn.Parameter(Es_dict, requires_grad=False)
         self.Ep = torch.nn.Parameter(Ep_dict, requires_grad=False)
         self.Ed = torch.nn.Parameter(Ed_dict, requires_grad=False)
+        self.Ef = torch.nn.Parameter(Ef_dict, requires_grad=False)
         self.max_ang = torch.nn.Parameter(max_ang, requires_grad=False)
+        self.max_ang_occ = torch.nn.Parameter(max_ang_occ, requires_grad=False)
         self.n_s = torch.nn.Parameter(n_s, requires_grad=False)
         self.n_p = torch.nn.Parameter(n_p, requires_grad=False)
-        self.n_d = torch.nn.Parameter(n_d, requires_grad=False) #ARYAN NOTE F ORBITAL
+        self.n_d = torch.nn.Parameter(n_d, requires_grad=False)
+        self.n_f = torch.nn.Parameter(n_f, requires_grad=False)
+        self.shell_present = torch.nn.Parameter(shell_present, requires_grad=False)
 
         # self.skfpath = skfpath
 
     def forward(self):
         pass
 
-
-__all__ = ["Constants"]
