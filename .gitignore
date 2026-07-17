@@ -49,3 +49,6 @@ experiments/md_trj.xyz.pdb
 *.pdb
 *.pdb
 build/
+
+# Local GSD planning artifacts
+.planning/

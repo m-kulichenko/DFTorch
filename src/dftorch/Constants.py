@@ -6,6 +6,8 @@ import torch
 from ._elements import atomic_num, label, mass, symbol_to_number
 from ._io import read_pdb, read_xyz
 from ._tools import load_hubbard_derivs, load_spinw_to_matrix, ordered_pairs_from_TYPE
+from ._bond_integral import get_skf_tensors #TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
+
 
 
 class Constants(torch.nn.Module):
@@ -38,7 +40,7 @@ class Constants(torch.nn.Module):
             Enable parameter gradients (for ML-SK fitting workflows).
     """
 
-    def __init__(self, dftorch_params: dict[str, Any]) -> None:
+    def __init__(self, dftorch_params: dict[str, Any]) -> None: #When you initialize this object, give it all the parameters
         """Load Slater-Koster data and element constants for the active system.
 
         Parameters
@@ -94,8 +96,6 @@ class Constants(torch.nn.Module):
                 pairs_tensor.shape[0], dtype=torch.long, device=TYPE.device
             )
 
-        from ._bond_integral import get_skf_tensors #TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
-
         (
             R_tensor,
             R_orb,
@@ -116,7 +116,7 @@ class Constants(torch.nn.Module):
             US,
             UP,
             UD, #MIGHT NEED UF too right
-        ) = get_skf_tensors(TYPE, self.skfpath) #Gets all the parameters from the SKF files, important to load F orbitals
+        ) = get_skf_tensors(TYPE, self.skfpath) #Gets all the parameters from the SKF files, important to load F orbitals, need to edit SKF tensors
 
         try:
             w_shell = load_spinw_to_matrix(

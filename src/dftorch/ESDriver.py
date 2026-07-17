@@ -3,21 +3,21 @@ import time
 
 import torch
 
-from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch
-from dftorch._spin import get_h_spin, get_spin_energy
+from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch #Charge correction term added to Hamiltonian
+from dftorch._spin import get_h_spin, get_spin_energy #For charge unbinding
 
 from ._coulomb_matrix import coulomb_matrix_vectorized
-from ._dftd3 import create_dftd3
-from ._energy import energy
-from ._forces import Forces, Forces_PME, forces_spin
+from ._dftd3 import create_dftd3 #DFTB 3 correction
+from ._energy import energy #returns energy decomposed into band, coulomb, dipole, entropy
+from ._forces import Forces, Forces_PME, forces_spin #Gets forces
 from ._forces_batch import forces_batch
-from ._gbsa import GBSABatch, create_gbsa
-from ._h0ands import H0_and_S_vectorized, H0_and_S_vectorized_batch
+from ._gbsa import GBSABatch, create_gbsa 
+from ._h0ands import H0_and_S_vectorized, H0_and_S_vectorized_batch #important
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
     vectorized_nearestneighborlist_batch,
 )
-from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch
+from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch #E_rep
 from ._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
 from ._stress import get_total_stress_analytical
 from ._thirdorder import ThirdOrderBatch, create_thirdorder
@@ -25,7 +25,7 @@ from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
 
 
 class ESDriver(torch.nn.Module):
-    def __init__(
+    def __init__( #Need to provide it the parameters and what device it should run on
         self,
         dftorch_params: dict,
         device: torch.device,
@@ -76,8 +76,8 @@ class ESDriver(torch.nn.Module):
 
         self.dftorch_params["COULOMB_CUTOFF"] = self.dftorch_params.get(
             "COULOMB_CUTOFF", 10.0
-        )
-        self.dftorch_params["SCF_ALPHA"] = self.dftorch_params.get("SCF_ALPHA", 0.1)
+        ) #Gets the actual cutoff, else default 10
+        self.dftorch_params["SCF_ALPHA"] = self.dftorch_params.get("SCF_ALPHA", 0.1) #mixing to avoid scf flip flop
         normalize_coulomb_settings(
             self.dftorch_params, structure.cell, context="ESDriver"
         )
@@ -110,25 +110,25 @@ class ESDriver(torch.nn.Module):
             verbose=verbose,
         )
 
-        # Get Hamiltonian, Overlap, etc,
+        # Get Hamiltonian, Overlap, will have f orbital dependence
         structure.H0, structure.dH0, structure.S, structure.dS = H0_and_S_vectorized(
-            structure.TYPE,
-            structure.RX,
+            structure.TYPE, #Which elements exist
+            structure.RX, #For cosines/sines
             structure.RY,
             structure.RZ,
-            structure.diagonal,
-            structure.H_INDEX_START,
-            nnRx,
+            structure.diagonal, #Onsite Atomic Orbital Energies, global order
+            structure.H_INDEX_START, #maps each atom to the start of its atomic orbitals above
+            nnRx, #nearest neighbor geometry
             nnRy,
             nnRz,
             nnType,
-            const,
-            neighbor_I,
+            const, #basis size, related element infromation
+            neighbor_I, 
             neighbor_J,
-            IJ_pair_type,
+            IJ_pair_type, #Which skf file to use for the I,J bond
             JI_pair_type,
             const.R_orb,
-            const.coeffs_tensor,
+            const.coeffs_tensor, # spline coeffs
             verbose=verbose,
             store_stress_metadata=const,
             ml_model_data=getattr(self, "ml_model_data", None),
@@ -143,10 +143,10 @@ class ESDriver(torch.nn.Module):
             neighbor_J,
             IJ_pair_type,
             JI_pair_type,
-        )
-        structure.Z = fractional_matrix_power_symm(structure.S, -0.5)
+        ) #no longer need these references, save memory
+        structure.Z = fractional_matrix_power_symm(structure.S, -0.5) #For HC = SCe solve, S matrix will just be larger now
 
-        # nuclear repulsion
+        # nuclear repulsion, from tabulated spline data or the ML learning model, etc, shouldn't have f orbital dependence, but does need to be tabulated
         structure.e_repulsion, structure.dVr, structure.stress_repulsion = (
             get_repulsion_energy(
                 const.R_rep_tensor,
@@ -579,7 +579,6 @@ class ESDriver(torch.nn.Module):
                 structure.e_d3 = 0.0
 
     def calc_forces(self, structure, const):
-
         # with torch.no_grad():
         if 1:
             # Compute solvation shift for force calculation

@@ -9,7 +9,7 @@ import torch
 
 from ._tools import ordered_pairs_from_TYPE
 
-symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the skf file header to the number of protons
+symbol_to_number: Final[dict[str, int]] = { #XConverts the first number in the skf file header to the number of protons, NOTE should add more elements
     "H": 1,
     "He": 2,
     "Li": 3,
@@ -67,9 +67,81 @@ symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the 
     "Cs": 55,
     "Ba": 56,
     "La": 57,
+    "Ce": 58,
+    "Pr": 59,
+    "Nd": 60,
+    "Pm": 61,
+    "Sm": 62,
+    "Eu": 63,
+    "Gd": 64,
+    "Tb": 65,
+    "Dy": 66,
+    "Ho": 67,
+    "Er": 68,
+    "Tm": 69,
+    "Yb": 70,
+    "Lu": 71,
+    "Ac": 89,
+    "Th": 90,
+    "Pa": 91,
+    "U": 92,
+    "Np": 93,
+    "Pu": 94,
+    "Am": 95,
+    "Cm": 96,
+    "Bk": 97,
+    "Cf": 98,
+    "Es": 99,
+    "Fm": 100,
+    "Md": 101,
+    "No": 102,
+    "Lr": 103,
 }
 
-_CHANNELS: Final[list[str]] = [ #Probably orbitals? Might need to add f orbitals here
+_CHANNELS: Final[list[str]] = [ #Aryan NOTE -> keep an internal order to minimize structure changes, or skf standard order?
+    "Hff0",
+    "Hff1",
+    "Hff2",
+    "Hff3",         
+    "Hdf0",
+    "Hdf1",
+    "Hdf2",
+    "Hdd0",
+    "Hdd1",
+    "Hdd2",
+    "Hpf0",
+    "Hpf1",
+    "Hpd0",
+    "Hpd1",
+    "Hpp0",
+    "Hpp1",
+    "Hsf0",
+    "Hsd0",
+    "Hsp0",
+    "Hss0",
+    "Sff0",
+    "Sff1",
+    "Sff2",
+    "Sff3",
+    "Sdf0",
+    "Sdf1",
+    "Sdf2",
+    "Sdd0",
+    "Sdd1",
+    "Sdd2",
+    "Spf0",
+    "Spf1",
+    "Spd0",
+    "Spd1",
+    "Spp0",
+    "Spp1",
+    "Ssf0",
+    "Ssd0",
+    "Ssp0",
+    "Sss0",
+]
+
+_SIMPLE_CHANNELS: Final[list[str]] = [
     "Hdd0",
     "Hdd1",
     "Hdd2",
@@ -92,8 +164,18 @@ _CHANNELS: Final[list[str]] = [ #Probably orbitals? Might need to add f orbitals
     "Sss0",
 ]
 
+_SIMPLE_TO_EXTENDED: Final[list[int]] = [_CHANNELS.index(ch) for ch in _SIMPLE_CHANNELS]
 
-def load_bond_integral_parameters( #
+
+SK_BLOCK_SIZE: Final[int] = 20
+N_SK_CHANNELS: Final[int] = len(_CHANNELS)
+MAX_SHELLS: Final[int] = 4
+EV_PER_HARTREE: Final[float] = 27.21138625
+BOHR_TO_ANGSTROM: Final[float] = 0.52917721
+
+
+
+def load_bond_integral_parameters( #old function, not for skf files
     neighbor_I: torch.Tensor,
     neighbor_J: torch.Tensor,
     TYPE: torch.Tensor,
@@ -160,7 +242,7 @@ def load_bond_integral_parameters( #
     return fss_sigma
 
 
-def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
+def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor: #Old function, not for skf files
     """Compute bond integrals for many pairs in a vectorized piecewise form.
 
     Parameters
@@ -215,7 +297,7 @@ def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
     return f[:, 0] * X
 
 
-def bond_integral_with_grad_vectorized(
+def bond_integral_with_grad_vectorized( #old function, not for skf files
     dR: torch.Tensor, f: torch.Tensor
 ) -> torch.Tensor:
     """Compute radial derivative of the bond integral (dX/dr), vectorized.
@@ -285,7 +367,7 @@ def bond_integral_with_grad_vectorized(
     return f[:, 0] * dSx
 
 
-def _expand_tokens(tokens: list[str]) -> list[str]:
+def _expand_tokens(tokens: list[str]) -> list[str]: #Skf files use 8* 0.0 a lot, useful to expand this
     """Expand Fortran-style repetition tokens.
 
     Examples
@@ -312,6 +394,156 @@ def _expand_tokens(tokens: list[str]) -> list[str]:
     return out
 
 
+def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]:
+    """Return one electronic SKF row in the 40-column extended order.
+
+    SKF files in this code path may use either the older 20-column electronic
+    table or the extended 40-column table with f-shell channels. The rest of
+    DFTorch should see one consistent layout, so simple-format rows are copied
+    into their matching official extended positions while all f-related columns
+    are left as zero.
+
+    Parameters
+    ----------
+    tokens:
+        Expanded string tokens from one electronic table row.
+    path:
+        File path used only for a helpful error message.
+    line:
+        Original row text used only for a helpful error message.
+
+    Returns
+    -------
+    list[float]
+        Row values in the official 40-channel order named by ``_CHANNELS``.
+    """
+    values = [float(x) for x in tokens]
+    if len(values) == len(_CHANNELS):
+        return values
+    if len(values) == len(_SIMPLE_CHANNELS):
+        row = [0.0] * len(_CHANNELS)
+        for old_idx, new_idx in enumerate(_SIMPLE_TO_EXTENDED):
+            row[new_idx] = values[old_idx]
+        return row
+    raise ValueError(
+        f"Expected 20 or 40 electronic values in {path}, got {len(values)} in line: {line}"
+    )
+
+
+def _resolve_skf_path(skfpath: str, label_name: str) -> str:
+    """Resolve an SKF pair label to either dashed or undashed filenames.
+
+    Existing DFTB parameter directories commonly use dashed names such as
+    ``C-N.skf``. The f-orbital test data in this repository uses compact names
+    such as ``EuN.skf`` and ``NN.skf``. This helper lets ``get_skf_tensors`` keep
+    using ordered labels like ``Eu-N`` while supporting both file naming styles.
+
+    Parameters
+    ----------
+    skfpath:
+        Directory containing SKF files.
+    label_name:
+        Ordered pair label, usually with a dash, e.g. ``"Eu-N"``.
+
+    Returns
+    -------
+    str
+        Existing matching path when found, otherwise the dashed path so the
+        eventual file-open error names the conventional target.
+    """
+    dashed = os.path.join(skfpath, f"{label_name}.skf")
+    if os.path.isfile(dashed):
+        return dashed
+
+    undashed = os.path.join(skfpath, f"{label_name.replace('-', '')}.skf")
+    if os.path.isfile(undashed):
+        return undashed
+
+    return dashed
+
+
+def _split_skf_pair_name(name: str) -> tuple[str, str]:
+    """Split an SKF basename into its two element symbols.
+
+    Handles both conventional dashed names, e.g. ``"C-N"``, and compact names,
+    e.g. ``"EuGa"``. For compact names it tries longer symbols first so
+    two-letter symbols are not accidentally split as one-letter elements.
+
+    Parameters
+    ----------
+    name:
+        SKF basename without the ``.skf`` suffix.
+
+    Returns
+    -------
+    tuple[str, str]
+        The left and right element symbols encoded by the file name.
+    """
+    if "-" in name:
+        return name.split("-", 1)
+
+    symbols = sorted(symbol_to_number, key=len, reverse=True)
+    for elem_a in symbols:
+        if not name.startswith(elem_a):
+            continue
+        elem_b = name[len(elem_a) :]
+        if elem_b in symbol_to_number:
+            return elem_a, elem_b
+
+    raise ValueError(f"Could not parse SKF pair name: {name}")
+
+
+def _validate_nested_shells(
+    elem: str,
+    has_s: bool,
+    has_p: bool,
+    has_d: bool,
+    has_f: bool,
+    path: str,
+) -> None:
+    """Require supported SKF bases to be contiguous from s upward.
+
+    DFTorch's AO ordering assumes nested shells: an f-shell basis is ``spdf``,
+    a d-shell basis is ``spd``, and a p-shell basis is ``sp``. Parameter sets
+    that skip an intermediate virtual shell would need a different shell-offset
+    model, so they are rejected here instead of being loaded into an ambiguous
+    basis layout.
+
+    Parameters
+    ----------
+    elem:
+        Element symbol whose homonuclear SKF header is being parsed.
+    has_s, has_p, has_d, has_f:
+        Shell-presence flags inferred from onsite energies or reference
+        occupations.
+    path:
+        SKF path used in the error message.
+    """
+    if has_f and not (has_s and has_p and has_d):
+        raise ValueError(f"{path}: {elem} f-shell basis requires nested s/p/d/f shells")
+    if has_d and not (has_s and has_p):
+        raise ValueError(f"{path}: {elem} d-shell basis requires nested s/p/d shells")
+    if has_p and not has_s:
+        raise ValueError(f"{path}: {elem} p-shell basis requires an s shell")
+
+
+def _shell_metadata_from_presence(
+    shell_presence: tuple[bool, bool, bool, bool],
+    shell_occ: tuple[float, float, float, float],
+) -> tuple[int, int, int]:
+    """Return ``(n_orb, max_ang, max_ang_occ)`` for s/p/d/f shell metadata."""
+    n_orb = sum((2 * l + 1) for l, present in enumerate(shell_presence) if present)
+    max_ang = max(
+        (l + 1 for l, present in enumerate(shell_presence) if present),
+        default=0,
+    )
+    max_ang_occ = max(
+        (l + 1 for l, occ in enumerate(shell_occ) if occ != 0.0),
+        default=0,
+    )
+    return n_orb, max_ang, max_ang_occ
+
+
 def read_skf_table(
     path: str,
     N_ORB: torch.Tensor,
@@ -321,162 +553,220 @@ def read_skf_table(
     N_S: torch.Tensor,
     N_P: torch.Tensor,
     N_D: torch.Tensor,
+    N_F: torch.Tensor,
     ES: torch.Tensor,
     EP: torch.Tensor,
     ED: torch.Tensor,
+    EF: torch.Tensor,
     US: torch.Tensor,
     UP: torch.Tensor,
     UD: torch.Tensor,
+    UF: torch.Tensor,
+    SHELL_PRESENT: torch.Tensor,
+    *,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
 ) -> tuple[
     torch.Tensor, dict[str, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor
 ]:
-    """Read a DFTB+ `.skf` file and extract integral channels + repulsion spline data.
+    """Read a DFTB+ ``.skf`` file and normalize electronic channels to 40 columns.
 
-    Parameters
-    ----------
-    path:
-        Path to the `.skf` file. Filename should resemble `ElemA-ElemB.skf`.
-    N_ORB, MAX_ANG, MAX_ANG_OCC, TORE:
-        Integer tensors updated in-place for homonuclear files.
-    N_S, N_P, N_D:
-        Integer tensors updated in-place for homonuclear files.
-    ES, EP, ED, US, UP, UD:
-        Float tensors updated in-place for homonuclear files.
+    The parser accepts both simple 20-column SKF files and extended 40-column
+    SKF files. Simple electronic rows are expanded into the official extended
+    order in ``_CHANNELS`` by placing the old s/p/d values into their matching
+    positions and filling all f-related channels with zero.
 
-    Returns
-    -------
-    tuple
-        `(R, channels, R_rep, rep_splines, close_exp)` where:
-        - `R`: `(1001,)` padded orbital radial grid in Angstrom
-        - `channels`: dict[str, Tensor] channel_name -> `(npts, )` values in eV
-        - `R_rep`: repulsive radial grid in Angstrom
-        - `rep_splines`: spline polynomial coefficients
-        - `close_exp`: close repulsion exponential parameters
+    Homonuclear files also update atomic metadata in-place. Simple homonuclear
+    headers do not contain f-shell metadata, so ``Ef``, ``Uf``, and ``ff`` are
+    filled as zero and ``SHELL_PRESENT[Z, 3]`` remains false unless later
+    overridden by ``wfc.hsd``.
     """
+    device = torch.device("cpu") if device is None else device
+    dtype = torch.get_default_dtype() if dtype is None else dtype
     lines = Path(path).read_text(errors="ignore").splitlines()
     data_lines = [
         ln.strip()
         for ln in lines
         if ln.strip() and not ln.lstrip().startswith(("#", "!", ";"))
     ]
+    if not data_lines:
+        raise ValueError(f"Empty or comment-only SKF file: {path}")
 
-    # First line: step and number of points
-    first = data_lines[0].replace(",", " ").split()
-    step, npts_read = float(first[0]), int(first[1])
+    extended = data_lines[0].startswith("@")
+    grid_idx = 1 if extended else 0
+    if grid_idx >= len(data_lines):
+        raise ValueError(f"Missing grid line in SKF file: {path}")
+
+    # First numerical line: electronic grid spacing and number of grid points.
+    first = data_lines[grid_idx].replace(",", " ").split()
+    if len(first) < 2:
+        raise ValueError(f"Malformed SKF grid line in {path}: {data_lines[grid_idx]}")
+    step = float(first[0])
+    npts_read = int(first[1])
     npts_pad = npts_read + 50
-    if "mio" in path:
-        npts_read = 519
 
-    # Decide where the table starts
-    base = os.path.basename(path)  # 'C-Ni.skf'
-    name, _ext = os.path.splitext(base)  # ('C-Ni', '.skf')
-    elemA, elemB = name.split("-", 1)  # split only on first '-'
+    base = os.path.basename(path)
+    name, _ext = os.path.splitext(base)
+    elemA, elemB = _split_skf_pair_name(name)
     homonuclear = elemA == elemB
-    start_idx = 3 if homonuclear else 2
+
+    # Layout after the optional extended marker:
+    #   homonuclear: grid, atomic header, mass/poly line, electronic table
+    #   heteronuclear: grid, mass/poly line, electronic table
+    start_idx = grid_idx + 3 if homonuclear else grid_idx + 2
 
     if homonuclear:
-        tokens = data_lines[1].replace(",", " ").split()
-        (
-            Ed,
-            Ep,
-            Es,
-            SPE,  # exception for unused var # noqa: F841
-            Ud,
-            Up,
-            Us,
-            fd,
-            fp,
-            fs,
-        ) = (
-            float(tokens[0]),
-            float(tokens[1]),
-            float(tokens[2]),
-            float(tokens[3]),
-            float(tokens[4]),
-            float(tokens[5]),
-            float(tokens[6]),
-            float(tokens[7]),
-            float(tokens[8]),
-            float(tokens[9]),
-        )
+        header_tokens = data_lines[grid_idx + 1].replace(",", " ").split()
+        if extended:
+            if len(header_tokens) < 13:
+                raise ValueError(
+                    f"Expected 13 extended homonuclear header values in {path}, "
+                    f"got {len(header_tokens)}"
+                )
+            (
+                Ef,
+                Ed,
+                Ep,
+                Es,
+                SPE,  # noqa: F841
+                Uf,
+                Ud,
+                Up,
+                Us,
+                ff,
+                fd,
+                fp,
+                fs,
+            ) = (float(token) for token in header_tokens[:13])
+        else:
+            if len(header_tokens) < 10:
+                raise ValueError(
+                    f"Expected 10 simple homonuclear header values in {path}, "
+                    f"got {len(header_tokens)}"
+                )
+            (
+                Ed,
+                Ep,
+                Es,
+                SPE,  # noqa: F841
+                Ud,
+                Up,
+                Us,
+                fd,
+                fp,
+                fs,
+            ) = (float(token) for token in header_tokens[:10])
+            Ef = 0.0
+            Uf = 0.0
+            ff = 0.0
+
         el_num = symbol_to_number[elemA]
 
-        tmp = data_lines[40].split()[0]
-        # N_ORB[el_num] = 1 if "9*" in tmp else (4 if "5*" in tmp else 9)
-        N_ORB[el_num] = 1 * (Es != 0) + 3 * (Ep != 0) + 5 * (Ed != 0)
-        MAX_ANG[el_num] = 1 if "9*" in tmp else (2 if "5*" in tmp else 3)
-        # MAX_ANG[el_num] = 3 if Ed != 0 else (2 if Ep != 0 else 1)
-        MAX_ANG_OCC[el_num] = 3 if fd != 0 else (2 if fp != 0 else 1)
-        TORE[el_num] = fs + fp + fd
+        # This is still a parser-level inference. If wfc.hsd exists, it can
+        # override shell presence below in get_skf_tensors().
+        has_s = Es != 0.0 or fs != 0.0
+        has_p = Ep != 0.0 or fp != 0.0
+        has_d = Ed != 0.0 or fd != 0.0
+        has_f = Ef != 0.0 or ff != 0.0
+        _validate_nested_shells(elemA, has_s, has_p, has_d, has_f, path)
+
+        shell_presence = (has_s, has_p, has_d, has_f)
+        shell_occ = (fs, fp, fd, ff)
+        n_orb, max_ang, max_ang_occ = _shell_metadata_from_presence(
+            shell_presence,
+            shell_occ,
+        )
+
+        N_ORB[el_num] = n_orb
+        MAX_ANG[el_num] = max_ang
+        MAX_ANG_OCC[el_num] = max_ang_occ
+        TORE[el_num] = fs + fp + fd + ff
         N_S[el_num] = fs
         N_P[el_num] = fp
         N_D[el_num] = fd
-        ES[el_num] = Es * 27.21138625
-        EP[el_num] = Ep * 27.21138625
-        ED[el_num] = Ed * 27.21138625
-        US[el_num] = Us * 27.21138625
-        UP[el_num] = Up * 27.21138625
-        UD[el_num] = Ud * 27.21138625
+        N_F[el_num] = ff
+        ES[el_num] = Es * EV_PER_HARTREE
+        EP[el_num] = Ep * EV_PER_HARTREE
+        ED[el_num] = Ed * EV_PER_HARTREE
+        EF[el_num] = Ef * EV_PER_HARTREE
+        US[el_num] = Us * EV_PER_HARTREE
+        UP[el_num] = Up * EV_PER_HARTREE
+        UD[el_num] = Ud * EV_PER_HARTREE
+        UF[el_num] = Uf * EV_PER_HARTREE
+        SHELL_PRESENT[el_num] = torch.tensor(
+            shell_presence,
+            dtype=torch.bool,
+            device=SHELL_PRESENT.device,
+        )
 
-    rows = []
-    # print(path)
+    if start_idx + npts_read - 1 > len(data_lines):
+        raise ValueError(
+            f"Electronic table in {path} is shorter than expected: "
+            f"need {npts_read - 1} rows from index {start_idx}, "
+            f"have {max(len(data_lines) - start_idx, 0)} candidate rows"
+        )
+
+    rows: list[list[float]] = []
     for ln in data_lines[start_idx : start_idx + npts_read - 1]:
         tokens = _expand_tokens(ln.replace(",", " ").split())
-        if len(tokens) != 20:
-            raise ValueError(f"Expected 20 values, got {len(tokens)} in line: {ln}")
-        rows.append([float(x) for x in tokens])
+        rows.append(_normalize_skf_row(tokens, path, ln))
 
-    # Append a zero knot at the tabulated cutoff, then extend the padded tail
-    # with zeros so spline intervals beyond the last physical grid point vanish.
+    # Append one zero knot at the tabulated cutoff, then zero-pad the tail.
     zero_row = [0.0] * len(_CHANNELS)
     rows.append(zero_row)
     if len(rows) < npts_pad:
         rows.extend([zero_row.copy() for _ in range(npts_pad - len(rows))])
 
-    mat = torch.tensor(rows) * 27.21138625  # (npts,20)
-    R = torch.arange(1, npts_pad + 1) * step * 0.52917721  # Convert to Angstrom
+    mat = torch.tensor(rows, dtype=dtype, device=device) * EV_PER_HARTREE
+    R = (
+        torch.arange(1, npts_pad + 1, dtype=dtype, device=device)
+        * step
+        * BOHR_TO_ANGSTROM
+    )
     channels = {ch: mat[:, j] for j, ch in enumerate(_CHANNELS)}
 
-    for spline_start, line in enumerate(data_lines):
-        if spline_start == len(data_lines) - 1:  # skip blanks and comment lines
-            print("Spline not found")
-        if "Spline" in line:  # use s.casefold()=="spline" for case-insensitive
+    spline_start = None
+    for idx, line in enumerate(data_lines):
+        if line.casefold() == "spline":
+            spline_start = idx
             break
+    if spline_start is None:
+        raise ValueError(f"No Spline block found in {path}")
 
-    ### Do repulsion splines
     first = data_lines[spline_start + 1].replace(",", " ").split()
+    if len(first) < 2:
+        raise ValueError(f"Malformed repulsive Spline header in {path}: {data_lines[spline_start + 1]}")
     npts = int(first[0])
 
     close_exp = torch.tensor(
-        [float(x) for x in data_lines[spline_start + 2].replace(",", " ").split()]
+        [float(x) for x in data_lines[spline_start + 2].replace(",", " ").split()],
+        dtype=dtype,
+        device=device,
     )
 
-    rows = []
-    rows_R = []
+    rows_rep: list[list[float]] = []
+    rows_R: list[float] = []
     for ln in data_lines[spline_start + 3 : spline_start + 3 + npts - 1]:
         tokens = _expand_tokens(ln.replace(",", " ").split())
         if len(tokens) != 6:
-            raise ValueError(f"Expected 6 values, got {len(tokens)} in line: {ln}")
+            raise ValueError(f"Expected 6 repulsive spline values in {path}, got {len(tokens)} in line: {ln}")
         rows_R.append(float(tokens[0]))
-        rows.append(
-            [float(x) for x in tokens[2:]] + [0.0] * 2
-        )  # pad woth two zeros to satisfy dimensions of the last polyniomial tail
+        rows_rep.append([float(x) for x in tokens[2:]] + [0.0] * 2)
 
-    # add last polyniomial tail
     ln = data_lines[spline_start + 3 + npts - 1]
     tokens = _expand_tokens(ln.replace(",", " ").split())
+    if len(tokens) != 8:
+        raise ValueError(f"Expected 8 final repulsive spline values in {path}, got {len(tokens)} in line: {ln}")
     rows_R.append(float(tokens[0]))
-    rows.append([float(x) for x in tokens[2:]])
+    rows_rep.append([float(x) for x in tokens[2:]])
 
-    # add zero for r > Rcut
     rows_R.append(float(tokens[1]))
-    rows.append([0.0] * 6)
+    rows_rep.append([0.0] * 6)
 
-    rep_splines = torch.tensor(rows)  # *27.21138625
-    R_rep = torch.tensor(rows_R) * 0.52917721  # Convert to Angstrom
+    rep_splines = torch.tensor(rows_rep, dtype=dtype, device=device)
+    R_rep = torch.tensor(rows_R, dtype=dtype, device=device) * BOHR_TO_ANGSTROM
 
     return R, channels, R_rep, rep_splines, close_exp
-
 
 def channels_to_matrix(
     channels: dict[str, torch.Tensor],
@@ -581,13 +871,14 @@ def read_wfc_hsd(
     N_ORB: torch.Tensor,
     MAX_ANG: torch.Tensor,
     MAX_ANG_OCC: torch.Tensor,
+    SHELL_PRESENT: torch.Tensor,
 ) -> None:
-    """
-    Parse wfc.hsd and fill N_ORB, MAX_ANG, MAX_ANG_OCC in-place.
+    """Parse ``wfc.hsd`` and override shell-presence basis metadata in-place.
 
-    N_ORB[Z]      = sum of (2*l+1) over all orbitals
-    MAX_ANG[Z]    = max(l+1) over all orbitals
-    MAX_ANG_OCC[Z]= max(l+1) over orbitals with Occupation != 0
+    ``wfc.hsd`` is treated as authoritative for which angular-momentum shells
+    are present. It updates ``SHELL_PRESENT``, ``N_ORB``, ``MAX_ANG``, and
+    ``MAX_ANG_OCC`` consistently. Occupation totals ``N_S``/``N_P``/``N_D``/
+    ``N_F`` still come from the homonuclear SKF headers.
     """
     text = Path(path).read_text(errors="ignore")
 
@@ -595,22 +886,18 @@ def read_wfc_hsd(
     occ_re = re.compile(r"Occupation\s*=\s*([\d.eE+\-]+)")
     sym_re = re.compile(r"^([A-Z][a-z]{0,2})\s*=?\s*\{", re.MULTILINE)
 
-    # find all top-level element symbols
     for sym_m in sym_re.finditer(text):
         sym = sym_m.group(1).strip()
         Z = symbol_to_number.get(sym)
         if Z is None:
             continue
 
-        # extract the element block using depth-aware brace matching
-        # Start from the opening brace found by sym_re
         brace_start = text.find("{", sym_m.start())
         if brace_start == -1:
             continue
         depth = 0
-        i = brace_start
         elem_body = None
-        while i < len(text):
+        for i in range(brace_start, len(text)):
             if text[i] == "{":
                 depth += 1
             elif text[i] == "}":
@@ -618,15 +905,12 @@ def read_wfc_hsd(
                 if depth == 0:
                     elem_body = text[brace_start + 1 : i]
                     break
-            i += 1
         if elem_body is None:
             continue
 
-        n_orb_elem = 0
-        max_ang_elem = 0
-        max_ang_occ = 0
+        shell_presence = [False] * MAX_SHELLS
+        shell_occ = [0.0] * MAX_SHELLS
 
-        # extract each Orbital = { ... } block inside the element block
         for orb_body in _extract_blocks(elem_body, "Orbital"):
             am = ang_re.search(orb_body)
             oc = occ_re.search(orb_body)
@@ -635,18 +919,32 @@ def read_wfc_hsd(
 
             l = int(am.group(1))  # noqa: E741
             occ = float(oc.group(1))
+            if l < 0 or l >= MAX_SHELLS:
+                raise ValueError(f"{path}: unsupported angular momentum l={l} for {sym}")
 
-            n_orb_elem += 2 * l + 1
-            max_ang_elem = max(max_ang_elem, l + 1)
-            if occ != 0.0:
-                max_ang_occ = max(max_ang_occ, l + 1)
+            shell_presence[l] = True
+            shell_occ[l] = occ
 
-        N_ORB[Z] = n_orb_elem
-        MAX_ANG[Z] = max_ang_elem
+        if not any(shell_presence):
+            continue
+
+        _validate_nested_shells(sym, *shell_presence, path)
+        n_orb, max_ang, max_ang_occ = _shell_metadata_from_presence(
+            tuple(shell_presence),
+            tuple(shell_occ),
+        )
+
+        SHELL_PRESENT[Z] = torch.tensor(
+            shell_presence,
+            dtype=torch.bool,
+            device=SHELL_PRESENT.device,
+        )
+        N_ORB[Z] = n_orb
+        MAX_ANG[Z] = max_ang
         MAX_ANG_OCC[Z] = max_ang_occ
 
 
-def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
+def get_skf_tensors(
     TYPE: torch.Tensor, skfpath: str
 ) -> tuple[
     torch.Tensor,
@@ -668,45 +966,60 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
-    """Load SKF tensors for all unique element pairs present in `TYPE`.
+    """Load SKF tensors for all ordered element pairs present in ``TYPE``.
 
-    Returns a tuple matching the historical layout used elsewhere in the project.
+    All electronic SK tables are normalized to the official 40-channel extended
+    order. The return tuple extends the historical layout with f-shell metadata:
+    ``N_F``, ``EF``, ``UF``, and ``SHELL_PRESENT``.
     """
     _, _, label_list = ordered_pairs_from_TYPE(TYPE)
 
-    # Allocate padded tensors
     n_pairs = len(label_list)
-    npts = 1300  # padded # old 518
-    coeffs_tensor = torch.zeros((n_pairs, npts, 20, 4), device=TYPE.device)
-    R_tensor = torch.zeros(
-        (n_pairs, npts + 1), device=TYPE.device
-    )  # not necessarily if all R are the same. Makes sense to use zero padding if not.
+    npts = 1300
+    dtype = torch.get_default_dtype()
+    device = TYPE.device
 
-    rep_splines_tensor = torch.zeros((n_pairs, 500, 6), device=TYPE.device)  # old 120
-    R_rep_tensor = torch.zeros((n_pairs, 500), device=TYPE.device) + 1e8
+    coeffs_tensor = torch.zeros(
+        (n_pairs, npts, len(_CHANNELS), 4),
+        dtype=dtype,
+        device=device,
+    )
+    R_tensor = torch.zeros((n_pairs, npts + 1), dtype=dtype, device=device)
 
-    close_exp_tensor = torch.zeros((n_pairs, 3), device=TYPE.device)
+    rep_splines_tensor = torch.zeros((n_pairs, 500, 6), dtype=dtype, device=device)
+    R_rep_tensor = torch.zeros((n_pairs, 500), dtype=dtype, device=device) + 1e8
+    close_exp_tensor = torch.zeros((n_pairs, 3), dtype=dtype, device=device)
 
-    N_ORB = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    MAX_ANG = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    MAX_ANG_OCC = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    TORE = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    N_S = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    N_P = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    N_D = torch.zeros(120, dtype=torch.int64, device=TYPE.device)
-    ES = torch.zeros(120, device=TYPE.device)
-    EP = torch.zeros(120, device=TYPE.device)
-    ED = torch.zeros(120, device=TYPE.device)
-    US = torch.zeros(120, device=TYPE.device)
-    UP = torch.zeros(120, device=TYPE.device)
-    UD = torch.zeros(120, device=TYPE.device)
+    N_ORB = torch.zeros(120, dtype=torch.int64, device=device)
+    MAX_ANG = torch.zeros(120, dtype=torch.int64, device=device)
+    MAX_ANG_OCC = torch.zeros(120, dtype=torch.int64, device=device)
+    SHELL_PRESENT = torch.zeros((120, MAX_SHELLS), dtype=torch.bool, device=device)
+
+    TORE = torch.zeros(120, dtype=dtype, device=device)
+    N_S = torch.zeros(120, dtype=dtype, device=device)
+    N_P = torch.zeros(120, dtype=dtype, device=device)
+    N_D = torch.zeros(120, dtype=dtype, device=device)
+    N_F = torch.zeros(120, dtype=dtype, device=device)
+
+    ES = torch.zeros(120, dtype=dtype, device=device)
+    EP = torch.zeros(120, dtype=dtype, device=device)
+    ED = torch.zeros(120, dtype=dtype, device=device)
+    EF = torch.zeros(120, dtype=dtype, device=device)
+    US = torch.zeros(120, dtype=dtype, device=device)
+    UP = torch.zeros(120, dtype=dtype, device=device)
+    UD = torch.zeros(120, dtype=dtype, device=device)
+    UF = torch.zeros(120, dtype=dtype, device=device)
 
     R_orb_master = None
 
-    for i in range(len(label_list)):
+    for i, label in enumerate(label_list):
         R_orb_i, channels, R_rep, rep_splines, close_exp = read_skf_table(
-            skfpath + "{}.skf".format(label_list[i]),
+            _resolve_skf_path(skfpath, label),
             N_ORB,
             MAX_ANG,
             MAX_ANG_OCC,
@@ -714,12 +1027,18 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
             N_S,
             N_P,
             N_D,
+            N_F,
             ES,
             EP,
             ED,
+            EF,
             US,
             UP,
             UD,
+            UF,
+            SHELL_PRESENT,
+            device=device,
+            dtype=dtype,
         )
 
         channels_matrix = channels_to_matrix(channels)
@@ -727,6 +1046,7 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
         zero_row_idx = torch.nonzero(channels_matrix.eq(0).all(dim=1), as_tuple=False)
         if zero_row_idx.numel() > 0:
             coeffs[int(zero_row_idx[0].item()) :] = 0
+
         R_tensor[i, : len(R_orb_i)] = R_orb_i
         coeffs_tensor[i, : len(coeffs)] = coeffs
 
@@ -735,17 +1055,15 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
 
         R_rep_tensor[i, : len(R_rep)] = R_rep
         rep_splines_tensor[i, : len(rep_splines)] = rep_splines
-
         close_exp_tensor[i] = close_exp
-
-    # ── override N_ORB / MAX_ANG / MAX_ANG_OCC from wfc.hsd if present ──
-    import os
 
     wfc_path = os.path.join(skfpath, "wfc.hsd")
     if os.path.isfile(wfc_path):
-        read_wfc_hsd(wfc_path, N_ORB, MAX_ANG, MAX_ANG_OCC)
+        read_wfc_hsd(wfc_path, N_ORB, MAX_ANG, MAX_ANG_OCC, SHELL_PRESENT)
 
-    R_orb = R_orb_master.to(device=TYPE.device)
+    if R_orb_master is None:
+        raise ValueError(f"No SKF files were loaded from {skfpath}")
+    R_orb = R_orb_master.to(device=device, dtype=dtype)
 
     coeffs_tensor = torch.cat(
         (
@@ -755,11 +1073,13 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
                 1,
                 coeffs_tensor.shape[2],
                 coeffs_tensor.shape[3],
-                device=TYPE.device,
+                dtype=coeffs_tensor.dtype,
+                device=device,
             ),
         ),
         dim=1,
-    )  # pad last channel with zeros
+    )
+
     return (
         R_tensor,
         R_orb,
@@ -774,10 +1094,14 @@ def get_skf_tensors( #VERY IMPORTANT FUNCTION, actually reads from skf files
         N_S,
         N_P,
         N_D,
+        N_F,
         ES,
         EP,
         ED,
+        EF,
         US,
         UP,
         UD,
+        UF,
+        SHELL_PRESENT,
     )
