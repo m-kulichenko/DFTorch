@@ -1,5 +1,6 @@
 import importlib.util
 import shutil
+import sys
 from pathlib import Path
 
 import torch
@@ -7,11 +8,19 @@ import torch
 
 def run_with_float64(fn):
     previous_dtype = torch.get_default_dtype()
+    previous_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "dftorch" or name.startswith("dftorch.")
+    }
     torch.set_default_dtype(torch.float64)
     try:
         return fn()
     finally:
         torch.set_default_dtype(previous_dtype)
+        for name in [name for name in sys.modules if name == "dftorch" or name.startswith("dftorch.")]:
+            sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
 
 
 def load_validation_script():
