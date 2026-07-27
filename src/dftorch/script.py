@@ -1068,15 +1068,25 @@ def check_batch_structure_layout(batch_struct, batch_elements: list[list[str]], 
     expected_n_orb_flat: list[int] = []
     expected_h_start_flat: list[int] = []
     expected_h_end_flat: list[int] = []
+    expected_h_start_global_flat: list[int] = []
+    expected_h_end_global_flat: list[int] = []
     expected_shell_present_flat: list[bool] = []
     expected_shell_ao_start_flat: list[int] = []
     expected_shell_ao_end_flat: list[int] = []
+    expected_shell_ao_start_global_flat: list[int] = []
+    expected_shell_ao_end_global_flat: list[int] = []
     expected_n_shells_flat: list[int] = []
+    expected_h_start_u_flat: list[int] = []
+    expected_h_end_u_flat: list[int] = []
+    expected_h_start_u_global_flat: list[int] = []
+    expected_h_end_u_global_flat: list[int] = []
     expected_labels: list[list[str]] = []
     expected_diagonal_rows: list[list[float]] = []
     expected_d0_rows: list[list[float]] = []
 
     max_hdim = 0
+    global_ao_offset = 0
+    global_shell_offset = 0
     for elements in batch_elements:
         n_orb_row = [int(expected_by_element[sym]["N_ORB"]) for sym in elements]
         h_start_row = [0]
@@ -1090,26 +1100,44 @@ def check_batch_structure_layout(batch_struct, batch_elements: list[list[str]], 
         expected_n_orb_flat.extend(n_orb_row)
         expected_h_start_flat.extend(h_start_row)
         expected_h_end_flat.extend(h_end_row)
+        expected_h_start_global_flat.extend([start + global_ao_offset for start in h_start_row])
+        expected_h_end_global_flat.extend([end + global_ao_offset for end in h_end_row])
 
         labels_row: list[str] = []
         diagonal_row: list[float] = []
         d0_row: list[float] = []
+        n_shells_row: list[int] = []
         for atom_idx, sym in enumerate(elements):
             md = expected_by_element[sym]
             shell_present = list(md["SHELL_PRESENT"])
             local_start = expected_local_starts(shell_present)
             local_end = expected_local_ends(shell_present)
             h_start = h_start_row[atom_idx]
+            h_start_global = h_start + global_ao_offset
             expected_shell_present_flat.extend(shell_present)
             expected_shell_ao_start_flat.extend([s + h_start if s >= 0 else -1 for s in local_start])
             expected_shell_ao_end_flat.extend([e + h_start if e >= 0 else -1 for e in local_end])
-            expected_n_shells_flat.append(sum(1 for present in shell_present if present))
+            expected_shell_ao_start_global_flat.extend([s + h_start_global if s >= 0 else -1 for s in local_start])
+            expected_shell_ao_end_global_flat.extend([e + h_start_global if e >= 0 else -1 for e in local_end])
+            n_shells = sum(1 for present in shell_present if present)
+            expected_n_shells_flat.append(n_shells)
+            n_shells_row.append(n_shells)
             labels_row.extend(expected_ao_labels(shell_present))
             diagonal_row.extend(expected_diagonal_values(md))
             d0_row.extend(expected_d0_values(md))
+        h_start_u_row = [0]
+        for n_shells in n_shells_row[:-1]:
+            h_start_u_row.append(h_start_u_row[-1] + n_shells)
+        h_end_u_row = [start + n_shells - 1 for start, n_shells in zip(h_start_u_row, n_shells_row)]
+        expected_h_start_u_flat.extend(h_start_u_row)
+        expected_h_end_u_flat.extend(h_end_u_row)
+        expected_h_start_u_global_flat.extend([start + global_shell_offset for start in h_start_u_row])
+        expected_h_end_u_global_flat.extend([end + global_shell_offset for end in h_end_u_row])
         expected_labels.append(labels_row)
         expected_diagonal_rows.append(diagonal_row)
         expected_d0_rows.append(d0_row)
+        global_ao_offset += hdim
+        global_shell_offset += sum(n_shells_row)
 
     if int(batch_struct.batch_size) != batch_size:
         raise AssertionError(f"StructureBatch.batch_size expected {batch_size}, got {batch_struct.batch_size}")
@@ -1117,12 +1145,20 @@ def check_batch_structure_layout(batch_struct, batch_elements: list[list[str]], 
     assert_tensor_int_list(batch_struct.n_orbitals_per_atom, expected_n_orb_flat, "StructureBatch.n_orbitals_per_atom")
     assert_tensor_int_list(batch_struct.H_INDEX_START, expected_h_start_flat, "StructureBatch.H_INDEX_START")
     assert_tensor_int_list(batch_struct.H_INDEX_END, expected_h_end_flat, "StructureBatch.H_INDEX_END")
+    assert_tensor_int_list(batch_struct.H_INDEX_START_GLOBAL, expected_h_start_global_flat, "StructureBatch.H_INDEX_START_GLOBAL")
+    assert_tensor_int_list(batch_struct.H_INDEX_END_GLOBAL, expected_h_end_global_flat, "StructureBatch.H_INDEX_END_GLOBAL")
     assert_tensor_int_list(batch_struct.HDIM_struct, expected_hdim_struct, "StructureBatch.HDIM_struct")
 
     assert_tensor_bool_list(batch_struct.shell_present, expected_shell_present_flat, "StructureBatch.shell_present")
     assert_tensor_int_list(batch_struct.shell_ao_start, expected_shell_ao_start_flat, "StructureBatch.shell_ao_start")
     assert_tensor_int_list(batch_struct.shell_ao_end, expected_shell_ao_end_flat, "StructureBatch.shell_ao_end")
+    assert_tensor_int_list(batch_struct.shell_ao_start_global, expected_shell_ao_start_global_flat, "StructureBatch.shell_ao_start_global")
+    assert_tensor_int_list(batch_struct.shell_ao_end_global, expected_shell_ao_end_global_flat, "StructureBatch.shell_ao_end_global")
     assert_tensor_int_list(batch_struct.n_shells_per_atom, expected_n_shells_flat, "StructureBatch.n_shells_per_atom")
+    assert_tensor_int_list(batch_struct.H_INDEX_START_U, expected_h_start_u_flat, "StructureBatch.H_INDEX_START_U")
+    assert_tensor_int_list(batch_struct.H_INDEX_END_U, expected_h_end_u_flat, "StructureBatch.H_INDEX_END_U")
+    assert_tensor_int_list(batch_struct.H_INDEX_START_U_GLOBAL, expected_h_start_u_global_flat, "StructureBatch.H_INDEX_START_U_GLOBAL")
+    assert_tensor_int_list(batch_struct.H_INDEX_END_U_GLOBAL, expected_h_end_u_global_flat, "StructureBatch.H_INDEX_END_U_GLOBAL")
 
     for batch_idx, labels in enumerate(expected_labels):
         assert_list_equal(batch_struct.ao_labels[batch_idx], labels, f"StructureBatch.ao_labels[{batch_idx}]")
