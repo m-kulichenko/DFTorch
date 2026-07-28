@@ -2,3 +2,9 @@
 # GSD local settings (per-developer, not shared)
 .planning/config.json
 .planning/research/.cache/
+
+# Python build/run artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp_f_orbital_validation/

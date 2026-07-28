@@ -7,7 +7,10 @@ import torch
 from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
 )
-from ._slater_koster_pair import Slater_Koster_Pair_SKF_vectorized
+from ._slater_koster_pair import (
+    FAngularFormulaSourceError,
+    Slater_Koster_Pair_SKF_vectorized,
+)
 from ._tools import _maybe_compile
 
 
@@ -179,6 +182,19 @@ def _pair_grad_from_sk(
     j0 = metadata["j0"]
     nI = metadata["n_orb_I"]  # uint8
     nJ = metadata["n_orb_J"]  # uint8
+
+    # This is a derivative-consuming path: it reconstructs only the 1/4/9
+    # orbital pair masks, so a 16-orbital atom would contribute exactly zero to
+    # the stress instead of raising. Trusted f derivatives do not exist yet, so
+    # a silent zero here would be indistinguishable from a real result.
+    if bool(((nI == 16) | (nJ == 16)).any()):
+        raise FAngularFormulaSourceError(
+            "_pair_grad_from_sk: f-orbital (n_orb == 16) stress "
+            "contributions are not supported. f angular formulas and their "
+            "derivatives are still pending their source lock, so f pairs would "
+            "silently contribute zero stress. Refusing to return an "
+            "f-incomplete stress tensor."
+        )
 
     # Reconstruct pair masks
     pair_mask_HH = (nI == 1) & (nJ == 1)

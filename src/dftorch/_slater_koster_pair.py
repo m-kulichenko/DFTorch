@@ -1,6 +1,180 @@
 from __future__ import annotations
 
+from types import MappingProxyType
+from typing import Final, Mapping
+
 import torch
+
+from ._bond_integral import _CHANNELS as _BOND_INTEGRAL_CHANNELS
+
+# ---------------------------------------------------------------------------
+# Canonical Slater-Koster channel addressing
+# ---------------------------------------------------------------------------
+# ``coeffs_tensor`` is indexed as [pair_type, interval, channel, 0..3] where the
+# channel axis follows the official 40-entry extended-SKF order defined once in
+# ``_bond_integral._CHANNELS``: 20 named Hamiltonian channels followed by the 20
+# matching overlap channels.  The mapping below is derived directly from that
+# list so the two orders can never drift apart.
+#
+# Historically this module addressed channels as ``channel + SH_shift * 10``,
+# which only ever matched the legacy 20-channel simple-format layout.  Under the
+# 40-channel representation those numeric offsets silently select the *wrong*
+# radial integral (for example the s-s Hamiltonian offset 9 lands on ``Hdd2``
+# and the s-s overlap offset 19 lands on ``Hss0``).  Always resolve channels by
+# name via :func:`sk_channel_index` / :func:`sk_channel_name` instead.
+SK_CHANNEL_NAMES: Final[tuple[str, ...]] = tuple(_BOND_INTEGRAL_CHANNELS)
+
+SK_CHANNEL_INDEX: Final[Mapping[str, int]] = MappingProxyType(
+    {name: index for index, name in enumerate(SK_CHANNEL_NAMES)}
+)
+
+# Base (shell-pair) channel names shared by the Hamiltonian and overlap blocks.
+# Prefixing with "H" or "S" produces a key of ``SK_CHANNEL_INDEX``.
+SK_BASE_CHANNEL_NAMES: Final[tuple[str, ...]] = tuple(
+    name[1:] for name in SK_CHANNEL_NAMES if name.startswith("H")
+)
+
+# Legacy 10-channel indices still used by the ML Slater-Koster head
+# (``_ml_sk._CHANNEL_MAP``).  The ML path is kept on its own numbering so its
+# public behavior is unchanged; only the spline path moves to named channels.
+_ML_LEGACY_CHANNEL_INDEX: Final[Mapping[str, int]] = MappingProxyType(
+    {
+        "dd0": 0,
+        "dd1": 1,
+        "dd2": 2,
+        "pd0": 3,
+        "pd1": 4,
+        "pp0": 5,
+        "pp1": 6,
+        "sd0": 7,
+        "sp0": 8,
+        "ss0": 9,
+    }
+)
+
+
+def sk_channel_name(base: str, SH_shift: int) -> str:
+    """Return the canonical channel name for ``base`` in the H (0) or S (1) block.
+
+    Parameters
+    ----------
+    base : str
+        Shell-pair channel without its H/S prefix, e.g. ``"ss0"``, ``"pd1"``,
+        ``"ff3"``.
+    SH_shift : int
+        ``0`` selects the Hamiltonian block, ``1`` the overlap block.  This
+        mirrors the historical ``SH_shift`` flag threaded through the SK
+        routines, but it now selects a *name prefix* rather than a numeric
+        offset.
+    """
+    if SH_shift == 0:
+        return f"H{base}"
+    if SH_shift == 1:
+        return f"S{base}"
+    raise ValueError(
+        f"SH_shift must be 0 (Hamiltonian) or 1 (overlap), got {SH_shift!r}"
+    )
+
+
+def sk_channel_index(name: str) -> int:
+    """Return the ``coeffs_tensor`` channel index for a canonical channel name."""
+    try:
+        return SK_CHANNEL_INDEX[name]
+    except KeyError:
+        raise KeyError(
+            f"Unknown Slater-Koster channel {name!r}. Valid channels are: "
+            f"{', '.join(SK_CHANNEL_NAMES)}"
+        ) from None
+
+
+# ---------------------------------------------------------------------------
+# f-orbital angular convention (pending external source lock)
+# ---------------------------------------------------------------------------
+# The local AO order is fixed by ``Structure.AO_LABEL_TEMPLATE`` and must not be
+# reordered; f orbitals occupy local offsets 9..15.
+STRUCTURE_F_AO_ORDER: Final[tuple[str, ...]] = (
+    "fx3",
+    "fy3",
+    "fz3",
+    "fx_y2_z2",
+    "fy_z2_x2",
+    "fz_x2_y2",
+    "fxyz",
+)
+
+# The following stay ``None`` until the f-electron Slater-Koster paper tables are
+# supplied and verified by a human (see the Phase 3 source-lock checkpoint).
+# They must record, in order: the paper's own f AO ordering, the permutation
+# that maps paper row/column positions onto ``STRUCTURE_F_AO_ORDER``, and the
+# per-orbital sign applied during that mapping.  Populating them by guesswork
+# would produce numerically plausible but physically wrong f blocks.
+PAPER_F_AO_ORDER: tuple[str, ...] | None = None
+PAPER_TO_STRUCTURE_F_PERMUTATION: tuple[int, ...] | None = None
+PAPER_TO_STRUCTURE_F_SIGN: tuple[float, ...] | None = None
+
+#: ``True`` only once source-locked s-f/p-f/d-f/f-f angular formulas exist.
+F_ANGULAR_FORMULAS_AVAILABLE: bool = False
+
+
+class FAngularFormulaSourceError(NotImplementedError):
+    """Raised when an f-containing SK block is requested before the source lock.
+
+    Phase 3 deliberately routes 16-orbital atom pairs into Slater-Koster
+    assembly *before* the f angular formulas exist, so that f pairs fail loudly
+    instead of being silently dropped by the 1/4/9-orbital pair masks.  The
+    formulas themselves may only be hard-coded from the verified f-electron
+    Slater-Koster tables.
+    """
+
+
+_F_FORMULA_SOURCE_MESSAGE: Final[str] = (
+    "f-orbital Slater-Koster angular formulas are not implemented yet.\n"
+    "This pair reached the explicit f boundary instead of being silently "
+    "dropped, which means 16-orbital routing is working.\n"
+    "To proceed, the f angular tables must be source-locked first: supply the "
+    "f-electron Slater-Koster paper (PDF or extracted table pages) covering the "
+    "cubic harmonic definitions, the paper's f AO row/column order, the sign "
+    "convention, and all sf/pf/df/ff entries. The paper order is then mapped "
+    "onto STRUCTURE_F_AO_ORDER via PAPER_TO_STRUCTURE_F_PERMUTATION and "
+    "PAPER_TO_STRUCTURE_F_SIGN.\n"
+    "Guessing or reconstructing these tables from memory is not acceptable: it "
+    "yields finite, symmetric, and completely wrong physics."
+)
+
+_F_PAIR_MASK_LABELS: Final[tuple[str, ...]] = (
+    "HZ",
+    "ZH",
+    "XZ",
+    "ZX",
+    "YZ",
+    "ZY",
+    "ZZ",
+)
+
+
+def _require_f_formula_source(*masks: torch.Tensor | None, context: str) -> None:
+    """Raise :class:`FAngularFormulaSourceError` if any f pair mask is non-empty.
+
+    ``masks`` are the 16-orbital pair masks in ``_F_PAIR_MASK_LABELS`` order.
+    ``None`` entries mean the caller predates f routing and is treated as
+    "no f pairs".
+    """
+    if F_ANGULAR_FORMULAS_AVAILABLE:
+        return
+
+    active = [
+        label
+        for label, mask in zip(_F_PAIR_MASK_LABELS, masks)
+        if mask is not None and bool(mask.any())
+    ]
+    if not active:
+        return
+
+    raise FAngularFormulaSourceError(
+        f"{context}: reached {len(active)} f-containing pair class(es) "
+        f"({', '.join(active)}), where Z denotes an atom with n_orb == 16.\n"
+        f"{_F_FORMULA_SOURCE_MESSAGE}"
+    )
 
 
 # @torch.compile(fullgraph=True, dynamic=True)  # optional extra flags
@@ -35,6 +209,13 @@ def Slater_Koster_Pair_SKF_vectorized(
     i0_stress: torch.Tensor | None = None,
     j0_stress: torch.Tensor | None = None,
     ml_ctx: dict | None = None,
+    pair_mask_HZ: torch.Tensor | None = None,
+    pair_mask_ZH: torch.Tensor | None = None,
+    pair_mask_XZ: torch.Tensor | None = None,
+    pair_mask_ZX: torch.Tensor | None = None,
+    pair_mask_YZ: torch.Tensor | None = None,
+    pair_mask_ZY: torch.Tensor | None = None,
+    pair_mask_ZZ: torch.Tensor | None = None,
 ) -> (
     tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 ):
@@ -69,12 +250,21 @@ def Slater_Koster_Pair_SKF_vectorized(
     pair_mask_HH, pair_mask_HX, pair_mask_XH, pair_mask_XX,
     pair_mask_HY, pair_mask_XY, pair_mask_YH, pair_mask_YX, pair_mask_YY : torch.BoolTensor
         Boolean masks (shape (num_pairs,)) selecting pair classes:
-        - H: hydrogen-like (s-only)
-        - X: sp atom (s + p)
-        - Y: spd atom (s + p + d)
+        - H: hydrogen-like (s-only, n_orb == 1)
+        - X: sp atom (s + p, n_orb == 4)
+        - Y: spd atom (s + p + d, n_orb == 9)
         The two letters indicate (left atom, right atom), e.g. HX = H–X, YX = Y–X.
         Masks can be combined (ORed) when contributions are shared (e.g. HX and XX
         both use s–p).
+
+    pair_mask_HZ, pair_mask_ZH, pair_mask_XZ, pair_mask_ZX,
+    pair_mask_YZ, pair_mask_ZY, pair_mask_ZZ : torch.BoolTensor or None, optional
+        Boolean masks selecting the 16-orbital (spdf) pair classes, where ``Z``
+        denotes an atom with ``n_orb == 16``.  These exist so f-containing
+        neighbor pairs are *routed* rather than silently skipped by the 1/4/9
+        masks.  Until the f angular formulas are source-locked, any non-empty f
+        mask raises :class:`FAngularFormulaSourceError`.  Callers that predate f
+        routing may omit them; ``None`` means "this caller has no f pairs".
 
     dx : torch.Tensor
         Radial offset used in spline evaluation inside the selected interval for
@@ -94,17 +284,15 @@ def Slater_Koster_Pair_SKF_vectorized(
         Pre-tabulated cubic-spline coefficients for all SK channels.
         Indexed as coeffs_tensor[pair_type, interval_idx, channel, 0..3],
         where the last axis stores a0..a3 of the cubic a0 + a1*dx + a2*dx^2 + a3*dx^3.
-        Channel indices are grouped in blocks of 10; the active block is selected by
-        SH_shift (see below). Within a block, channels are:
-          0: V_dd_sigma, 1: V_dd_pi, 2: V_dd_delta,
-          3: V_pd_sigma, 4: V_pd_pi,
-          5: V_pp_sigma, 6: V_pp_pi,
-          7: V_sd_sigma,
-          8: V_sp_sigma,
-          9: V_ss_sigma
-        Thus the effective channel is channel + 10*SH_shift.
+        The channel axis follows the canonical 40-entry extended-SKF order in
+        ``_bond_integral._CHANNELS`` (20 named H channels, then the 20 matching
+        S channels).  Channels are resolved *by name* through
+        :data:`SK_CHANNEL_INDEX`; ``SH_shift`` only selects the ``"H"`` or
+        ``"S"`` name prefix.  Do not reintroduce numeric
+        ``channel + 10 * SH_shift`` addressing — that was the legacy 20-channel
+        simple-format packing and it selects the wrong integrals here.
 
-        Expected shape: (n_pair_types, n_intervals, 10 * n_blocks, 4).
+        Expected shape: (n_pair_types, n_intervals, 40, 4).
 
     neighbor_I, neighbor_J : torch.LongTensor
         Atom indices (per pair) used to compute the flattened AO indices.
@@ -116,10 +304,8 @@ def Slater_Koster_Pair_SKF_vectorized(
         flattened [HDIM x HDIM] block. Shape (num_atoms,), dtype long.
 
     SH_shift : int
-        Selects which 10-channel block in coeffs_tensor to use:
-        effective_channel = base_channel + 10 * SH_shift.
-        For example, SH_shift=0 may correspond to Hamiltonian (H), SH_shift=1
-        to overlap (S), depending on how the SKF data were packed.
+        Selects the Hamiltonian (``0``) or overlap (``1``) half of the canonical
+        channel list by choosing the ``"H"`` or ``"S"`` channel-name prefix.
 
     stress_weight : torch.Tensor or None
         If not None, a density-weight matrix of shape ``(HDIM, HDIM)`` used
@@ -160,6 +346,20 @@ def Slater_Koster_Pair_SKF_vectorized(
     # %%% fss_sigma, ... , fpp_pi: paramters for the bond integrals
     # %%% diagonal(1 or 2): atomic energies Es and Ep or diagonal elements of the overlap i.e. diagonal = 1
 
+    # Explicit f boundary. 16-orbital pairs are routed here (rather than being
+    # dropped by the 1/4/9 masks) so that missing f angular formulas surface as
+    # a loud, named failure instead of silently zeroed f blocks.
+    _require_f_formula_source(
+        pair_mask_HZ,
+        pair_mask_ZH,
+        pair_mask_XZ,
+        pair_mask_ZX,
+        pair_mask_YZ,
+        pair_mask_ZY,
+        pair_mask_ZZ,
+        context="Slater_Koster_Pair_SKF_vectorized",
+    )
+
     # Helper: optionally accumulate weighted per-pair gradient for stress.
     # dxyz has shape (3, P_masked). W is the (HDIM,HDIM) density-weight matrix.
     # _sg(mask, row_offset, col_offset, dxyz_3P) does:
@@ -192,13 +392,29 @@ def Slater_Koster_Pair_SKF_vectorized(
     _use_ml = ml_ctx is not None
 
     def _get_val_dR(pair_type_sel, idx_sel, dx_sel, channel, mask, direction="IJ"):
-        """Return (value, dvalue_dR) for a single SK channel."""
+        """Return (value, dvalue_dR) for a single named SK channel.
+
+        ``channel`` is a base channel name without its H/S prefix, e.g. ``"ss0"``
+        or ``"pd1"``; ``SH_shift`` selects the Hamiltonian or overlap variant.
+        """
         if _use_ml:
             from ._ml_sk import ml_eval_channel
 
-            return ml_eval_channel(ml_ctx, mask, channel, SH_shift, direction)
+            # The ML head is trained on the legacy 10-channel numbering, so
+            # translate the canonical name back into that index. Channels with
+            # no ML counterpart (any f channel) are rejected explicitly rather
+            # than silently mapped onto an unrelated head.
+            try:
+                ml_channel = _ML_LEGACY_CHANNEL_INDEX[channel]
+            except KeyError:
+                raise NotImplementedError(
+                    f"The ML Slater-Koster model has no channel for {channel!r}; "
+                    "it only covers the legacy s/p/d channels "
+                    f"({', '.join(_ML_LEGACY_CHANNEL_INDEX)})."
+                ) from None
+            return ml_eval_channel(ml_ctx, mask, ml_channel, SH_shift, direction)
         else:
-            ch = channel + SH_shift * 10
+            ch = sk_channel_index(sk_channel_name(channel, SH_shift))
             cs = coeffs_tensor[pair_type_sel, idx_sel, ch]
             val = (
                 cs[:, 0]
@@ -212,7 +428,7 @@ def Slater_Koster_Pair_SKF_vectorized(
     # -- end ML / spline helper --
 
     #######
-    HSSS_all, HSSS_dR = _get_val_dR(IJ_pair_type, idx, dx, 9, slice(None), "IJ")
+    HSSS_all, HSSS_dR = _get_val_dR(IJ_pair_type, idx, dx, "ss0", slice(None), "IJ")
     H0.index_add_(
         0, H_INDEX_START[neighbor_I] * HDIM + H_INDEX_START[neighbor_J], HSSS_all
     )
@@ -241,7 +457,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HSPS_all, HSPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, "IJ")
+    HSPS_all, HSPS_dR = _get_val_dR(
+        sel_IJ, sel_idx, dx[tmp_mask], "sp0", tmp_mask, "IJ"
+    )
 
     H0.index_add_(0, idx_row * HDIM + idx_col + 1, L[tmp_mask] * HSPS_all)
     H0.index_add_(0, idx_row * HDIM + idx_col + 2, M[tmp_mask] * HSPS_all)
@@ -274,7 +492,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HPSS_all, HPSS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 8, tmp_mask, "JI")
+    HPSS_all, HPSS_dR = _get_val_dR(
+        sel_IJ, sel_idx, dx[tmp_mask], "sp0", tmp_mask, "JI"
+    )
 
     H0.index_add_(0, (idx_row + 1) * HDIM + idx_col, -L[tmp_mask] * HPSS_all)
     H0.index_add_(0, (idx_row + 2) * HDIM + idx_col, -M[tmp_mask] * HPSS_all)
@@ -304,9 +524,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     idx_col = H_INDEX_START[neighbor_J[tmp_mask]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    HPPS, HPPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 5, tmp_mask, "IJ")
+    HPPS, HPPS_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], "pp0", tmp_mask, "IJ")
 
-    HPPP, HPPP_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], 6, tmp_mask, "IJ")
+    HPPP, HPPP_dR = _get_val_dR(sel_IJ, sel_idx, dx[tmp_mask], "pp1", tmp_mask, "IJ")
 
     PPSMPP = HPPS - HPPP
     PXPX = HPPP + L_XX * L_XX * PPSMPP
@@ -416,7 +636,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_sd_sigma, V_sd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, "IJ")
+    V_sd_sigma, V_sd_sigma_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "sd0", tmp_mask, "IJ"
+    )
     H_S_XY = (3**0.5) * tmp_L * tmp_M * V_sd_sigma
     H_S_YZ = (3**0.5) * tmp_M * tmp_N * V_sd_sigma
     H_S_ZX = (3**0.5) * tmp_N * tmp_L * V_sd_sigma
@@ -480,8 +702,10 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_pd_sigma, V_pd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, "IJ")
-    V_pd_pi, V_pd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, "IJ")
+    V_pd_sigma, V_pd_sigma_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "pd0", tmp_mask, "IJ"
+    )
+    V_pd_pi, V_pd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, "pd1", tmp_mask, "IJ")
     H_X_XY = (3**0.5) * tmp_L**2 * tmp_M * V_pd_sigma + tmp_M * (
         1 - 2 * tmp_L**2
     ) * V_pd_pi
@@ -797,7 +1021,9 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_ds_sigma, V_ds_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 7, tmp_mask, "JI")
+    V_ds_sigma, V_ds_sigma_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "sd0", tmp_mask, "JI"
+    )
     H_XY_S = (3**0.5) * tmp_L * tmp_M * V_ds_sigma
     H_YZ_S = (3**0.5) * tmp_M * tmp_N * V_ds_sigma
     H_ZX_S = (3**0.5) * tmp_N * tmp_L * V_ds_sigma
@@ -861,8 +1087,10 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_dp_sigma, V_dp_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 3, tmp_mask, "JI")
-    V_dp_pi, V_dp_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 4, tmp_mask, "JI")
+    V_dp_sigma, V_dp_sigma_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "pd0", tmp_mask, "JI"
+    )
+    V_dp_pi, V_dp_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, "pd1", tmp_mask, "JI")
     H_XY_X = -(
         (3**0.5) * tmp_L**2 * tmp_M * V_dp_sigma + tmp_M * (1 - 2 * tmp_L**2) * V_dp_pi
     )
@@ -1180,9 +1408,13 @@ def Slater_Koster_Pair_SKF_vectorized(
     tmp_N = N[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask]
-    V_dd_sigma, V_dd_sigma_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 0, tmp_mask, "IJ")
-    V_dd_pi, V_dd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 1, tmp_mask, "IJ")
-    V_dd_delta, V_dd_delta_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, 2, tmp_mask, "IJ")
+    V_dd_sigma, V_dd_sigma_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "dd0", tmp_mask, "IJ"
+    )
+    V_dd_pi, V_dd_pi_dR = _get_val_dR(sel_IJ, sel_idx, tmp_dx, "dd1", tmp_mask, "IJ")
+    V_dd_delta, V_dd_delta_dR = _get_val_dR(
+        sel_IJ, sel_idx, tmp_dx, "dd2", tmp_mask, "IJ"
+    )
     H_XY_XY = (
         3 * tmp_L**2 * tmp_M**2 * V_dd_sigma
         + (tmp_L**2 + tmp_M**2 - 4 * tmp_L**2 * tmp_M**2) * V_dd_pi
@@ -2015,17 +2247,11 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         Pre-tabulated cubic-spline coefficients for all SK channels.
         Indexed as coeffs_tensor[pair_type, interval_idx, channel, 0..3],
         where the last axis stores a0..a3 of the cubic a0 + a1*dx + a2*dx^2 + a3*dx^3.
-        Channel indices are grouped in blocks of 10; the active block is selected by
-        SH_shift (see below). Within a block, channels are:
-          0: V_dd_sigma, 1: V_dd_pi, 2: V_dd_delta,
-          3: V_pd_sigma, 4: V_pd_pi,
-          5: V_pp_sigma, 6: V_pp_pi,
-          7: V_sd_sigma,
-          8: V_sp_sigma,
-          9: V_ss_sigma
-        Thus the effective channel is channel + 10*SH_shift.
+        The channel axis follows the canonical 40-entry extended-SKF order in
+        ``_bond_integral._CHANNELS`` (20 named H channels, then the 20 matching
+        S channels), resolved by name through :data:`SK_CHANNEL_INDEX`.
 
-        Expected shape: (n_pair_types, n_intervals, 10 * n_blocks, 4).
+        Expected shape: (n_pair_types, n_intervals, 40, 4).
 
     neighbor_I, neighbor_J : torch.LongTensor
         Atom indices (per pair) used to compute the flattened AO indices.
@@ -2037,10 +2263,8 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         flattened [HDIM x HDIM] block. Shape (num_atoms,), dtype long.
 
     SH_shift : int
-        Selects which 10-channel block in coeffs_tensor to use:
-        effective_channel = base_channel + 10 * SH_shift.
-        For example, SH_shift=0 may correspond to Hamiltonian (H), SH_shift=1
-        to overlap (S), depending on how the SKF data were packed.
+        Selects the Hamiltonian (``0``) or overlap (``1``) half of the canonical
+        channel list by choosing the ``"H"`` or ``"S"`` channel-name prefix.
 
     stress_weight : torch.Tensor or None
         If not None, a ``(HDIM, HDIM)`` density-weight matrix (e.g. band weight
@@ -2090,7 +2314,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     nn_mask_IJ = IJ_pair_type != -1
 
     # H-H
-    coeffs_selected = coeffs_tensor[IJ_pair_type[nn_mask_IJ], idx, 9 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        IJ_pair_type[nn_mask_IJ], idx, sk_channel_index(sk_channel_name('ss0', SH_shift))
+    ]
 
     HSSS_all = (
         coeffs_selected[:, 0]
@@ -2160,7 +2386,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     idx_col = H_INDEX_START.gather(1, safe_J)[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 8 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('sp0', SH_shift))
+    ]
     HSPS_all = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * dx[tmp_mask[valid_pairs]]
@@ -2231,7 +2459,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     idx_col = H_INDEX_START.gather(1, safe_J)[tmp_mask]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 8 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('sp0', SH_shift))
+    ]
     HPSS_all = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * dx[tmp_mask[valid_pairs]]
@@ -2298,7 +2528,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     idx_col = H_INDEX_START.gather(1, safe_J)[tmp_mask]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 5 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pp0', SH_shift))
+    ]
     HPPS = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * dx[tmp_mask[valid_pairs]]
@@ -2310,7 +2542,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         + 2 * coeffs_selected[:, 2] * dx[tmp_mask[valid_pairs]]
         + 3 * coeffs_selected[:, 3] * dx[tmp_mask[valid_pairs]] ** 2
     )
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 6 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pp1', SH_shift))
+    ]
     HPPP = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * dx[tmp_mask[valid_pairs]]
@@ -2438,7 +2672,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     tmp_N = N[tmp_mask[valid_pairs]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 7 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('sd0', SH_shift))
+    ]
     V_sd_sigma = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -2517,7 +2753,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     tmp_N = N[tmp_mask[valid_pairs]]
     sel_IJ = IJ_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 3 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pd0', SH_shift))
+    ]
     V_pd_sigma = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -2529,7 +2767,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         + 2 * coeffs_selected[:, 2] * tmp_dx
         + 3 * coeffs_selected[:, 3] * tmp_dx**2
     )
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 4 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pd1', SH_shift))
+    ]
     V_pd_pi = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -2878,7 +3118,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     tmp_N = N[tmp_mask[valid_pairs]]
     sel_IJ = JI_pair_type[tmp_mask]
     sel_idx = idx[tmp_mask[valid_pairs]]
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 7 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('sd0', SH_shift))
+    ]
     batch_ids = (
         torch.arange(B, device=H_INDEX_START.device)
         .unsqueeze(1)
@@ -2964,7 +3206,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     )
     batch_ids = batch_ids.gather(1, safe_J)[tmp_mask]
     batch_block_offset = batch_ids * (HDIM * HDIM)
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 3 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pd0', SH_shift))
+    ]
     V_dp_sigma = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -2976,7 +3220,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         + 2 * coeffs_selected[:, 2] * tmp_dx
         + 3 * coeffs_selected[:, 3] * tmp_dx**2
     )
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 4 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('pd1', SH_shift))
+    ]
     V_dp_pi = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -3329,7 +3575,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
     batch_ids = batch_ids.gather(1, safe_J)[tmp_mask]
     batch_block_offset = batch_ids * (HDIM * HDIM)
 
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 0 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('dd0', SH_shift))
+    ]
     V_dd_sigma = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -3341,7 +3589,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         + 2 * coeffs_selected[:, 2] * tmp_dx
         + 3 * coeffs_selected[:, 3] * tmp_dx**2
     )
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 1 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('dd1', SH_shift))
+    ]
     V_dd_pi = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx
@@ -3353,7 +3603,9 @@ def Slater_Koster_Pair_SKF_vectorized_batch(
         + 2 * coeffs_selected[:, 2] * tmp_dx
         + 3 * coeffs_selected[:, 3] * tmp_dx**2
     )
-    coeffs_selected = coeffs_tensor[sel_IJ, sel_idx, 2 + SH_shift * 10]
+    coeffs_selected = coeffs_tensor[
+        sel_IJ, sel_idx, sk_channel_index(sk_channel_name('dd2', SH_shift))
+    ]
     V_dd_delta = (
         coeffs_selected[:, 0]
         + coeffs_selected[:, 1] * tmp_dx

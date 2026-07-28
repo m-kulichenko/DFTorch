@@ -3,6 +3,7 @@ import time
 import torch
 
 from ._slater_koster_pair import (
+    FAngularFormulaSourceError,
     Slater_Koster_Pair_SKF_vectorized,
     Slater_Koster_Pair_SKF_vectorized_batch,
 )
@@ -177,6 +178,34 @@ def H0_and_S_vectorized(
         const.n_orb[TYPE[neighbor_J]] == 9
     )
 
+    # 16-orbital (spdf) pair classes. "Z" denotes an atom with n_orb == 16.
+    # Before these masks existed, every f-containing neighbor pair fell through
+    # all nine 1/4/9 masks and was silently omitted from H0/S off-diagonal
+    # assembly. Routing them explicitly means an unimplemented f angular block
+    # now fails loudly inside Slater_Koster_Pair_SKF_vectorized instead of
+    # producing a finite, symmetric, and wrong matrix.
+    pair_mask_HZ = (const.n_orb[TYPE[neighbor_I]] == 1) & (
+        const.n_orb[TYPE[neighbor_J]] == 16
+    )
+    pair_mask_ZH = (const.n_orb[TYPE[neighbor_I]] == 16) & (
+        const.n_orb[TYPE[neighbor_J]] == 1
+    )
+    pair_mask_XZ = (const.n_orb[TYPE[neighbor_I]] == 4) & (
+        const.n_orb[TYPE[neighbor_J]] == 16
+    )
+    pair_mask_ZX = (const.n_orb[TYPE[neighbor_I]] == 16) & (
+        const.n_orb[TYPE[neighbor_J]] == 4
+    )
+    pair_mask_YZ = (const.n_orb[TYPE[neighbor_I]] == 9) & (
+        const.n_orb[TYPE[neighbor_J]] == 16
+    )
+    pair_mask_ZY = (const.n_orb[TYPE[neighbor_I]] == 16) & (
+        const.n_orb[TYPE[neighbor_J]] == 9
+    )
+    pair_mask_ZZ = (const.n_orb[TYPE[neighbor_I]] == 16) & (
+        const.n_orb[TYPE[neighbor_J]] == 16
+    )
+
     nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list
     dR_mskd = dR[nn_mask]
     L_mskd = L[nn_mask]
@@ -251,6 +280,13 @@ def H0_and_S_vectorized(
         H_INDEX_START,
         0,
         ml_ctx=_ml_ctx,
+        pair_mask_HZ=pair_mask_HZ,
+        pair_mask_ZH=pair_mask_ZH,
+        pair_mask_XZ=pair_mask_XZ,
+        pair_mask_ZX=pair_mask_ZX,
+        pair_mask_YZ=pair_mask_YZ,
+        pair_mask_ZY=pair_mask_ZY,
+        pair_mask_ZZ=pair_mask_ZZ,
     )
 
     H0 = H0.reshape(HDIM, HDIM)
@@ -290,6 +326,13 @@ def H0_and_S_vectorized(
         H_INDEX_START,
         1,
         ml_ctx=_ml_ctx,
+        pair_mask_HZ=pair_mask_HZ,
+        pair_mask_ZH=pair_mask_ZH,
+        pair_mask_XZ=pair_mask_XZ,
+        pair_mask_ZX=pair_mask_ZX,
+        pair_mask_YZ=pair_mask_YZ,
+        pair_mask_ZY=pair_mask_ZY,
+        pair_mask_ZZ=pair_mask_ZZ,
     )
 
     S = S.reshape(HDIM, HDIM) / 27.21138625
@@ -475,6 +518,18 @@ def H0_and_S_vectorized_batch(
     pair_mask_YH = valid_pairs & (norb_I == 9) & (norb_J == 1)
     pair_mask_YX = valid_pairs & (norb_I == 9) & (norb_J == 4)
     pair_mask_YY = valid_pairs & (norb_I == 9) & (norb_J == 9)
+
+    # Batch f-orbital routing is deferred to a later phase. The nine masks above
+    # cover only n_orb in {1, 4, 9}, so a 16-orbital atom would be dropped from
+    # every off-diagonal block without warning. Fail explicitly instead.
+    if bool((valid_pairs & ((norb_I == 16) | (norb_J == 16))).any()):
+        raise FAngularFormulaSourceError(
+            "H0_and_S_vectorized_batch: batched f-orbital (n_orb == 16) H0/S "
+            "assembly is not supported. Only the single-system path "
+            "H0_and_S_vectorized routes 16-orbital pairs, and even there the f "
+            "angular formulas are still pending their source lock. Refusing to "
+            "return H0/S with silently omitted f blocks."
+        )
 
     nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list
     dR_mskd = dR[nn_mask]
