@@ -1,0 +1,17 @@
+numpy
+scipy
+torch
+pandas
+nvalchemi-toolkit-ops
+
+[dev]
+pytest>=7.4
+ruff
+mypy
+pre-commit
+
+[sedacs]
+mpi4py
+numba
+toml
+scikit-learn

@@ -1,112 +1,107 @@
 # Coding Conventions
 
-**Analysis Date:** 2026-07-17
+**Analysis Date:** 2026-07-20
+**Last Mapped Commit:** `e824543a0b411dcf52462ee55db5362c360e7780`
+**Scope:** `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_bond_integral.py`, `src/dftorch/script.py`, `tests/f_orbital_data/`
 
 ## Naming Patterns
 
 **Files:**
-- Use package modules under `src/dftorch/`.
-- Internal implementation modules use leading-underscore snake_case filenames, e.g. `src/dftorch/_cell.py`, `src/dftorch/_tools.py`, `src/dftorch/_io.py`, `src/dftorch/_nearestneighborlist.py`.
-- Public class-oriented modules keep historical PascalCase filenames, e.g. `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, `src/dftorch/MD.py`, `src/dftorch/Optimizer.py`.
-- Tests use `test_*.py` under `tests/`, e.g. `tests/test_scf.py`, `tests/test_io.py`, `tests/test_public_api_contract.py`.
-- Do not add new implementation code under `src/dftorch/_legacy/`; Ruff excludes that subtree in `pyproject.toml`.
+- Use the existing mixed module naming in the scoped code. Public, class-oriented modules keep PascalCase filenames: `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, and `src/dftorch/ESDriver.py`.
+- Internal implementation modules use leading-underscore snake_case filenames: `src/dftorch/_bond_integral.py`.
+- Standalone validation utilities in this scope use a plain lowercase script filename: `src/dftorch/script.py`.
+- f-orbital SKF fixtures use element-pair filenames under `tests/f_orbital_data/`, such as `tests/f_orbital_data/Eu-Eu.skf`, `tests/f_orbital_data/Eu-Ga.skf`, and `tests/f_orbital_data/N-N.skf`. Prefer dashed `Element-Element.skf` names for new scoped fixtures because `src/dftorch/script.py` validates dashed names with `split_dashed_pair()`.
 
 **Functions:**
-- Use snake_case for functions and helpers: `normalize_cell()` in `src/dftorch/_cell.py`, `ordered_pairs_from_TYPE()` in `src/dftorch/_tools.py`, `read_xyz()` in `src/dftorch/_io.py`.
-- Use a leading underscore for private helpers and implementation details: `_maybe_compile()` and `_degen_symeig` in `src/dftorch/_tools.py`, `_ensure_parent_dir()` in `src/dftorch/_io.py`, `_pair_lookup_for_const()` in `src/dftorch/_nearestneighborlist.py`.
-- Preserve domain abbreviations used by the package APIs when extending existing call sites, e.g. `TYPE`, `RX`, `RY`, `RZ`, `Nats`, `H_INDEX_START`, and `H_INDEX_END` in `src/dftorch/Structure.py`.
-- Factory helpers use verb phrases such as `create_gbsa()` in `src/dftorch/_gbsa.py`, `create_thirdorder()` in `src/dftorch/_thirdorder.py`, and `create_dftd3()` in `src/dftorch/_dftd3.py`.
+- Use snake_case for new functions and helpers: `_ao_mask_from_shell_present()`, `_shell_local_start()`, `_global_shell_start()`, and `_atomic_density_matrix_from_shells()` in `src/dftorch/Structure.py`; `_normalize_skf_row()`, `_resolve_skf_path()`, `_validate_nested_shells()`, and `read_skf_table()` in `src/dftorch/_bond_integral.py`; `check_one_skf()` and `run_structure_tests()` in `src/dftorch/script.py`.
+- Use a leading underscore for private helpers that should not become package API: `_split_skf_pair_name()` in `src/dftorch/_bond_integral.py`, `_flatten_ao_labels()` in `src/dftorch/Structure.py`, and `_StructProxy` inside `src/dftorch/ESDriver.py`.
+- Preserve domain-specific uppercase names where the surrounding scientific code uses them as data model fields or tensors: `TYPE`, `RX`, `RY`, `RZ`, `HDIM`, `H_INDEX_START`, `H_INDEX_END`, `N_ORB`, `MAX_ANG`, `N_F`, `EF`, `UF`, and `SHELL_PRESENT` in `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, and `src/dftorch/_bond_integral.py`.
 
 **Variables:**
-- Use snake_case for local Python variables: `root`, `xyz_path`, `skf_dir`, `dftorch_params` in `tests/test_scf.py`.
-- Tensor and chemistry state often uses domain-specific uppercase names: `TYPE`, `COORDS`, `Rcut`, `N`, `RX`, `RY`, `RZ`, `Ftot`. Match the surrounding module style when modifying scientific kernels in `src/dftorch/`.
-- Configuration dictionaries use uppercase string keys such as `"FILENAME"`, `"CELL"`, `"SKFPATH"`, `"T_ELECTRONIC"`, and `"SCF_MAX_ITER"` in `tests/test_scf.py` and `src/dftorch/Structure.py`.
-- Module-level constants use uppercase names: `_COMPILE_ENABLED` and `DEGEN_THRESHOLD` in `src/dftorch/_tools.py`, `SYMBOL_TO_NUMBER` and `NUMBER_TO_SYMBOL` in `src/dftorch/_io.py`.
+- Use lowercase snake_case for ordinary locals: `shell_present`, `atom_ao_start`, `pair_lookup`, `skf_path`, `project_root`, `metadata_dict`, and `batch_elements`.
+- Use uppercase names for tensor metadata that mirrors SKF/header concepts: `R_tensor`, `R_orb`, `MAX_ANG_OCC`, `TORE`, `N_S`, `N_P`, `N_D`, `N_F`, `ES`, `EP`, `ED`, `EF`, `US`, `UP`, `UD`, `UF`, and `SHELL_PRESENT` in `src/dftorch/Constants.py` and `src/dftorch/_bond_integral.py`.
+- Keep shell and AO templates module-level and uppercase in `src/dftorch/Structure.py`: `SHELL_DIMS`, `SHELL_LOCAL_STARTS`, `SHELL_TYPE_IDS`, `AO_LABEL_TEMPLATE`, and `AO_SHELL_TEMPLATE`.
+- Keep parser channel tables module-level and uppercase in `src/dftorch/_bond_integral.py`: `_CHANNELS`, `_SIMPLE_CHANNELS`, `_SIMPLE_TO_EXTENDED`, `SK_BLOCK_SIZE`, `N_SK_CHANNELS`, `MAX_SHELLS`, `EV_PER_HARTREE`, and `BOHR_TO_ANGSTROM`.
 
 **Types:**
-- Public classes use PascalCase: `Structure`, `StructureBatch`, `Constants`, `ESDriver`, `ESDriverBatch`, `MDXL`, `MDXLBatch`, `MDXLOS`, and `GeoOpt`.
-- Internal classes may use a leading underscore when they are not part of the public API, e.g. `_degen_symeig` in `src/dftorch/_tools.py`.
-- Type annotations are used in newer modules with `from __future__ import annotations`, e.g. `src/dftorch/_cell.py`, `src/dftorch/_tools.py`, `src/dftorch/_io.py`, and `src/dftorch/Structure.py`.
+- Public classes use PascalCase and inherit from `torch.nn.Module`: `Constants` and `ConstantsTest` in `src/dftorch/Constants.py`, `Structure` and `StructureBatch` in `src/dftorch/Structure.py`, and `ESDriver` and `ESDriverBatch` in `src/dftorch/ESDriver.py`.
+- Use `torch.Tensor` type annotations for tensor helpers in newer scoped code, especially `src/dftorch/Structure.py`, `src/dftorch/_bond_integral.py`, and `src/dftorch/script.py`.
+- Use `typing.Any` only at boundaries where the concrete constants/structure type is broader than the scoped module can express, such as `const: Any` in `src/dftorch/Structure.py`.
 
 ## Code Style
 
 **Formatting:**
-- Use Ruff formatting. The pre-commit hook `ruff-format` is configured in `.pre-commit-config.yaml`; CI checks `uv run ruff format --check .` in `.github/workflows/tests.yml`.
-- Run formatting locally with:
-
-```bash
-uv run ruff format .
-```
-
-- Line length rule `E501` is ignored in `pyproject.toml`; do not force awkward scientific formulas or long parameter dictionaries into unreadable shapes only to satisfy line width.
-- Keep the source compatible with Python `>=3.11` per `pyproject.toml`.
+- Use Python 3 style with four-space indentation.
+- Use `from __future__ import annotations` in modules that use modern annotation syntax: `src/dftorch/Structure.py`, `src/dftorch/_bond_integral.py`, and `src/dftorch/script.py`.
+- Keep f-orbital tensor layout expressed through templates and masks instead of repeated ad hoc offsets. Use `AO_LABEL_TEMPLATE`, `AO_SHELL_TEMPLATE`, `_ao_mask_from_shell_present()`, `_shell_local_start()`, and `_global_shell_start()` in `src/dftorch/Structure.py`.
+- Prefer line breaks around long tuple returns and tensor stacks, matching `get_skf_tensors()` in `src/dftorch/_bond_integral.py` and the 16-entry onsite templates in `src/dftorch/Structure.py`.
+- Formatting tool configuration is not detected in the scoped paths. Preserve the style already present in the touched file when editing.
 
 **Linting:**
-- Use Ruff linting. The pre-commit hook runs `ruff --fix`; CI runs `uv run ruff check .`.
-- Ruff selects `E`, `F`, `S`, `I`, and `PERF` in `pyproject.toml`.
-- Ruff ignores `E501` and `S311` globally in `pyproject.toml`.
-- Per-file ignores in `pyproject.toml`:
-  - `__init__.py`: `F401` for re-export imports.
-  - `tests/*.py`: `S101` for pytest `assert` usage.
-  - `experiments/*.py`: `E402` for notebook/script import placement.
-- Use local `# noqa` only for intentionally preserved exceptions, e.g. import smoke tests in `tests/test_import.py` and `tests/test_public_api_contract.py`. Avoid broad file-level disables like `# ruff: noqa` unless isolating legacy or parser-heavy code such as `src/dftorch/_io.py`.
+- Lint configuration is not detected in the scoped paths.
+- Avoid introducing new broad lint suppressions. Scoped code currently uses local suppression only where a historical variable name conflicts with lint rules, such as `for l in f:  # noqa: E741` in `src/dftorch/_bond_integral.py`.
+- Do not add new unconditional side-effect imports. `src/dftorch/script.py` intentionally uses `importlib.util` and `types.ModuleType` to load scoped modules without importing `dftorch/__init__.py`.
 
 ## Import Organization
 
 **Order:**
-1. `from __future__ import annotations` when using modern annotations in source modules.
-2. Standard library imports: `os`, `re`, `pathlib`, `typing`.
-3. Third-party imports: `numpy`, `torch`, `pytest`.
-4. Local package imports: relative imports inside `src/dftorch/`, absolute `dftorch` imports in tests.
+1. `from __future__ import annotations` when present, as in `src/dftorch/Structure.py`, `src/dftorch/_bond_integral.py`, and `src/dftorch/script.py`.
+2. Standard library imports: `math`, `os`, `re`, `sys`, `time`, `types`, `pathlib.Path`, and `typing`.
+3. Third-party imports: `numpy` and `torch`.
+4. Local package imports: relative imports in package modules such as `from ._io import read_pdb, read_xyz` in `src/dftorch/Structure.py`; package imports in legacy scoped code such as `from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch` in `src/dftorch/ESDriver.py`.
 
 **Path Aliases:**
-- No custom Python path aliases are configured. Package code imports with relative paths such as `from ._cell import normalize_cell` in `src/dftorch/Structure.py`.
-- Tests import the installed package via `dftorch`, e.g. `from dftorch.Constants import Constants` in `tests/test_scf.py`.
-- Public user-facing imports must come from package root `dftorch`, and `src/dftorch/__init__.py` defines `__all__`.
+- No scoped custom path aliases are detected.
+- Use relative imports for new package-internal code in `src/dftorch/Structure.py` and `src/dftorch/_bond_integral.py`.
+- Keep `src/dftorch/script.py` independent from package root import side effects by loading modules with `load_dftorch_module()` and `ensure_fake_dftorch_package()`.
 
 ## Error Handling
 
 **Patterns:**
-- Validate inputs early and raise specific built-in exceptions. Use `ValueError` for invalid user/configuration values such as invalid cell shapes in `src/dftorch/_cell.py` and charge/spin combinations in `src/dftorch/Structure.py`.
-- Use `ImportError` for optional backend requirements, e.g. ALCHEMI neighbor-list availability in `src/dftorch/_nearestneighborlist.py` and ML model dependencies in `src/dftorch/_ml_sk.py`.
-- Use `NotImplementedError` for unsupported algorithm branches, e.g. unsupported electronic driver modes in `src/dftorch/ESDriver.py`.
-- Include actionable exception text that names the bad shape, option, or missing capability: `src/dftorch/_cell.py` reports accepted `LBox` shapes; `src/dftorch/ESDriver.py` reports unsupported batched PME.
-- Tests should assert preconditions for bundled fixtures before running expensive scientific paths, as in `tests/test_scf.py`, `tests/test_io.py`, and `tests/test_nearestneighborlist.py`.
+- Raise `ValueError` for malformed SKF content, unsupported shell layouts, invalid file names, and invalid scientific configuration. Examples: `_normalize_skf_row()` and `_validate_nested_shells()` in `src/dftorch/_bond_integral.py`, `split_dashed_pair()` in `src/dftorch/script.py`, and charge/spin validation in `src/dftorch/Structure.py`.
+- Raise `FileNotFoundError` for missing fixture directories or empty SKF sets, as in `run_bond_integral_tests()` and `main()` in `src/dftorch/script.py`.
+- Raise `RuntimeError` for loader failures that are environmental rather than data-validation errors, such as `find_project_root()` and `load_dftorch_module()` in `src/dftorch/script.py`.
+- Raise `AssertionError` with exact expected/actual values in validation checks. `src/dftorch/script.py` uses helper functions such as `assert_int_metadata()`, `assert_float_metadata()`, `assert_bool_metadata()`, and `assert_tensor_float_list()` for actionable failures.
+- Use `NotImplementedError` for unsupported algorithm branches in runtime drivers, such as off-diagonal DFTB3 with PME in `src/dftorch/ESDriver.py`.
+- Catch only expected optional-file failures. `src/dftorch/Constants.py` catches `(FileNotFoundError, OSError, ValueError)` when optional `spinw.txt` cannot be loaded.
 
 ## Logging
 
-**Framework:** `console` plus limited `logging`
+**Framework:** `print()` in scoped paths
 
 **Patterns:**
-- Most runtime status output uses guarded `print()` calls behind `verbose` parameters in scientific routines, e.g. `src/dftorch/_nearestneighborlist.py`, `src/dftorch/_h0ands.py`, `src/dftorch/_scf.py`, and `src/dftorch/Optimizer.py`.
-- `src/dftorch/ewald_pme/__init__.py` uses the standard `logging` module to report Triton/PyTorch backend selection.
-- New reusable library code should prefer returning values and raising exceptions over unconditional `print()` output. If progress output is needed, expose a `verbose` flag consistent with `src/dftorch/_nearestneighborlist.py` and `src/dftorch/ESDriver.py`.
+- `src/dftorch/script.py` is a command-line validation script and uses `print()` for progress, per-file pass/fail summaries, and final status.
+- `src/dftorch/Constants.py` prints optional SOC and DFTB3 status messages during initialization.
+- `src/dftorch/ESDriver.py` uses `verbose` flags for timing/progress output on expensive runtime paths. New scoped runtime output should be guarded by an existing `verbose` argument when possible.
+- Do not add unconditional print output to reusable parser or structure helpers in `src/dftorch/_bond_integral.py` or `src/dftorch/Structure.py`; return data or raise exceptions instead.
 
 ## Comments
 
 **When to Comment:**
-- Use comments to explain numerical stability, scientific assumptions, backend constraints, or non-obvious tensor transformations. Good examples are the degenerate eigensolver notes in `src/dftorch/_tools.py` and periodic wrapping notes in `src/dftorch/Structure.py`.
-- Keep comments near domain-heavy parameter dictionaries when they clarify units or algorithm meaning, as in `tests/test_scf.py`.
-- Avoid adding comments that restate simple assignments. Several existing modules include historical TODO-style notes; new code should be more precise and actionable.
+- Comment f-orbital ordering and scientific assumptions where they define external compatibility. `src/dftorch/Structure.py` documents the cubic-harmonic f-label order and the atom-major AO layout.
+- Keep parser comments close to layout decisions, such as simple-to-extended 20-to-40 channel normalization in `src/dftorch/_bond_integral.py`.
+- Use comments in `src/dftorch/script.py` to divide validation stages and clarify independently computed expectations.
+- Avoid adding personal-note comments or stale TODOs. Existing scoped comments such as `# Aryan NOTE`, `# old function`, and broad TODOs should not be copied into new code.
 
 **JSDoc/TSDoc:**
-- Not applicable; this is a Python codebase.
-- Use Python docstrings, preferably NumPy-style sections (`Parameters`, `Returns`, `Notes`, `Examples`) as in `src/dftorch/_cell.py`, `src/dftorch/_tools.py`, `src/dftorch/_io.py`, and `src/dftorch/Structure.py`.
+- Not applicable; this is Python.
+- Use Python docstrings. Prefer concise NumPy-style sections for parser and scientific helpers, as in `read_skf_table()` and `_normalize_skf_row()` in `src/dftorch/_bond_integral.py`.
+- For validation helpers in `src/dftorch/script.py`, use short docstrings that state the invariant being independently checked.
 
 ## Function Design
 
-**Size:** Keep new functions focused and testable. Scientific kernels can be longer when vectorized tensor operations require staged calculations, but prefer extracting reusable helpers such as `_maybe_compile()` in `src/dftorch/_tools.py`, `_ensure_parent_dir()` in `src/dftorch/_io.py`, and `normalize_cell()` in `src/dftorch/_cell.py`.
+**Size:** Keep new f-orbital helpers focused on one transformation: shell presence to AO mask, local shell starts, global shell starts, row normalization, SKF path resolution, or metadata assertion. Long scientific driver methods exist in `src/dftorch/ESDriver.py`; new f-orbital changes should avoid expanding them unless integration with `H0_and_S_vectorized()` requires it.
 
-**Parameters:** Pass explicit tensors, constants containers, and configuration dictionaries. Preserve established parameter names for domain APIs (`TYPE`, `Rx`, `Ry`, `Rz`, `cell`, `Rcut`, `const`) when extending functions such as `vectorized_nearestneighborlist()` in `src/dftorch/_nearestneighborlist.py`.
+**Parameters:** Pass tensors and metadata explicitly. `read_skf_table()` in `src/dftorch/_bond_integral.py` receives mutable metadata tensors (`N_ORB`, `N_F`, `EF`, `UF`, `SHELL_PRESENT`) rather than reaching into globals. `Structure` helpers in `src/dftorch/Structure.py` receive `shell_present`, `shell_local_start`, and `atom_ao_start` directly.
 
-**Return Values:** Return tensors, tuples of tensors, or mutate established structure objects according to the module pattern. For public constructors and drivers, preserve object attributes expected by tests, e.g. `structure1.e_tot` and `structure1.f_tot` in `tests/test_scf.py`.
+**Return Values:** Return tensors, tuples, or dictionaries that preserve existing call contracts. `get_skf_tensors()` in `src/dftorch/_bond_integral.py` returns a long tuple consumed by `Constants.__init__()` in `src/dftorch/Constants.py`; when adding metadata, update both sides together and add validation in `src/dftorch/script.py`.
 
 ## Module Design
 
-**Exports:** Public exports live in `src/dftorch/__init__.py`. When adding supported public API symbols, import them there, add them to `__all__`, and update `tests/test_public_api_contract.py`.
+**Exports:** `src/dftorch/Structure.py` exports `Structure` and `StructureBatch` through `__all__`. Scoped internal helpers remain unexported. `src/dftorch/_bond_integral.py` has no scoped `__all__`; treat leading-underscore names as private.
 
-**Barrel Files:** `src/dftorch/__init__.py` is the package barrel. Do not create additional broad barrel modules unless a subpackage needs a stable public surface similar to `src/dftorch/ewald_pme/__init__.py`.
+**Barrel Files:** Not detected in scoped paths. Do not add a new barrel file for f-orbital helpers; keep parser logic in `src/dftorch/_bond_integral.py`, structure indexing in `src/dftorch/Structure.py`, and runtime integration in `src/dftorch/Constants.py` or `src/dftorch/ESDriver.py`.
 
 ---
 
-*Convention analysis: 2026-07-17*
+*Convention analysis: 2026-07-20*

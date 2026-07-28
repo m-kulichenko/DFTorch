@@ -1,132 +1,102 @@
 # External Integrations
 
-**Analysis Date:** 2026-07-17
+**Analysis Date:** 2026-07-20
+**Last Mapped Commit:** `e824543a0b411dcf52462ee55db5362c360e7780`
+**Scope:** `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_bond_integral.py`, `src/dftorch/script.py`, `tests/f_orbital_data`
 
 ## APIs & External Services
 
 **Scientific compute libraries:**
-- PyTorch - Core tensor, autograd, GPU, compile, neural network, and distributed execution backend.
+- PyTorch - Local tensor, autograd, module, device, and linear algebra API used for all scoped f-orbital runtime and validation code.
   - SDK/Client: `torch`
   - Auth: Not applicable
-  - Code paths: `src/dftorch/ESDriver.py`, `src/dftorch/MD.py`, `src/dftorch/_tools.py`, `src/dftorch/_ml_sk.py`, `src/dftorch/ewald_pme/`, `src/dftorch/sedacs/`
-- NVIDIA ALCHEMI / nvalchemiops - Optional accelerated neighbor-list backend selected by `use_alchemi=True` or module global `USE_ALCHEMI`.
-  - SDK/Client: `nvalchemi-toolkit-ops` provides `nvalchemiops.torch.neighbors.cell_list`
+  - Code paths: `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_bond_integral.py`, `src/dftorch/script.py`
+- NumPy - Local array API used for constants/debug data and D3 handoff.
+  - SDK/Client: `numpy`
   - Auth: Not applicable
-  - Code paths: `src/dftorch/_nearestneighborlist.py`
-- Triton - Optional CUDA Ewald backend when CUDA is available and `src/dftorch/ewald_pme/ewald_triton.py` imports successfully.
-  - SDK/Client: `triton`, `triton.language`
-  - Auth: Not applicable
-  - Code paths: `src/dftorch/ewald_pme/__init__.py`, `src/dftorch/ewald_pme/ewald_triton.py`
-- SEDACS - Optional large-scale simulation integration for graph partitioning and distributed workflows.
-  - SDK/Client: External `sedacs` Python package/modules, plus `torch.distributed`
-  - Auth: Not applicable
-  - Code paths: `src/dftorch/sedacs/__init__.py`, `src/dftorch/sedacs/SCF.py`, `src/dftorch/sedacs/MD.py`, `src/dftorch/sedacs/sedacs_interface.py`, `experiments/DDP_2.py`
-
-**Package and release services:**
-- PyPI package index - Dependency resolution and package downloads through uv/pip.
-  - SDK/Client: `uv`, `pip`
-  - Auth: Not detected in repository files
-  - Code paths: `pyproject.toml`, `uv.lock`, `Dockerfile`, `.github/workflows/*.yml`
-- TestPyPI - Release workflow publishes built distributions to TestPyPI using trusted publishing.
-  - SDK/Client: `pypa/gh-action-pypi-publish@release/v1`
-  - Auth: GitHub OIDC trusted publishing through workflow `id-token: write`; no repository secret value is stored in code.
-  - Code paths: `.github/workflows/release.yml`
-- GitHub Container Registry - Container release workflow pushes Docker images to GHCR.
-  - SDK/Client: Docker CLI, `docker/login-action@v3`
-  - Auth: `secrets.GITHUB_TOKEN`
-  - Code paths: `.github/workflows/container-release.yml`
-- GitHub Actions - CI/CD runner for linting, tests, release builds, and container builds.
-  - SDK/Client: GitHub-hosted actions (`actions/checkout@v4`, `actions/setup-python@v5`, `astral-sh/setup-uv@v3`, `actions/upload-artifact@v4`, `actions/download-artifact@v4`)
-  - Auth: `secrets.GITHUB_TOKEN` for GHCR publishing; OIDC permission for TestPyPI publishing
-  - Code paths: `.github/workflows/tests.yml`, `.github/workflows/release.yml`, `.github/workflows/container-tests.yml`, `.github/workflows/container-release.yml`
+  - Code paths: `src/dftorch/Constants.py`, `src/dftorch/ESDriver.py`
 
 **Application APIs:**
-- HTTP clients, REST APIs, GraphQL APIs, cloud SDKs, payment APIs, and email/SMS APIs: Not detected.
+- HTTP clients, REST APIs, GraphQL APIs, cloud SDKs, payment APIs, and email/SMS APIs: Not detected in scoped paths.
   - SDK/Client: Not detected
   - Auth: Not detected
 
 ## Data Storage
 
 **Databases:**
-- Not detected.
+- Not detected in scoped paths.
   - Connection: Not applicable
   - Client: Not applicable
 
 **File Storage:**
 - Local filesystem only.
-  - Input structures are read from `FILENAME` paths by `src/dftorch/Structure.py` and `src/dftorch/Constants.py`.
-  - XYZ and PDB files are parsed by `read_xyz()` and `read_pdb()` in `src/dftorch/_io.py`.
-  - Slater-Koster parameter files are loaded from `SKFPATH` by `src/dftorch/Constants.py` and `src/dftorch/_bond_integral.py`.
-  - GBSA parameter files are read by `read_param_file()` in `src/dftorch/_gbsa.py`.
-  - D3 reference data is loaded from `src/dftorch/params/dftd3_reference.npz` by `src/dftorch/_dftd3.py`.
-  - ML-SK checkpoints are loaded with `torch.load()` by `load_ml_sk_model()` in `src/dftorch/_ml_sk.py`.
-  - Trajectory and structure outputs are written locally by `src/dftorch/_io.py`, `src/dftorch/MD.py`, `src/dftorch/Optimizer.py`, and `src/dftorch/sedacs/MD.py`.
-  - Bundled parameter/reference assets live in `src/dftorch/params/`, `tests/data_skf_mio-1-1/`, `tests/f_orbital_data/`, `experiments/sk/`, and `experiments/sk_orig/`.
+  - Slater-Koster `.skf` files are loaded from the `SKFPATH` directory by `src/dftorch/Constants.py` and `src/dftorch/_bond_integral.py`.
+  - `src/dftorch/_bond_integral.py` resolves both dashed filenames like `Eu-N.skf` and compact filenames like `EuN.skf`.
+  - `src/dftorch/_bond_integral.py` reads `.skf` files with `Path(path).read_text(errors="ignore")`, parses electronic tables, normalizes 20-column and 40-column rows, parses repulsive spline blocks, and returns tensor data.
+  - Homonuclear `.skf` files provide element-level metadata consumed by `src/dftorch/_bond_integral.py`: `N_ORB`, `MAX_ANG`, `MAX_ANG_OCC`, `TORE`, `N_S`, `N_P`, `N_D`, `N_F`, `ES`, `EP`, `ED`, `EF`, `US`, `UP`, `UD`, `UF`, and `SHELL_PRESENT`.
+  - `tests/f_orbital_data/` provides scoped f-orbital fixture files for Eu/Ga/N pairs: `Eu-Eu.skf`, `Eu-Ga.skf`, `Eu-N.skf`, `Ga-Eu.skf`, `Ga-Ga.skf`, `Ga-N.skf`, `N-Eu.skf`, `N-Ga.skf`, and `N-N.skf`.
+  - Input coordinate files are read through local `.xyz`/`.pdb` parsers called by `src/dftorch/Constants.py` and `src/dftorch/Structure.py` from `FILENAME`.
+  - `src/dftorch/script.py` writes synthetic `.xyz` files with `Path.write_text()` during validation, then uses those files to instantiate `Constants`, `Structure`, and `StructureBatch`.
+  - Optional `spinw.txt` in `SKFPATH` is loaded by `src/dftorch/Constants.py` through `load_spinw_to_matrix()`.
+  - Optional `hubbard_derivative.txt` in `SKFPATH` is loaded by `src/dftorch/Constants.py` through `load_hubbard_derivs()` when `DFTB3` is enabled.
+  - Optional `wfc.hsd` support exists in `src/dftorch/_bond_integral.py` through `read_wfc_hsd()`, which reads text with `Path(path).read_text(errors="ignore")` and can override shell metadata.
+  - Optional GBSA parameter file integration is exposed by `src/dftorch/ESDriver.py` through `SOLVENT_PARAM_FILE`, passed to `create_gbsa()`.
 
 **Caching:**
-- uv dependency cache is enabled in GitHub Actions through `astral-sh/setup-uv@v3` in `.github/workflows/release.yml` and `.github/workflows/tests.yml`.
-- Docker layer caching is supported by copying `pyproject.toml`, `uv.lock`, and `README.md` before source files in `Dockerfile`.
-- No application-level Redis, Memcached, database cache, or persistent model cache detected.
+- No database cache, Redis, Memcached, or persistent application cache detected in scoped paths.
+- `src/dftorch/ESDriver.py` supports reuse of a precomputed `GBSABatch` via `gbsa_batch_precomputed` in `ESDriverBatch.forward()`.
 
 ## Authentication & Identity
 
 **Auth Provider:**
-- Not detected for the Python library itself.
-  - Implementation: No user identity, login, token validation, OAuth, session storage, or authorization middleware detected.
-
-**CI/CD Auth:**
-- GitHub Actions uses platform credentials for release automation.
-  - GHCR publishing uses `secrets.GITHUB_TOKEN` in `.github/workflows/container-release.yml`.
-  - TestPyPI publishing uses trusted publishing with `id-token: write` in `.github/workflows/release.yml`.
+- Not detected in scoped paths.
+  - Implementation: No login, token validation, OAuth, session storage, or authorization middleware appears in the scoped files.
 
 ## Monitoring & Observability
 
 **Error Tracking:**
-- None detected.
+- None detected in scoped paths.
 
 **Logs:**
-- Standard Python logging is used for optional Ewald backend selection in `src/dftorch/ewald_pme/__init__.py`.
-- Some experiment and long-running workflow scripts use `logging` or `print`, such as `experiments/DDP_2.py` and `experiments/deltascf_acetone_dtscaling.py`.
-- No centralized log service, metrics backend, tracing SDK, or error-reporting SaaS integration detected.
+- `src/dftorch/Constants.py` prints a warning when `spinw.txt` cannot be loaded and prints final DFTB3 status.
+- `src/dftorch/ESDriver.py` prints timing information for selected GBSA initialization and gradient paths when those branches execute.
+- `src/dftorch/script.py` prints validation summaries and failure details for f-orbital checks.
+- No centralized log service, metrics backend, tracing SDK, or error-reporting SaaS integration is detected in scoped paths.
 
 ## CI/CD & Deployment
 
 **Hosting:**
-- Python package artifacts are built in `.github/workflows/release.yml`.
-- TestPyPI is configured as the current Python package publishing target in `.github/workflows/release.yml`.
-- GHCR is configured as the container image registry in `.github/workflows/container-release.yml`.
-- No application hosting platform, web server deployment, Kubernetes manifests, Terraform, or cloud runtime configuration detected.
+- Not detected in scoped paths.
 
 **CI Pipeline:**
-- GitHub Actions.
-  - `.github/workflows/tests.yml` runs Ruff lint, Ruff format check, and pytest on pushes and pull requests.
-  - `.github/workflows/container-tests.yml` builds the Docker image and runs containerized tests on pushes and pull requests.
-  - `.github/workflows/release.yml` runs tests, builds distributions, uploads artifacts, and publishes to TestPyPI on `v*` tags.
-  - `.github/workflows/container-release.yml` builds, tests, saves, tags, and pushes GHCR images on `v*` tags or manual dispatch.
+- Not detected in scoped paths.
 
 ## Environment Configuration
 
 **Required env vars:**
-- Not detected for normal library import or standard test execution.
-- `DFTORCH_ENABLE_COMPILE` is optional and enables `torch.compile` wrapping in `src/dftorch/_tools.py`.
-- `TORCHDYNAMO_DISABLE`, `TORCH_COMPILE_DISABLE`, and `TORCHINDUCTOR_DISABLE` are optional PyTorch runtime controls used in tests and examples.
-- `TORCH_LOGS`, `TORCHINDUCTOR_VERBOSE`, and `TORCHDYNAMO_VERBOSE` are optional PyTorch logging controls used by experiments.
-- `LOCAL_RANK`, `WORLD_SIZE`, and `RANK` are required by distributed experiment code in `experiments/DDP_2.py` when launched with `torch.distributed`.
-- `GITHUB_TOKEN` is provided by GitHub Actions as `secrets.GITHUB_TOKEN` for GHCR publishing in `.github/workflows/container-release.yml`.
+- None detected in scoped paths.
+
+**Runtime parameters:**
+- `SKFPATH` is required by `src/dftorch/Constants.py` and points to local Slater-Koster data.
+- `FILENAME` is required for file-backed constants/structure construction in `src/dftorch/Constants.py` and `src/dftorch/Structure.py`.
+- `DFTB3` enables optional `hubbard_derivative.txt` loading in `src/dftorch/Constants.py`.
+- `MAGNETIC_HUBBARD_LDEP` selects shell-dependent magnetic Hubbard behavior in `src/dftorch/Constants.py`.
+- `GRAD_PARAM`, `GRAD_XYZ`, and `GRAD_CELL` control differentiable parameter/coordinate/cell tensors in `src/dftorch/Constants.py` and `src/dftorch/Structure.py`.
+- `COUL_METHOD`, `COULOMB_CUTOFF`, `COULOMB_ACC`, `SCF_ALPHA`, `RCUT_ELECTRONIC`, and `RCUT_REPULSIVE` configure driver paths in `src/dftorch/ESDriver.py`.
+- `SOLVENT_PARAM_FILE`, `SOLVATION_MODEL`, and `GBSA_DIFFERENTIABLE` configure optional local GBSA solvation integration in `src/dftorch/ESDriver.py`.
+- `D3_PARAMS` configures optional D3(BJ) dispersion correction in `src/dftorch/ESDriver.py`.
 
 **Secrets location:**
-- No local `.env` file detected.
-- No checked-in secret values detected during integration scan.
-- CI secrets are referenced only by name through GitHub Actions (`secrets.GITHUB_TOKEN`), not stored in repository files.
+- Not applicable. No secret-bearing files were read, and no scoped code references secret environment variables.
 
 ## Webhooks & Callbacks
 
 **Incoming:**
-- None detected.
+- None detected in scoped paths.
 
 **Outgoing:**
-- None detected.
+- None detected in scoped paths.
 
 ---
 
-*Integration audit: 2026-07-17*
+*Integration audit: 2026-07-20*

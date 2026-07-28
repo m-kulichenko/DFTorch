@@ -98,7 +98,7 @@ symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the 
     "Lr": 103,
 }
 
-_CHANNELS: Final[list[str]] = [ #Aryan NOTE -> keep an internal order to minimize structure changes, or skf standard order?
+_CHANNELS: Final[list[str]] = [ #Aryan NOTE -> keep an internal order of skf extended standard order?
     "Hff0",
     "Hff1",
     "Hff2",
@@ -167,7 +167,7 @@ _SIMPLE_CHANNELS: Final[list[str]] = [
 _SIMPLE_TO_EXTENDED: Final[list[int]] = [_CHANNELS.index(ch) for ch in _SIMPLE_CHANNELS]
 
 
-SK_BLOCK_SIZE: Final[int] = 20
+SK_BLOCK_SIZE: Final[int] = 20 #Increased from 10 to 20 cuz extended format
 N_SK_CHANNELS: Final[int] = len(_CHANNELS)
 MAX_SHELLS: Final[int] = 4
 EV_PER_HARTREE: Final[float] = 27.21138625
@@ -394,7 +394,7 @@ def _expand_tokens(tokens: list[str]) -> list[str]: #Skf files use 8* 0.0 a lot,
     return out
 
 
-def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]:
+def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]: #Converts everything to an extended format skf row
     """Return one electronic SKF row in the 40-column extended order.
 
     SKF files in this code path may use either the older 20-column electronic
@@ -430,7 +430,7 @@ def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]:
     )
 
 
-def _resolve_skf_path(skfpath: str, label_name: str) -> str:
+def _resolve_skf_path(skfpath: str, label_name: str) -> str: #File name formatting function, can change to dashed cuz it's easier
     """Resolve an SKF pair label to either dashed or undashed filenames.
 
     Existing DFTB parameter directories commonly use dashed names such as
@@ -462,7 +462,7 @@ def _resolve_skf_path(skfpath: str, label_name: str) -> str:
     return dashed
 
 
-def _split_skf_pair_name(name: str) -> tuple[str, str]:
+def _split_skf_pair_name(name: str) -> tuple[str, str]: # different formatted files can still be found
     """Split an SKF basename into its two element symbols.
 
     Handles both conventional dashed names, e.g. ``"C-N"``, and compact names,
@@ -480,7 +480,8 @@ def _split_skf_pair_name(name: str) -> tuple[str, str]:
         The left and right element symbols encoded by the file name.
     """
     if "-" in name:
-        return name.split("-", 1)
+        elem_a, elem_b = name.split("-", 1)
+        return elem_a, elem_b
 
     symbols = sorted(symbol_to_number, key=len, reverse=True)
     for elem_a in symbols:

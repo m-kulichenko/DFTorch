@@ -166,6 +166,7 @@ class ESDriver(torch.nn.Module):
 
         if self.dftorch_params["COUL_METHOD"] == "PME":
             if (
+                
                 structure.dU_dq is not None
                 and self.dftorch_params.get("dftb3_diagonal_only", False) is False
             ):

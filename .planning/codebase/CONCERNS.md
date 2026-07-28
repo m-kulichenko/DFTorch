@@ -1,227 +1,192 @@
 # Codebase Concerns
 
-**Analysis Date:** 2026-07-17
+**Analysis Date:** 2026-07-20
+**Scope:** `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_bond_integral.py`, `src/dftorch/script.py`, `tests/f_orbital_data`
+**last_mapped_commit:** `e824543a0b411dcf52462ee55db5362c360e7780`
 
 ## Tech Debt
 
-**Large numerical modules with mixed responsibilities:**
-- Issue: Core scientific kernels, orchestration, logging, configuration branching, and feature-specific paths are concentrated in very large files.
-- Files: `src/dftorch/_slater_koster_pair.py`, `src/dftorch/MD.py`, `src/dftorch/_gbsa.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_scf.py`, `src/dftorch/ewald_pme/ewald_torch.py`
-- Impact: Small behavior changes have a large review surface. Shared scientific invariants are hard to isolate, and tests need broad fixtures to cover a narrow change.
-- Fix approach: Extract feature-specific kernels and state builders behind small functions with tensor-shape contracts. Start with `src/dftorch/ESDriver.py` GBSA proxy creation and PME setup, then split `src/dftorch/MD.py` timing/logging from integrator state transitions.
+**F-orbital basis metadata is duplicated across parser, constants, and structure layers:**
+- Issue: The s/p/d/f basis shape is encoded in multiple places: `_CHANNELS` in `src/dftorch/_bond_integral.py`, `MAX_SHELLS` and metadata tensors in `src/dftorch/_bond_integral.py`, `shell_dim` in `src/dftorch/Constants.py`, and AO/shell templates in `src/dftorch/Structure.py`.
+- Files: `src/dftorch/_bond_integral.py:101`, `src/dftorch/_bond_integral.py:947`, `src/dftorch/Constants.py:65`, `src/dftorch/Structure.py:11`
+- Impact: Changes to orbital ordering, shell count, or channel layout require synchronized edits across several modules. A mismatch can silently corrupt Hamiltonian channel lookup, AO indexing, shell-resolved Hubbard data, or onsite diagonals.
+- Fix approach: Promote a single basis metadata module that defines shell dimensions, shell IDs, AO labels, channel names, and simple-to-extended channel mapping. Import that module from `src/dftorch/_bond_integral.py`, `src/dftorch/Constants.py`, and `src/dftorch/Structure.py`.
 
-**PME and neighbor-list TODOs encode unresolved assumptions:**
-- Issue: The PME/Triton and neighbor-list code contains explicit assumptions about k-vector shape, block sizes, dummy indices, non-periodic systems, and dynamic neighbor limits.
-- Files: `src/dftorch/ewald_pme/ewald_triton.py`, `src/dftorch/ewald_pme/ewald_torch.py`, `src/dftorch/ewald_pme/neighbor_list.py`, `src/dftorch/ewald_pme/util.py`
-- Impact: PME behavior is fragile across small systems, CPU/GPU layout differences, PyTorch compile modes, and new hardware. The code can silently rely on assumptions that are not validated at API boundaries.
-- Fix approach: Convert TODO assumptions into explicit guards and tests. Add shape checks for `kvecs`, explicit dummy-index handling, parameterized CPU/GPU equivalence tests, and dynamic `max_nbr_limit` calculation in `src/dftorch/ewald_pme/neighbor_list.py`.
+**`ConstantsTest` is a large stale parallel constants table:**
+- Issue: `ConstantsTest` hard-codes element labels and legacy orbital metadata separately from the real SKF loader, then infers `shell_present` from `max_ang`.
+- Files: `src/dftorch/Constants.py:205`, `src/dftorch/Constants.py:1078`
+- Impact: Tests or debugging code using `ConstantsTest` can disagree with the f-orbital SKF path. The class does not exercise `get_skf_tensors()` and can hide parser/structure integration bugs.
+- Fix approach: Replace `ConstantsTest` with a small fixture builder that consumes `tests/f_orbital_data` through `get_skf_tensors()`, or move it under tests with explicit limitations documented in the fixture name.
 
-**Torch compile support is inconsistent:**
-- Issue: `src/dftorch/_tools.py` gates `_maybe_compile()` behind `DFTORCH_ENABLE_COMPILE`, but several PME and neighbor-list functions use direct `@torch.compile` decorators, while force kernels disable compile due incorrect results.
-- Files: `src/dftorch/_tools.py`, `src/dftorch/ewald_pme/ewald_torch.py`, `src/dftorch/ewald_pme/neighbor_list.py`, `src/dftorch/ewald_pme/PME_torch.py`, `src/dftorch/_forces.py`, `src/dftorch/_forces_batch.py`
-- Impact: Tests disable TorchDynamo, so compiled paths and known Inductor-sensitive force paths are not exercised in CI. Users can see different behavior in eager mode, compiled PyTorch kernels, and Triton kernels.
-- Fix approach: Route compile decisions through `src/dftorch/_tools.py` only. Add separate compile-enabled tests for representative PME, force, and neighbor-list cases, marked `slow` or `gpu` as needed.
+**Validation code is a standalone script instead of collected tests:**
+- Issue: F-orbital validation lives in `src/dftorch/script.py` and uses manual dynamic imports, print-based reporting, and temporary files instead of normal test discovery.
+- Files: `src/dftorch/script.py:1`, `src/dftorch/script.py:72`, `src/dftorch/script.py:1232`
+- Impact: CI can pass without running the f-orbital validation unless a workflow explicitly invokes `python src/dftorch/script.py tests/f_orbital_data`. The validation is also packaged with runtime source code.
+- Fix approach: Move the checks into `tests/` as pytest tests, keep shared fixture helpers in a test utility module, and leave `src/dftorch/script.py` only as a thin optional CLI wrapper if needed.
 
-**Runtime output is coupled to computation:**
-- Issue: Many core functions print timing and progress directly rather than using a shared verbosity/logger interface.
-- Files: `src/dftorch/_scf.py`, `src/dftorch/MD.py`, `src/dftorch/_coulomb_matrix.py`, `src/dftorch/_coulomb_matrix_batch.py`, `src/dftorch/_h0ands.py`, `src/dftorch/sedacs/SCF.py`, `src/dftorch/sedacs/MD.py`
-- Impact: Library users cannot consistently suppress output, tests cannot assert diagnostics cleanly, and performance-critical loops carry I/O side effects.
-- Fix approach: Introduce a small logging/timing helper and pass verbosity through existing driver parameters. Keep numerical functions pure unless explicit debug output is requested.
+**Runtime modules print diagnostics directly:**
+- Issue: `Constants` prints SOC and DFTB3 status during initialization, and `ESDriver` prints GBSA/Hessian timings from compute paths.
+- Files: `src/dftorch/Constants.py:142`, `src/dftorch/Constants.py:197`, `src/dftorch/ESDriver.py:1011`, `src/dftorch/ESDriver.py:1434`, `src/dftorch/ESDriver.py:1612`
+- Impact: Library callers and tests cannot consistently suppress output. Long-running workflows mix numerical results with stdout diagnostics, and tests need output capture for deterministic assertions.
+- Fix approach: Route messages through a shared logger or a `verbose`/diagnostics object. Keep `Constants` and `ESDriver` silent by default.
 
-**Development artifacts and generated files are present in the working tree:**
-- Issue: Profiling reports are tracked, and local/generated artifacts appear in the working tree.
-- Files: `experiments/nsight_run.nsys-rep`, `experiments/nsight_reports/nsight_run.nsys-rep`, `.gitignore`, `src/dftorch.egg-info`, `src/dftorch/__pycache__`, `src/dftorch/ewald_pme/__pycache__`, `.DS_Store`, `tests/.DS_Store`, `node-v24.18.0.pkg`
-- Impact: Repository size and review noise grow. Generated files can mask packaging issues and confuse clean-checkout behavior.
-- Fix approach: Remove tracked profiling artifacts if they are not release assets. Add `.venv/`, `.DS_Store`, `*.nsys-rep`, and installer packages to `.gitignore`; keep benchmark outputs in an ignored artifact directory.
+**Legacy bond-integral code remains mixed with the SKF parser:**
+- Issue: Old CSV-style parameter loaders and legacy vectorized bond-integral helpers share `src/dftorch/_bond_integral.py` with the f-orbital SKF parser.
+- Files: `src/dftorch/_bond_integral.py:178`, `src/dftorch/_bond_integral.py:245`, `src/dftorch/_bond_integral.py:300`, `src/dftorch/_bond_integral.py:547`
+- Impact: The module has multiple unrelated parameter-loading models, making it harder to isolate f-orbital parser behavior and test only the modern SKF path.
+- Fix approach: Split legacy CSV parameter support into a separate compatibility module or remove it if no scoped callers use it. Keep `src/dftorch/_bond_integral.py` focused on SKF parsing, channel normalization, and spline tensor construction.
 
 ## Known Bugs
 
-**PME k-space matrix is an empty implementation:**
-- Symptoms: Calling `ewald_kspace_matrix()` returns `None` because the function body is `pass`.
-- Files: `src/dftorch/ewald_pme/ewald_torch.py`
-- Trigger: Any code path that expects an explicit k-space matrix from `ewald_kspace_matrix()`.
-- Workaround: Use the existing energy/force PME functions instead of the matrix helper.
+**Batched PME Coulomb is explicitly unsupported:**
+- Symptoms: Batched `ESDriverBatch` calculations raise `ValueError("Batched PME Coulomb not implemented.")` in both energy and force paths.
+- Files: `src/dftorch/ESDriver.py:1279`, `src/dftorch/ESDriver.py:1568`
+- Trigger: `ESDriverBatch.forward()` or `ESDriverBatch.calc_forces()` with `dftorch_params["COUL_METHOD"] == "PME"`.
+- Workaround: Use non-batched `ESDriver` for PME calculations, or use a non-PME Coulomb method for batched calculations.
 
 **Full off-diagonal DFTB3 is unsupported with PME:**
-- Symptoms: `ESDriver` raises `NotImplementedError` when `COUL_METHOD == "PME"` and non-diagonal DFTB3 data is present.
-- Files: `src/dftorch/ESDriver.py`
-- Trigger: PME calculations with full off-diagonal third-order DFTB.
-- Workaround: Set `dftb3_diagonal_only=True` or use `COUL_METHOD="FULL"`.
+- Symptoms: Single-structure `ESDriver` raises `NotImplementedError` when PME is selected with off-diagonal DFTB3 enabled.
+- Files: `src/dftorch/ESDriver.py:167`, `src/dftorch/ESDriver.py:172`
+- Trigger: `COUL_METHOD == "PME"`, `structure.dU_dq is not None`, and `dftb3_diagonal_only` is not true.
+- Workaround: Set `dftb3_diagonal_only=True` for PME, or use `COUL_METHOD="FULL"` for full off-diagonal third-order DFTB.
 
-**Zero-charge derivative workaround changes PME derivative math:**
-- Symptoms: Zero charges are replaced with `1.0` before charge-derivative division in k-space PME.
-- Files: `src/dftorch/ewald_pme/ewald_torch.py`
-- Trigger: PME derivative calculations with atoms whose charge value is exactly zero.
-- Workaround: Avoid relying on k-space `de_dq` for zero-charge systems until the derivative expression is rewritten without division by charge.
-
-**Neighbor-list backend changes semantics for some flags:**
-- Symptoms: The Alchemi backend notes that `remove_self_neigh` is silently ignored and `min_image_only` is handled by post-processing.
-- Files: `src/dftorch/_nearestneighborlist.py`
-- Trigger: `vectorized_nearestneighborlist(..., use_alchemi=True)` with `remove_self_neigh` or `min_image_only` expectations.
-- Workaround: Prefer the default backend for correctness-sensitive cases until parity tests cover these flags.
+**Validation script only supports dashed SKF names for its independent checks:**
+- Symptoms: The runtime parser supports dashed and compact SKF pair filenames, but the validator's `split_dashed_pair()` rejects compact names.
+- Files: `src/dftorch/_bond_integral.py:433`, `src/dftorch/_bond_integral.py:465`, `src/dftorch/script.py:116`
+- Trigger: Running `src/dftorch/script.py` against compact fixture names such as `EuN.skf` instead of dashed names such as `Eu-N.skf`.
+- Workaround: Keep `tests/f_orbital_data` filenames dashed when using `src/dftorch/script.py`.
 
 ## Security Considerations
 
-**PyTorch checkpoint loading allows pickle execution:**
-- Risk: `torch.load(..., weights_only=False)` can execute pickle payloads from an untrusted model checkpoint.
-- Files: `src/dftorch/_ml_sk.py`
-- Current mitigation: Not detected in code; callers provide the checkpoint path.
-- Recommendations: Use `weights_only=True` where possible, validate checkpoint schema explicitly, and document that model files must be trusted if object loading remains required.
+**Caller-provided parameter paths are read without path controls:**
+- Risk: `Constants` accepts `SKFPATH` and `FILENAME`, then reads coordinate files, SKF files, optional `spinw.txt`, optional `hubbard_derivative.txt`, and optional `wfc.hsd` from caller-controlled paths.
+- Files: `src/dftorch/Constants.py:57`, `src/dftorch/Constants.py:71`, `src/dftorch/Constants.py:127`, `src/dftorch/Constants.py:185`, `src/dftorch/_bond_integral.py:586`, `src/dftorch/_bond_integral.py:883`
+- Current mitigation: Normal local filesystem permissions apply. The scoped code is a local scientific library path, not a service boundary.
+- Recommendations: If these APIs are exposed through a server, notebook hub, or workflow runner with untrusted users, validate allowed roots for `SKFPATH` and structure filenames before constructing `Constants`.
 
-**User-provided file paths are read and appended without sandboxing:**
-- Risk: Library APIs read coordinate/parameter files and append output files at caller-provided paths. This is appropriate for a local scientific library, but unsafe if exposed through a service layer without path controls.
-- Files: `src/dftorch/_io.py`, `src/dftorch/_tools.py`, `src/dftorch/_gbsa.py`, `src/dftorch/_bond_integral.py`
-- Current mitigation: Not detected in code; normal Python file permissions apply.
-- Recommendations: If wrapping DFTorch in an API or notebook service, validate path roots before calling `read_xyz`, `read_pdb`, `read_hubbard_derivs`, `load_spin_constants`, or output writers in `src/dftorch/_io.py`.
-
-**CI pins action majors but uses moving tool versions:**
-- Risk: `astral-sh/setup-uv@v3` installs `version: "latest"` in release workflows, so dependency resolution tooling can change outside code review.
-- Files: `.github/workflows/release.yml`, `.github/workflows/tests.yml`
-- Current mitigation: `uv.lock` pins Python packages.
-- Recommendations: Pin `uv` to a specific version in CI workflows and update it intentionally.
+**SKF parser ignores decode errors:**
+- Risk: `read_skf_table()` and `read_wfc_hsd()` use `Path.read_text(errors="ignore")`, so invalid bytes are silently dropped before numeric parsing.
+- Files: `src/dftorch/_bond_integral.py:586`, `src/dftorch/_bond_integral.py:883`, `src/dftorch/script.py:108`
+- Current mitigation: Numeric row length and required block checks catch many malformed files after decoding.
+- Recommendations: Use explicit encoding with strict decode by default, or report ignored-decode behavior in an opt-in compatibility path for legacy parameter files.
 
 ## Performance Bottlenecks
 
-**Default neighbor list can allocate O(N^2 x 27) tensors:**
-- Problem: The documented default backend builds brute-force periodic distance matrices unless Alchemi is selected.
-- Files: `src/dftorch/_nearestneighborlist.py`, `src/dftorch/ESDriver.py`, `src/dftorch/_scf.py`
-- Cause: `vectorized_nearestneighborlist()` defaults `use_alchemi` to module global `USE_ALCHEMI=False`; many call sites pass `use_triton=False` or do not pass an accelerated backend.
-- Improvement path: Promote cell-list neighbor generation for large systems, keep brute force for small test cases, and add size-based backend selection with correctness parity tests.
+**Spline coefficient construction solves dense systems for every ordered pair:**
+- Problem: `get_skf_tensors()` loops through all ordered element pairs and calls `cubic_spline_coeffs()`, which builds and solves a dense `n x n` linear system for each channel matrix.
+- Files: `src/dftorch/_bond_integral.py:779`, `src/dftorch/_bond_integral.py:1020`, `src/dftorch/_bond_integral.py:1045`
+- Cause: The spline builder handles all 40 channels generically and uses `torch.linalg.solve()` on a dense matrix for each SKF table.
+- Improvement path: Use a tridiagonal spline solver or cache coefficient tensors by SKF path and dtype/device. Keep the dense implementation as a reference test path for small fixtures.
 
-**Finite-difference Hessian scales with 6N displaced evaluations:**
-- Problem: `_hessian_fd()` performs central-difference batches across every coordinate degree of freedom.
-- Files: `src/dftorch/ESDriver.py`
-- Cause: Hessian construction uses displaced `StructureBatch` calculations rather than analytic second derivatives.
-- Improvement path: Document the scaling limit, expose progress and memory estimates, and prefer analytic or block-sparse approaches for larger systems.
+**SKF tensors allocate fixed-size padding independent of actual table sizes:**
+- Problem: `get_skf_tensors()` allocates `(n_pairs, 1300, 40, 4)` coefficient storage and `(n_pairs, 500, 6)` repulsive storage even when fixture files contain fewer rows.
+- Files: `src/dftorch/_bond_integral.py:982`, `src/dftorch/_bond_integral.py:987`, `src/dftorch/_bond_integral.py:994`
+- Cause: The loader uses fixed maximum dimensions instead of sizing tensors from parsed tables.
+- Improvement path: Parse table metadata first to size tensors exactly, or store per-pair ragged tensors with explicit lengths. If fixed padding remains required by downstream kernels, validate max row counts and document the cap.
 
-**Triton autotune search is broad and manually chosen:**
-- Problem: `get_autotune_config()` returns many block-size combinations with a TODO that options need more tuning for modern GPUs.
-- Files: `src/dftorch/ewald_pme/ewald_triton.py`
-- Cause: Kernel configuration is static and not tied to benchmark data or device capability.
-- Improvement path: Add benchmark fixtures for representative PME sizes, narrow autotune configs by device class, and persist validated configs in tests or documentation.
-
-**K-space matrix construction uses nested `torch.vmap`:**
-- Problem: `ewald_real_matrix()` constructs a dense matrix using nested vectorization over all atoms.
-- Files: `src/dftorch/ewald_pme/ewald_torch.py`
-- Cause: Matrix assembly is dense by design and builds per-atom reductions for every target index.
-- Improvement path: Use sparse COO accumulation from neighbor indices for systems where the real-space matrix is needed.
+**Structure batch assembly has Python loops over batch elements and shell local indices:**
+- Problem: `StructureBatch` fills per-structure padded diagonals, AO shell types, labels, and D0 with Python loops.
+- Files: `src/dftorch/Structure.py:186`, `src/dftorch/Structure.py:608`, `src/dftorch/Structure.py:668`
+- Cause: Batch structures have variable `HDIM`, so the implementation flattens and then copies into padded tensors row by row.
+- Improvement path: Keep the current code for readability until profiling shows it matters. For larger f-orbital batches, vectorize padded scatter operations and leave Python-only AO label generation outside hot paths.
 
 ## Fragile Areas
 
-**Electronic structure driver owns many optional feature combinations:**
-- Files: `src/dftorch/ESDriver.py`
-- Why fragile: PME, DFTB3, GBSA, batch mode, Hessian mode, force calculations, and third-order setup share one driver. Several branches mutate `structure` by attaching optional attributes such as `thirdorder`, `gbsa_batch`, and `thirdorder_batch`.
-- Safe modification: Add tests for each feature branch before editing. Keep structure mutations explicit and grouped near feature setup.
-- Test coverage: Existing tests in `tests/test_scf.py` exercise one small CPU PME smoke path only.
+**Nested-shell-only assumption is a hard architectural constraint:**
+- Files: `src/dftorch/_bond_integral.py:496`, `src/dftorch/Structure.py:11`, `src/dftorch/Structure.py:90`
+- Why fragile: The parser rejects f-shell bases unless s, p, and d shells are also present. The structure layer relies on fixed local starts `(0, 1, 4, 9)` and fixed 16-position AO templates.
+- Safe modification: Preserve contiguous s/p/d/f shells unless the AO indexing model is redesigned. Add negative tests for skipped-shell parameter files before changing `_validate_nested_shells()`.
+- Test coverage: `src/dftorch/script.py` validates N, Ga, and Eu fixture metadata, but it does not include malformed skipped-shell SKF fixtures.
 
-**PME backend selection depends on import and device state:**
-- Files: `src/dftorch/ewald_pme/__init__.py`, `src/dftorch/ewald_pme/ewald_triton.py`, `src/dftorch/ewald_pme/ewald_torch.py`
-- Why fragile: Triton import is conditional on `torch.cuda.is_available()`, k-vector transposition depends on active backend, and CPU fallback handles different layouts.
-- Safe modification: Add backend parity tests that compare CPU Torch PME and GPU/Triton PME for the same small cells.
-- Test coverage: No GPU or Triton tests are present under `tests/`.
+**Parser-inferred shell presence can conflict with `wfc.hsd` overrides:**
+- Files: `src/dftorch/_bond_integral.py:665`, `src/dftorch/_bond_integral.py:869`, `src/dftorch/_bond_integral.py:1060`
+- Why fragile: Homonuclear SKF headers set occupations, onsite energies, Hubbard values, and shell presence; optional `wfc.hsd` later overrides only `SHELL_PRESENT`, `N_ORB`, `MAX_ANG`, and `MAX_ANG_OCC`.
+- Safe modification: When adding `wfc.hsd` support or new parameter sets, verify that occupation tensors (`N_S`, `N_P`, `N_D`, `N_F`) remain consistent with any overridden shell presence.
+- Test coverage: `tests/f_orbital_data` does not include `wfc.hsd`, so the override path is not covered by the scoped fixture set.
 
-**SEDACS integration has optional distributed dependencies and direct CUDA assumptions:**
-- Files: `src/dftorch/sedacs/sedacs_interface.py`, `src/dftorch/sedacs/SCF.py`, `src/dftorch/sedacs/MD.py`, `pyproject.toml`
-- Why fragile: The optional extra pulls `mpi4py`, `numba`, `toml`, and `scikit-learn`, while implementation code directly uses distributed partitioning, CUDA device selection, and synchronization.
-- Safe modification: Keep SEDACS changes behind import guards and add small CPU-only partition tests plus optional MPI/GPU CI jobs.
-- Test coverage: No tests exercise `src/dftorch/sedacs/`.
-
-**Public API and README disagree on exported names:**
-- Files: `README.md`, `src/dftorch/__init__.py`, `tests/test_public_api.py`, `tests/test_public_api_contract.py`
-- Why fragile: The README lists `Optimizer` as a supported public import, while `src/dftorch/__init__.py` exports `GeoOpt` from `src/dftorch/Optimizer.py`.
-- Safe modification: Treat `src/dftorch/__init__.py` and `tests/test_public_api_contract.py` as the source of truth, or add a compatibility alias if `Optimizer` is intended public API.
-- Test coverage: Public API tests do not assert the README-listed `Optimizer` name.
+**AO ordering is a shared scientific invariant with no central assertion:**
+- Files: `src/dftorch/_bond_integral.py:101`, `src/dftorch/Structure.py:25`, `src/dftorch/Structure.py:384`
+- Why fragile: The channel order and AO label order must match downstream Slater-Koster formulas outside this scoped map. Local tests validate metadata and spline reconstruction, but they do not validate angular f-orbital Hamiltonian formulas.
+- Safe modification: Treat `_CHANNELS` and `AO_LABEL_TEMPLATE` as compatibility contracts. Add explicit tests that compare f-channel Hamiltonian/overlap blocks against a trusted DFTB+ or analytical reference before changing order.
+- Test coverage: `src/dftorch/script.py:1155` states that angular Slater-Koster formulas are outside its validation scope.
 
 ## Scaling Limits
 
-**Memory usage grows quickly with atom count in default paths:**
-- Current capacity: README demonstrates large simulations through accelerated paths, but default neighbor-list and some Coulomb paths allocate dense matrices.
-- Limit: Brute-force neighbor lists and full Coulomb matrix paths become impractical as `N` grows.
-- Scaling path: Use Alchemi/cell-list neighbor backends, PME electrostatics, sparse accumulation, and benchmarked batch sizes for large systems.
+**Element metadata tensors are capped at atomic number 119:**
+- Current capacity: `get_skf_tensors()` allocates atomic metadata tensors with length 120.
+- Limit: Elements or pseudo-elements with identifiers above 119 cannot be represented without changing tensor sizes and symbol lookup.
+- Scaling path: Size metadata tensors from the element table or from `max(TYPE) + 1`, and validate all symbols before allocation.
+- Files: `src/dftorch/_bond_integral.py:998`, `src/dftorch/_bond_integral.py:1003`, `src/dftorch/_bond_integral.py:1016`
 
-**Test suite validates only small CPU examples:**
-- Current capacity: Tests cover import, public API, XYZ read, nearest-neighbor smoke, and one CH4 CPU SCF/force smoke test.
-- Limit: GPU, Triton, SEDACS, batch structures, GBSA, D3, Delta-SCF, stress, MD, optimizer, and compile-enabled paths can regress without CI failures.
-- Scaling path: Add layered tests: small deterministic unit tests for math helpers, CPU integration tests for feature branches, and marked GPU/slow tests for accelerated kernels.
+**Scoped f-orbital fixtures are sizeable and data-heavy:**
+- Current capacity: `tests/f_orbital_data` is about 1.7 MB and contains nine `.skf` files for N/Ga/Eu ordered pairs plus `.DS_Store`.
+- Limit: Adding more lanthanide or actinide fixture matrices can increase repository size quickly.
+- Scaling path: Keep one minimal f-orbital smoke fixture in `tests/f_orbital_data`, move larger parameter sets to optional test assets, and remove non-fixture files such as `tests/f_orbital_data/.DS_Store`.
+- Files: `tests/f_orbital_data/Eu-Eu.skf`, `tests/f_orbital_data/Ga-Ga.skf`, `tests/f_orbital_data/N-N.skf`, `tests/f_orbital_data/.DS_Store`
 
-**Repository data footprint is dominated by experiment assets:**
-- Current capacity: `experiments/` is about 100 MB locally, mostly Slater-Koster data under `experiments/sk_orig`.
-- Limit: Clone and CI context size grow with every additional dataset or profiling artifact.
-- Scaling path: Keep minimal fixtures under `tests/`, move large experiment assets to external downloads or release artifacts, and document expected data locations.
+**F-orbital AO dimensions amplify dense matrix costs:**
+- Current capacity: The scoped validator covers a small N/Ga/Eu synthetic structure with 24 AOs.
+- Limit: Eu contributes 16 AOs per atom, so dense Hamiltonian, overlap, Coulomb, and SCF matrices grow quickly with f-heavy systems.
+- Scaling path: Add benchmark tests for f-heavy structures before optimizing dense paths, and prefer sparse/block representations for large f-electron systems.
+- Files: `src/dftorch/Structure.py:334`, `src/dftorch/Structure.py:408`, `src/dftorch/script.py:1053`
 
 ## Dependencies at Risk
 
-**Unbounded runtime dependencies:**
-- Risk: `pyproject.toml` specifies `numpy`, `scipy`, `torch`, `pandas`, and `nvalchemi-toolkit-ops` without version bounds.
-- Impact: Major dependency changes can alter tensor behavior, binary compatibility, or GPU support.
-- Migration plan: Add tested lower and upper bounds in `pyproject.toml`, keep `uv.lock` updated through CI, and document supported PyTorch/CUDA combinations.
+**Parameter-file semantics depend on DFTB+ SKF conventions:**
+- Risk: The parser assumes 20-column simple rows or 40-column extended rows, homonuclear header layouts of 10 or 13 values, a `Spline` block, and DFTB+ compact repetition tokens.
+- Impact: Valid parameter files with other extensions, encoding, comments, shell conventions, or row layouts can fail to load or be normalized incorrectly.
+- Migration plan: Add fixture coverage for each accepted SKF dialect and reject unsupported dialects with structured errors. Keep `_normalize_skf_row()` and `read_skf_table()` as the only code paths for row interpretation.
+- Files: `src/dftorch/_bond_integral.py:397`, `src/dftorch/_bond_integral.py:547`, `tests/f_orbital_data/Eu-Eu.skf`
 
-**Optional GPU and distributed dependencies are hard to validate in CI:**
-- Risk: Triton, CUDA, Alchemi/Warp, MPI, and Numba paths are environment-sensitive.
-- Impact: Accelerated and distributed workflows can break while CPU smoke tests pass.
-- Migration plan: Add optional workflow jobs keyed by markers `gpu`, `slow`, and `sedacs`; keep CPU tests independent of GPU imports.
-
-**Model loading depends on checkpoint schema stability:**
-- Risk: `load_ml_sk_model()` expects keys such as `model_config`, `n_species`, `model_state_dict`, `Z_to_idx`, and optional `rcut_by_Z_pair`.
-- Impact: Older or externally trained checkpoints can fail at runtime or load partially because `strict=False` is used for model state.
-- Migration plan: Version checkpoint schema, validate required keys before constructing the model, and warn when `strict=False` skips or ignores weights.
+**F-orbital validation depends on direct source import mechanics:**
+- Risk: `src/dftorch/script.py` creates a fake `dftorch` package and loads modules by file path.
+- Impact: The script can diverge from installed-package import behavior and does not catch issues in package initialization or public exports.
+- Migration plan: Convert the script checks to pytest tests that import installed modules normally where possible; use isolated direct imports only for targeted parser unit tests.
+- Files: `src/dftorch/script.py:72`, `src/dftorch/script.py:86`
 
 ## Missing Critical Features
 
-**Full PME support for off-diagonal DFTB3:**
-- Problem: PME supports only diagonal-only DFTB3 in `src/dftorch/ESDriver.py`.
-- Blocks: Full off-diagonal third-order DFTB calculations with PME electrostatics.
+**Batched PME for f-orbital structures:**
+- Problem: Batched PME energy and force paths raise `ValueError`.
+- Blocks: Efficient batched periodic f-orbital calculations using PME electrostatics.
+- Files: `src/dftorch/ESDriver.py:1279`, `src/dftorch/ESDriver.py:1568`
 
-**Completed k-space matrix helper:**
-- Problem: `ewald_kspace_matrix()` is not implemented in `src/dftorch/ewald_pme/ewald_torch.py`.
-- Blocks: Any feature that needs explicit k-space Coulomb matrix assembly from the PME module.
+**Full PME off-diagonal DFTB3 for f-orbital systems:**
+- Problem: PME supports only diagonal-only DFTB3 in the scoped driver path.
+- Blocks: Full off-diagonal third-order DFTB with PME for f-shell parameter sets.
+- Files: `src/dftorch/ESDriver.py:172`, `src/dftorch/ESDriver.py:179`
 
-**Structured validation for input parameters:**
-- Problem: Driver and constants parameters are plain dictionaries with many implicit keys and mode combinations.
-- Blocks: Early, actionable error messages for invalid `COUL_METHOD`, cutoff, solvent, DFTB3, ML-SK, and batch-mode configurations.
-
-**Stable benchmark suite:**
-- Problem: Performance claims and backend choices are not tied to executable benchmark tests.
-- Blocks: Confident optimization of `src/dftorch/ewald_pme/`, `src/dftorch/_nearestneighborlist.py`, `src/dftorch/_scf.py`, and `src/dftorch/MD.py`.
+**Reference validation for angular f-orbital Hamiltonian/overlap formulas:**
+- Problem: The scoped validator checks SKF parsing, spline reproduction, constants exposure, and AO bookkeeping, but not the angular Slater-Koster formulas that consume f channels.
+- Blocks: High-confidence changes to `_CHANNELS`, AO ordering, and downstream f-orbital Hamiltonian assembly.
+- Files: `src/dftorch/script.py:1155`, `src/dftorch/_bond_integral.py:101`, `src/dftorch/Structure.py:25`
 
 ## Test Coverage Gaps
 
-**GPU/Triton PME paths:**
-- What's not tested: Triton kernels, CUDA-only backend selection, k-vector transposition, low-memory k-space paths, and GPU force parity.
-- Files: `src/dftorch/ewald_pme/__init__.py`, `src/dftorch/ewald_pme/ewald_triton.py`, `src/dftorch/ewald_pme/ewald_torch.py`, `tests/`
-- Risk: GPU regressions and CPU/GPU numerical drift can ship unnoticed.
+**`wfc.hsd` shell-presence override path:**
+- What's not tested: `read_wfc_hsd()` overriding `SHELL_PRESENT`, `N_ORB`, `MAX_ANG`, and `MAX_ANG_OCC` after SKF header parsing.
+- Files: `src/dftorch/_bond_integral.py:869`, `src/dftorch/_bond_integral.py:1060`, `tests/f_orbital_data`
+- Risk: Parameter sets that rely on `wfc.hsd` can produce inconsistent shell metadata or occupations without the scoped fixture script detecting it.
 - Priority: High
 
-**Force and stress correctness:**
-- What's not tested: Analytical force decomposition, PME forces, shadow forces, batch forces, stress tensors, and compile-disabled force kernels.
-- Files: `src/dftorch/_forces.py`, `src/dftorch/_forces_batch.py`, `src/dftorch/_stress.py`, `tests/test_scf.py`
-- Risk: Scientific results can change while smoke tests only assert finite tensors.
+**Malformed and skipped-shell SKF fixtures:**
+- What's not tested: Empty files, malformed grid lines, invalid row widths, missing `Spline` blocks, unsupported angular momentum, and skipped-shell f/d/p bases.
+- Files: `src/dftorch/_bond_integral.py:428`, `src/dftorch/_bond_integral.py:522`, `src/dftorch/_bond_integral.py:702`, `tests/f_orbital_data`
+- Risk: Parser error handling can regress or become less actionable as more parameter dialects are added.
 - Priority: High
 
-**Feature branches beyond the CH4 smoke case:**
-- What's not tested: GBSA/ALPB, D3(BJ), Delta-SCF, DFTB3 full and diagonal modes, spin/open-shell paths, ML-SK, optimizer, MD, and batch structures.
-- Files: `src/dftorch/_gbsa.py`, `src/dftorch/_dftd3.py`, `src/dftorch/_thirdorder.py`, `src/dftorch/_spin.py`, `src/dftorch/_ml_sk.py`, `src/dftorch/Optimizer.py`, `src/dftorch/MD.py`, `tests/`
-- Risk: Optional capabilities listed in `README.md` can regress without failures.
+**Normal test runner coverage for f-orbital validation:**
+- What's not tested: The f-orbital checks under `src/dftorch/script.py` are not represented as standard test files under `tests/`.
+- Files: `src/dftorch/script.py:556`, `src/dftorch/script.py:724`, `src/dftorch/script.py:1143`
+- Risk: Parser, constants, and structure regressions can ship if CI does not invoke the standalone script.
 - Priority: High
 
-**Input parsing edge cases:**
-- What's not tested: PDB parsing, CRYST1 cell handling, malformed XYZ/PDB files, trajectory metadata parsing, spin constant parsing, and Hubbard derivative parsing.
-- Files: `src/dftorch/_io.py`, `src/dftorch/_tools.py`, `tests/test_io.py`
-- Risk: User input errors surface as late numerical failures rather than clear parser errors.
-- Priority: Medium
-
-**SEDACS distributed workflow:**
-- What's not tested: Graph partitioning, halo exchange assumptions, MPI integration, and SEDACS MD/SCF loops.
-- Files: `src/dftorch/sedacs/sedacs_interface.py`, `src/dftorch/sedacs/SCF.py`, `src/dftorch/sedacs/MD.py`, `tests/`
-- Risk: Distributed simulations can fail independently of the main CPU package tests.
-- Priority: Medium
-
-**Packaging and clean-checkout hygiene:**
-- What's not tested: Source distribution contents, wheel contents, absence of generated artifacts, and README public import examples.
-- Files: `pyproject.toml`, `README.md`, `src/dftorch/__init__.py`, `.gitignore`, `.github/workflows/release.yml`
-- Risk: Published packages can miss data files, include unintended artifacts, or advertise imports that are not exported.
-- Priority: Medium
+**Angular f-channel formula correctness:**
+- What's not tested: Hamiltonian/overlap block values that consume `Hff*`, `Hdf*`, `Hpf*`, `Hsf*`, `Sff*`, `Sdf*`, `Spf*`, and `Ssf*` channels.
+- Files: `src/dftorch/_bond_integral.py:101`, `src/dftorch/Structure.py:25`, `src/dftorch/script.py:1155`
+- Risk: SKF parser and AO bookkeeping can pass while f-orbital electronic structure values are wrong.
+- Priority: High
 
 ---
 
-*Concerns audit: 2026-07-17*
+*Concerns audit: 2026-07-20*

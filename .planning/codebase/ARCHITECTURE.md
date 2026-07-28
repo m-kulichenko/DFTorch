@@ -1,37 +1,42 @@
-<!-- refreshed: 2026-07-17 -->
+<!-- refreshed: 2026-07-20 -->
+<!-- last_mapped_commit: e824543a0b411dcf52462ee55db5362c360e7780 -->
 # Architecture
 
-**Analysis Date:** 2026-07-17
+**Analysis Date:** 2026-07-20
 
 ## System Overview
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                       Public Python API                      │
-│                    `src/dftorch/__init__.py`                 │
-├──────────────────┬──────────────────┬───────────────────────┤
-│  Parameter Data  │  Geometry State  │ Simulation Drivers     │
-│ `Constants.py`   │ `Structure.py`   │ `ESDriver.py`/`MD.py`  │
-└────────┬─────────┴────────┬─────────┴──────────┬────────────┘
-         │                  │                     │
-         ▼                  ▼                     ▼
+│                 Scoped f-Orbital Validation Entry            │
+│                  `src/dftorch/script.py`                     │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  Vectorized Numerical Kernels                │
-│ `_h0ands.py`, `_scf.py`, `_forces.py`, `_energy.py`,         │
-│ `_coulomb_matrix.py`, `_nearestneighborlist.py`, `_stress.py`│
-└────────┬────────────────────────────┬───────────────────────┘
-         │                            │
-         ▼                            ▼
-┌──────────────────────────────┐ ┌─────────────────────────────┐
-│ Optional Physics Corrections │ │ Parallel / PME Specialization│
-│ `_gbsa.py`, `_dftd3.py`,     │ │ `ewald_pme/`, `sedacs/`      │
-│ `_thirdorder.py`, `_spin.py` │ │                             │
-└──────────────┬───────────────┘ └──────────────┬──────────────┘
-               │                                │
-               ▼                                ▼
+│               SKF Parsing and Parameter Assembly             │
+│                 `src/dftorch/_bond_integral.py`              │
+├───────────────────────┬─────────────────────────────────────┤
+│  40 SK channels       │  element shell metadata              │
+│  `_CHANNELS`          │  `N_F`, `EF`, `UF`, `SHELL_PRESENT`  │
+└───────────┬───────────┴──────────────────────┬──────────────┘
+            │                                  │
+            ▼                                  ▼
+┌─────────────────────────────┐    ┌──────────────────────────┐
+│ Constants Tensor Registry   │    │ f-Orbital SKF Fixtures    │
+│ `src/dftorch/Constants.py`  │    │ `tests/f_orbital_data/`   │
+└──────────────┬──────────────┘    └──────────────────────────┘
+               │
+               ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ Input/Output, SKF Parameters, Test Data, Experiment Assets    │
-│ `_io.py`, `_bond_integral.py`, `tests/`, `experiments/`       │
+│           Structure / StructureBatch AO Bookkeeping          │
+│                  `src/dftorch/Structure.py`                  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Electronic Structure Driver Consumers           │
+│                   `src/dftorch/ESDriver.py`                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,211 +44,258 @@
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Public API | Defines supported imports and treats non-exported modules as internal implementation details. | `src/dftorch/__init__.py` |
-| Constants | Loads element data, Slater-Koster SKF tensors, repulsive splines, Hubbard parameters, spin data, and optional DFTB3 derivatives. | `src/dftorch/Constants.py` |
-| Structure | Owns single-system atom types, coordinates, periodic cell, orbital indexing, shell indexing, charge state, and differentiable coordinate/cell tensors. | `src/dftorch/Structure.py` |
-| StructureBatch | Owns batched geometry, per-structure cells, padded orbital state, and batch metadata for multi-structure workflows. | `src/dftorch/Structure.py` |
-| ESDriver | Orchestrates single-structure neighbor lists, Hamiltonian/overlap assembly, Coulomb treatment, SCF, corrections, forces, stress, and Hessian helpers. | `src/dftorch/ESDriver.py` |
-| ESDriverBatch | Orchestrates the same electronic-structure flow for `StructureBatch`, except batched PME raises as unimplemented. | `src/dftorch/ESDriver.py` |
-| MDXL / MDXLBatch | Propagates extended-Lagrangian Born-Oppenheimer MD, velocities, thermostats/barostats, charge extrapolation, and trajectory output. | `src/dftorch/MD.py` |
-| GeoOpt | Runs geometry and optional cell optimization using `ESDriver` energy, force, and stress evaluations. | `src/dftorch/Optimizer.py` |
-| SCF kernels | Implement closed-shell, open-shell, delta-SCF, and batched self-consistent charge loops with Anderson/DIIS style mixing. | `src/dftorch/_scf.py` |
-| Hamiltonian kernels | Build `H0`, overlap `S`, derivatives, and Slater-Koster pair interpolation from neighbor-list geometry and SKF tensors. | `src/dftorch/_h0ands.py`, `src/dftorch/_slater_koster_pair.py` |
-| Coulomb/PME kernels | Provide direct Coulomb matrices, Ewald/PME energy, k-space/real-space operations, and optional Triton acceleration. | `src/dftorch/_coulomb_matrix.py`, `src/dftorch/ewald_pme/` |
-| Optional corrections | Add GBSA/ALPB solvation, D3(BJ), spin, and DFTB3 third-order contributions. | `src/dftorch/_gbsa.py`, `src/dftorch/_dftd3.py`, `src/dftorch/_spin.py`, `src/dftorch/_thirdorder.py` |
-| SEDACS bridge | Provides distributed graph partition, global kernels, and structure preparation for large-scale SEDACS workflows. | `src/dftorch/sedacs/` |
+| f-orbital SKF fixture set | Provides ordered Eu/Ga/N `.skf` pair files, including homonuclear headers used to derive element-level f-shell metadata. | `tests/f_orbital_data/` |
+| SKF channel map | Defines the 40-channel extended Hamiltonian/overlap order with f-f, d-f, p-f, and s-f channels before legacy s/p/d channels. | `src/dftorch/_bond_integral.py:101` |
+| SKF row normalizer | Accepts either 20-column legacy rows or 40-column extended rows and emits the canonical 40-column `_CHANNELS` order. | `src/dftorch/_bond_integral.py:397` |
+| SKF path resolver | Allows pair labels such as `Eu-N` to load dashed files like `Eu-N.skf` or compact files like `EuN.skf`. | `src/dftorch/_bond_integral.py:433` |
+| SKF metadata parser | Reads homonuclear headers, infers s/p/d/f shell presence, validates nested shells, fills `N_F`, `EF`, `UF`, and `SHELL_PRESENT`. | `src/dftorch/_bond_integral.py:547` |
+| WFC override parser | Uses optional `wfc.hsd` shell declarations as authoritative basis-presence metadata while preserving occupation values from SKF headers. | `src/dftorch/_bond_integral.py:869` |
+| SKF tensor assembler | Loads all ordered element-pair SKF files for active species, builds spline coefficients, repulsive splines, pair tensors, and element metadata tensors. | `src/dftorch/_bond_integral.py:947` |
+| Constants | Registers f-shell SKF outputs as device-aware `torch.nn.Parameter` tables used by structures and drivers. | `src/dftorch/Constants.py:45` |
+| Structure | Converts a single species/coordinate input into atom-major AO ranges, shell ranges, onsite energies, labels, Hubbard data, and `D0`. | `src/dftorch/Structure.py:214` |
+| StructureBatch | Mirrors `Structure` for multiple structures with padded per-structure AO rows and global flattened AO/shell offsets. | `src/dftorch/Structure.py:461` |
+| ESDriver | Consumes `Structure` f-orbital metadata through Hamiltonian assembly and SCF arguments. | `src/dftorch/ESDriver.py:27` |
+| ESDriverBatch | Consumes `StructureBatch` f-orbital metadata through batched Hamiltonian assembly and batched SCF arguments. | `src/dftorch/ESDriver.py:1126` |
+| Validation script | Verifies `_bond_integral.py`, `Constants.py`, and `Structure.py` against `tests/f_orbital_data` without importing the full public package. | `src/dftorch/script.py:1` |
 
 ## Pattern Overview
 
-**Overall:** Import-first scientific Python package with public facade, stateful PyTorch containers, and private vectorized tensor kernels.
+**Overall:** Data-driven PyTorch scientific pipeline where SKF fixture files define pair and element metadata, `Constants` registers those tensors, `Structure` materializes atom-major AO/shell indexing, and `ESDriver` consumes the resulting tensor contract.
 
 **Key Characteristics:**
-- Use `src/dftorch/__init__.py` as the public API boundary; add exports there only for supported user-facing objects.
-- Keep simulation state on `Structure`, `StructureBatch`, `ESDriver`, and MD/optimizer objects; kernel modules accept tensors and mutate or return tensors through the driver.
-- Add numerical work as private underscore modules unless it is a user-facing container or driver.
-- Preserve paired single/batch implementations when touching core physics: examples include `Structure`/`StructureBatch`, `ESDriver`/`ESDriverBatch`, `SCFx`/`SCFx_batch`, and `*_batch.py` kernels.
+- Treat `_bond_integral.py` as the boundary between text SKF data and tensor-ready parameter tables.
+- Preserve a single canonical extended 40-channel Slater-Koster order for all loaded SKF rows; legacy 20-column rows must be expanded before any spline or driver code sees them.
+- Represent basis presence explicitly with `SHELL_PRESENT[..., 4]` instead of deriving all AO layout from `max_ang`.
+- Keep AO ordering nested and atom-major: `s`, three `p`, five `d`, seven `f` positions.
+- Add f-shell fields in parallel with existing s/p/d fields: `N_F`, `EF`, `UF`, `const.n_f`, `const.Ef`, `const.Uf`, `Structure.has_f`.
+- Keep single and batched structure bookkeeping aligned; any single-structure shell-index change needs corresponding `StructureBatch` handling.
 
 ## Layers
 
-**Public Facade:**
-- Purpose: Stable import surface for users and tests.
-- Location: `src/dftorch/__init__.py`
-- Contains: Re-exports of `Constants`, `Structure`, `StructureBatch`, `ESDriver`, `ESDriverBatch`, `MDXL`, `MDXLBatch`, `MDXLOS`, `GeoOpt`, GBSA/DFTB3/D3/stress/ML helpers.
-- Depends on: User-facing modules and selected helper classes/functions.
-- Used by: README examples, tests, notebooks, downstream imports.
+**Fixture Data Layer:**
+- Purpose: Provide DFTB+ SKF source files for f-orbital validation.
+- Location: `tests/f_orbital_data/`
+- Contains: `Eu-Eu.skf`, `Eu-Ga.skf`, `Eu-N.skf`, `Ga-Eu.skf`, `Ga-Ga.skf`, `Ga-N.skf`, `N-Eu.skf`, `N-Ga.skf`, `N-N.skf`.
+- Depends on: DFTB+ SKF text conventions, including optional `@` extended headers.
+- Used by: `src/dftorch/script.py`, `src/dftorch/_bond_integral.py`, `src/dftorch/Constants.py`.
 
-**Domain State Containers:**
-- Purpose: Convert calculation dictionaries, coordinate files, SKF parameters, and device choices into tensor state.
-- Location: `src/dftorch/Constants.py`, `src/dftorch/Structure.py`
-- Contains: `torch.nn.Module` containers with `torch.nn.Parameter` buffers, atom/orbital/shell index maps, cell normalization, charge/spin state, and initial density data.
-- Depends on: `_io.py`, `_cell.py`, `_atomic_density_matrix.py`, `_bond_integral.py`, `_tools.py`, `_elements.py`.
-- Used by: `ESDriver`, `ESDriverBatch`, `MDXL`, `MDXLBatch`, `GeoOpt`, SEDACS helpers.
+**SKF Parser Layer:**
+- Purpose: Convert raw `.skf` files into normalized electronic channels, spline inputs, repulsive spline data, and atomic basis metadata.
+- Location: `src/dftorch/_bond_integral.py`
+- Contains: `_CHANNELS`, `_SIMPLE_CHANNELS`, `_normalize_skf_row`, `_split_skf_pair_name`, `_validate_nested_shells`, `read_skf_table`, `read_wfc_hsd`, `get_skf_tensors`.
+- Depends on: `torch`, `pathlib.Path`, `ordered_pairs_from_TYPE`.
+- Used by: `src/dftorch/Constants.py` and validation helpers in `src/dftorch/script.py`.
 
-**Orchestration Drivers:**
-- Purpose: Sequence kernel calls into full electronic-structure, MD, and optimization workflows.
-- Location: `src/dftorch/ESDriver.py`, `src/dftorch/MD.py`, `src/dftorch/Optimizer.py`
-- Contains: `forward`, `calc_forces`, `calc_stress`, `calc_hessian`, `run` methods, thermostat/barostat state, history arrays, and trajectory writes.
-- Depends on: Private kernel modules and domain state containers.
-- Used by: User scripts, notebooks in `experiments/`, and smoke tests in `tests/test_scf.py`.
+**Constants Registry Layer:**
+- Purpose: Hold parsed SKF tensors and element metadata on the calculation device.
+- Location: `src/dftorch/Constants.py`
+- Contains: `Constants` and `ConstantsTest`; `Constants` registers `coeffs_tensor`, `R_tensor`, `pair_lookup`, `n_orb`, `max_ang`, `max_ang_occ`, `n_f`, `Ef`, `Uf`, and `shell_present`.
+- Depends on: `_bond_integral.get_skf_tensors`, `_io.read_xyz`, `_io.read_pdb`, `_tools.ordered_pairs_from_TYPE`, element tables.
+- Used by: `src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`, and `src/dftorch/script.py`.
 
-**Numerical Kernel Modules:**
-- Purpose: Implement vectorized tensor algorithms for DFTB physics.
-- Location: `src/dftorch/_*.py`
-- Contains: Hamiltonian/overlap assembly, neighbor lists, Coulomb matrices, density matrices, SCF, energy decomposition, forces, stress, spin, third-order, GBSA, D3, and utility helpers.
-- Depends on: PyTorch, NumPy/SciPy where needed, and local tensor shape conventions from `Structure`/`Constants`.
-- Used by: `ESDriver.py`, `MD.py`, `Optimizer.py`, and SEDACS modules.
+**Structure Metadata Layer:**
+- Purpose: Convert species and constants into the AO/shell shape contract consumed by matrix assembly and SCF.
+- Location: `src/dftorch/Structure.py`
+- Contains: `SHELL_DIMS`, `SHELL_LOCAL_STARTS`, `AO_LABEL_TEMPLATE`, `_ao_mask_from_shell_present`, `_shell_local_start`, `_global_shell_start`, `_atomic_density_matrix_from_shells`, `Structure`, `StructureBatch`.
+- Depends on: `const.n_orb`, `const.shell_present`, `const.n_f`, `const.Ef`, `const.Uf`, `const.shell_dim`.
+- Used by: `src/dftorch/ESDriver.py` and validation helpers in `src/dftorch/script.py`.
 
-**Specialized Subpackages:**
-- Purpose: Isolate optional or domain-specific implementations.
-- Location: `src/dftorch/ewald_pme/`, `src/dftorch/sedacs/`, `src/dftorch/_legacy/`, `src/dftorch/params/`
-- Contains: PME/Ewald backend selection, Triton kernels, distributed graph partitioning, legacy Hamiltonian code, and packaged parameter tables.
-- Depends on: PyTorch, optional Triton/CUDA, optional `sedacs`, optional `mpi4py`.
-- Used by: SCF Coulomb paths, SEDACS integration, and fallback/compatibility code.
+**Driver Consumer Layer:**
+- Purpose: Consume the f-orbital-aware structure contract during Hamiltonian assembly and SCF.
+- Location: `src/dftorch/ESDriver.py`
+- Contains: `ESDriver.forward`, `ESDriverBatch.forward`, SCF dispatch calls that pass `n_orbitals_per_atom`, `D0`, `el_per_shell`, `shell_types`, and `n_shells_per_atom`.
+- Depends on: `Structure`/`StructureBatch` attributes and lower-level Hamiltonian/SCF kernels outside this scoped remap.
+- Used by: Runtime calculations once structures are built.
+
+**Scoped Validation Layer:**
+- Purpose: Independently check parser, constants, and structure assumptions using synthetic XYZ inputs and the f-orbital SKF directory.
+- Location: `src/dftorch/script.py`
+- Contains: project-root discovery, direct module loading, expected metadata parsing, spline reconstruction checks, constants checks, single/batch structure layout checks.
+- Depends on: `tests/f_orbital_data/`, `_bond_integral.py`, `Constants.py`, `Structure.py`.
+- Used by: Manual f-orbital validation from project root.
 
 ## Data Flow
 
-### Primary Single-Structure Energy/Force Path
+### f-Orbital Parameter Loading Path
 
-1. User imports public symbols from `dftorch` (`src/dftorch/__init__.py:22`).
-2. User builds `Constants(dftorch_params)`; it reads geometry to discover element pairs, loads SKF tensors with `get_skf_tensors`, and registers tensors as parameters (`src/dftorch/Constants.py:43`, `src/dftorch/Constants.py:69`, `src/dftorch/Constants.py:99`, `src/dftorch/Constants.py:142`).
-3. User builds `Structure(dftorch_params, const)`; it reads XYZ/PDB input when tensors are not provided and builds atom/orbital/shell state (`src/dftorch/Structure.py:62`, `src/dftorch/Structure.py:99`).
-4. User calls `ESDriver.forward(structure, const)`; the driver normalizes Coulomb settings and builds an electronic neighbor list (`src/dftorch/ESDriver.py:51`, `src/dftorch/ESDriver.py:77`, `src/dftorch/ESDriver.py:100`).
-5. The driver assembles `H0`, `S`, derivatives, orthogonalizer, and repulsion terms (`src/dftorch/ESDriver.py:114`, `src/dftorch/ESDriver.py:147`, `src/dftorch/ESDriver.py:150`).
-6. The driver chooses PME or direct Coulomb and builds optional DFTB3 third-order state (`src/dftorch/ESDriver.py:167`, `src/dftorch/ESDriver.py:219`, `src/dftorch/ESDriver.py:262`).
-7. The driver creates optional GBSA/D3 correction objects and dispatches closed-shell or open-shell SCF (`src/dftorch/ESDriver.py:294`, `src/dftorch/ESDriver.py:297`, `src/dftorch/ESDriver.py:309`, `src/dftorch/ESDriver.py:340`).
-8. SCF returns Hamiltonian, density, charges, occupations, Coulomb intermediates, and stress intermediates (`src/dftorch/_scf.py:154`, `src/dftorch/_scf.py:543`).
-9. The driver computes decomposed electronic energy and adds repulsion, spin, solvation, and D3 terms to `structure.e_tot` (`src/dftorch/ESDriver.py:294`, `src/dftorch/_energy.py`).
-10. User calls `ESDriver.calc_forces(structure, const)`; it chooses PME or direct force kernels and adds spin, GBSA, third-order, and D3 force contributions to `structure.f_tot` (`src/dftorch/ESDriver.py:581`, `src/dftorch/ESDriver.py:594`, `src/dftorch/ESDriver.py:630`, `src/dftorch/ESDriver.py:663`, `src/dftorch/ESDriver.py:678`, `src/dftorch/ESDriver.py:689`, `src/dftorch/ESDriver.py:696`).
+1. `Constants.__init__` reads species from `dftorch_params["FILENAME"]` using XYZ/PDB helpers (`src/dftorch/Constants.py:71`).
+2. Species are flattened into `TYPE`; ordered element pairs and a dense atomic-number pair lookup are built (`src/dftorch/Constants.py:88`).
+3. `Constants` calls `get_skf_tensors(TYPE, self.skfpath)` to load all ordered pair parameters from `SKFPATH` (`src/dftorch/Constants.py:101`).
+4. `get_skf_tensors` derives the ordered label list, allocates pair tensors, allocates 120-element metadata tables, and loops over every label (`src/dftorch/_bond_integral.py:980`).
+5. Each label resolves to a dashed or compact `.skf` path with `_resolve_skf_path` (`src/dftorch/_bond_integral.py:1021`).
+6. `read_skf_table` parses the SKF file, normalizes electronic rows to 40 channels, builds channel tensors, reads repulsive spline data, and updates homonuclear metadata in-place (`src/dftorch/_bond_integral.py:547`).
+7. `channels_to_matrix` and `cubic_spline_coeffs` convert channels into `(npts, 40)` values and `(npts - 1, 40, 4)` cubic spline coefficients (`src/dftorch/_bond_integral.py:771`, `src/dftorch/_bond_integral.py:779`).
+8. If `wfc.hsd` exists under `SKFPATH`, `read_wfc_hsd` overrides shell-presence, `N_ORB`, `MAX_ANG`, and `MAX_ANG_OCC` (`src/dftorch/_bond_integral.py:1060`).
+9. `get_skf_tensors` returns pair tensors plus element metadata through the extended tuple ending in `N_F`, `EF`, `UF`, and `SHELL_PRESENT` (`src/dftorch/_bond_integral.py:1083`).
+10. `Constants` registers returned tensors as `torch.nn.Parameter` objects, including `n_f`, `Uf`, `Ef`, and `shell_present` (`src/dftorch/Constants.py:160`).
 
-### Batched Electronic-Structure Path
+### Single-Structure AO and Shell Path
 
-1. Use `StructureBatch` when `dftorch_params["FILENAME"]` is a list of files (`src/dftorch/Structure.py:350`, `src/dftorch/Structure.py:375`).
-2. Use `ESDriverBatch.forward` to build batched neighbor lists, batched `H0`/`S`, batched repulsion, batched direct Coulomb, optional per-structure GBSA, and `SCFx_batch` (`src/dftorch/ESDriver.py:1150`, `src/dftorch/ESDriver.py:1198`, `src/dftorch/_h0ands.py:325`, `src/dftorch/_scf.py:954`).
-3. Batched PME is not supported; the driver raises `ValueError("Batched PME Coulomb not implemented.")` in forward and force paths (`src/dftorch/ESDriver.py`, `src/dftorch/ESDriver.py:1568`).
-4. Use `ESDriverBatch.calc_forces` for vectorized force assembly and batched correction gradients (`src/dftorch/ESDriver.py:1554`).
+1. `Structure.__init__` reads or accepts species/coordinates and normalizes them to batched tensor shapes (`src/dftorch/Structure.py:242`, `src/dftorch/Structure.py:259`).
+2. The single structure selects `species[0]` as `TYPE`, prepares coordinate tensors, wraps positions when a cell is present, and stores `Nats` (`src/dftorch/Structure.py:262`, `src/dftorch/Structure.py:285`, `src/dftorch/Structure.py:317`).
+3. Atom AO ranges are computed from `const.n_orb[self.TYPE]` into `H_INDEX_START` and `H_INDEX_END` (`src/dftorch/Structure.py:334`).
+4. `const.shell_present[self.TYPE]` becomes the per-atom four-shell boolean matrix; `has_f` is the fourth column (`src/dftorch/Structure.py:363`).
+5. Local shell starts use fixed offsets `(0, 1, 4, 9)`, then global shell starts add each atom's AO start (`src/dftorch/Structure.py:369`).
+6. Onsite AO energies are expanded into a fixed 16-position template and masked by shell presence to build `diagonal` and `HDIM` (`src/dftorch/Structure.py:378`).
+7. AO shell type IDs and labels are flattened in atom-major order from the same mask (`src/dftorch/Structure.py:410`).
+8. Shell-resolved Hubbard values, shell type IDs, electron counts, and Hubbard shell ranges are built from `Us/Up/Ud/Uf` and `n_s/n_p/n_d/n_f` (`src/dftorch/Structure.py:413`).
+9. `D0` is filled per shell by distributing shell occupations across shell dimensions and multiplying by the closed-shell `0.5` factor (`src/dftorch/Structure.py:443`).
 
-### Molecular Dynamics Flow
+### Batched Structure AO and Shell Path
 
-1. Build an already-SCF-initialized `Structure` or `StructureBatch` with corresponding driver.
-2. Use `MDXL.run` for single systems or `MDXLBatch.run` for batches (`src/dftorch/MD.py:323`, `src/dftorch/MD.py:1474`).
-3. The MD driver normalizes Coulomb settings, initializes velocities when missing, stores propagated charge variables, and uses kernel update helpers from `_xl_tools.py` (`src/dftorch/MD.py:356`, `src/dftorch/MD.py:361`, `src/dftorch/MD.py:370`).
-4. The MD loop writes XYZ/PDB/velocity outputs through `_io.py` (`src/dftorch/_io.py:27`, `src/dftorch/_io.py:71`, `src/dftorch/_io.py:272`).
+1. `StructureBatch.__init__` reads all files listed in `dftorch_params["FILENAME"]`, normalizes species to `(B, N)` and coordinates to `(B, N, 3)` (`src/dftorch/Structure.py:476`).
+2. Per-atom AO starts and ends are computed per batch row from `const.n_orb[self.TYPE]` (`src/dftorch/Structure.py:532`).
+3. Per-atom shell presence, `has_f`, shell starts, and shell ends mirror the single-structure path with an added batch dimension (`src/dftorch/Structure.py:551`).
+4. `diagonal_flat` is created from the same 16-position AO template, then copied into padded `diagonal[batch_idx, :hdim_b]` rows (`src/dftorch/Structure.py:571`, `src/dftorch/Structure.py:602`).
+5. Per-structure AO offsets produce `H_INDEX_START_GLOBAL`, `H_INDEX_END_GLOBAL`, `shell_ao_start_global`, and `shell_ao_end_global` for flattened global operations (`src/dftorch/Structure.py:620`).
+6. Shell-resolved Hubbard values, shell type IDs, electron counts, and global shell offsets are built with batched templates (`src/dftorch/Structure.py:630`).
+7. Batched `D0` is filled row-wise by shell occupation and padded to the maximum `HDIM` across the batch (`src/dftorch/Structure.py:667`).
 
-### SEDACS / Distributed Flow
+### Driver Consumption Path
 
-1. `prepare_structure` constructs `Constants` and `Structure`, sets `dftorch_params["CELL"]`, and tags the structure for DFTorch use (`src/dftorch/sedacs/sedacs_interface.py:1116`).
-2. Neighbor state and graph data are prepared with `NeighborState`, `calculate_dist_dips`, and SEDACS graph functions (`src/dftorch/sedacs/sedacs_interface.py:29`, `src/dftorch/sedacs/sedacs_interface.py:96`).
-3. Distributed Krylov/kernel work happens in `kernel_global` with `torch.distributed` and PME calls (`src/dftorch/sedacs/sedacs_interface.py:693`).
+1. `ESDriver.forward` builds the electronic neighbor list, then passes `structure.diagonal`, `structure.H_INDEX_START`, `const.R_orb`, and `const.coeffs_tensor` into `H0_and_S_vectorized` (`src/dftorch/ESDriver.py:87`, `src/dftorch/ESDriver.py:114`).
+2. Open-shell SCF receives shell-resolved arrays `el_per_shell`, `shell_types`, `n_shells_per_atom`, and `const.shell_dim` (`src/dftorch/ESDriver.py:340`).
+3. Closed-shell SCF receives `n_orbitals_per_atom`, `Hubbard_U`, `dU_dq`, and shell-derived `D0` (`src/dftorch/ESDriver.py:483`).
+4. Energy evaluation uses `D0` and SCF outputs without re-deriving shell layout (`src/dftorch/ESDriver.py:517`).
+5. `ESDriverBatch.forward` mirrors matrix assembly with `H0_and_S_vectorized_batch`, `structure.diagonal`, and `structure.H_INDEX_START` (`src/dftorch/ESDriver.py:1227`).
+6. Batched SCF consumes `structure.n_orbitals_per_atom`, `structure.Hubbard_U`, `structure.dU_dq`, and `structure.D0` (`src/dftorch/ESDriver.py:1454`).
+
+### Validation Script Flow
+
+1. Running `python src/dftorch/script.py tests/f_orbital_data` loads `_bond_integral.py` directly under a fake `dftorch` package to avoid unrelated package imports (`src/dftorch/script.py:72`).
+2. `_bond_integral.py` checks read every `.skf`, verify 40 channels, reconstruct spline values at original grid points, and compare homonuclear metadata (`src/dftorch/script.py:398`).
+3. `Constants.py` checks instantiate `Constants` from a synthetic XYZ file and assert f-shell attributes and pair lookup coverage (`src/dftorch/script.py:633`).
+4. `Structure.py` checks instantiate `Structure` and `StructureBatch`, then verify AO starts/ends, shell starts/ends, labels, onsite diagonal, `D0`, shell Hubbard values, and padding (`src/dftorch/script.py:956`, `src/dftorch/script.py:1058`).
 
 **State Management:**
-- Simulation state is mutable and stored on `Structure`/`StructureBatch` instances (`H0`, `S`, `D`, `q`, `e_tot`, `f_tot`, correction objects).
-- Driver state is mutable and stored on `ESDriver`, `ESDriverBatch`, `MDXL`, `MDXLBatch`, and `GeoOpt` instances.
-- Configuration is a plain `dict` (`dftorch_params`) passed through drivers and kernels; several methods write defaults or normalized values back into that dictionary.
+- `_bond_integral.read_skf_table` mutates metadata tensors passed in by `get_skf_tensors`; those tensors become immutable-style `torch.nn.Parameter(..., requires_grad=False)` fields in `Constants` unless `GRAD_PARAM` enables selected energies/Hubbard tensors.
+- `Structure` and `StructureBatch` own mutable runtime state; drivers add `H0`, `S`, SCF outputs, charges, energies, and forces to these objects.
+- `dftorch_params` remains the shared mutable configuration object for input filenames, `SKFPATH`, electronic temperature, Coulomb settings, and optional physics flags.
 
 ## Key Abstractions
 
-**Calculation Parameter Dictionary:**
-- Purpose: Single runtime configuration object containing input paths, SKF paths, cutoffs, Coulomb method, SCF controls, spin/charge flags, correction settings, and output settings.
-- Examples: `tests/test_scf.py`, `README.md`, `src/dftorch/ESDriver.py`
-- Pattern: Pass the same mutable `dftorch_params` into `Constants`, `Structure`, and driver methods; normalize defaults near the driver entry point.
+**Extended SKF Channel Order:**
+- Purpose: One canonical 40-column Slater-Koster electronic channel order for Hamiltonian and overlap spline tensors.
+- Examples: `_CHANNELS`, `_SIMPLE_CHANNELS`, `_SIMPLE_TO_EXTENDED` in `src/dftorch/_bond_integral.py:101`.
+- Pattern: Normalize data at load time; downstream tensors use `len(_CHANNELS)` and never branch on 20 vs 40 columns.
 
-**Constants Database:**
-- Purpose: Device-aware parameter table for element data and SKF-derived tensors.
-- Examples: `src/dftorch/Constants.py`
-- Pattern: Register constant tensors as `torch.nn.Parameter(..., requires_grad=False)` except selected gradient-enabled model parameters.
+**Shell Presence Matrix:**
+- Purpose: Explicitly state which of s/p/d/f shells exist for each atomic number.
+- Examples: `SHELL_PRESENT` in `src/dftorch/_bond_integral.py:1001`, `const.shell_present` in `src/dftorch/Constants.py:172`, `structure.shell_present` in `src/dftorch/Structure.py:363`.
+- Pattern: Use shape `(120, 4)` for constants, `(Nats, 4)` for single structures, and `(B, Nats, 4)` for batches.
 
-**Structure Containers:**
-- Purpose: Canonical shape and indexing contract for downstream kernels.
-- Examples: `src/dftorch/Structure.py`
-- Pattern: Store atom types as `TYPE`, coordinate components as `RX`/`RY`/`RZ`, cells as normalized 3x3 tensors, and atom-to-orbital ranges as `H_INDEX_START`/`H_INDEX_END`.
+**Nested AO Template:**
+- Purpose: Fixed local AO positions for all possible s/p/d/f shells.
+- Examples: `SHELL_DIMS`, `SHELL_LOCAL_STARTS`, `AO_LABEL_TEMPLATE`, `AO_SHELL_TEMPLATE` in `src/dftorch/Structure.py:11`.
+- Pattern: Build 16-position templates and use `_ao_mask_from_shell_present` to remove absent shell positions.
 
-**Vectorized Kernel Functions:**
-- Purpose: Pure-ish tensor operations called by drivers after structure state is prepared.
-- Examples: `src/dftorch/_h0ands.py`, `src/dftorch/_scf.py`, `src/dftorch/_forces.py`, `src/dftorch/_coulomb_matrix.py`
-- Pattern: Accept many explicit tensors rather than whole objects, return tuple outputs, and let drivers assign outputs back onto `structure`.
+**Atom-Major AO Ranges:**
+- Purpose: Map each atom to its contiguous AO segment in Hamiltonian/overlap matrices.
+- Examples: `H_INDEX_START`, `H_INDEX_END`, `HDIM` in `src/dftorch/Structure.py:334` and `src/dftorch/Structure.py:532`.
+- Pattern: Compute from `const.n_orb[self.TYPE]`; do not infer offsets by manually adding shell dimensions in driver code.
 
-**Single/Batch Pairing:**
-- Purpose: Support one-system and multi-system workloads with analogous APIs.
-- Examples: `Structure`/`StructureBatch`, `ESDriver`/`ESDriverBatch`, `H0_and_S_vectorized`/`H0_and_S_vectorized_batch`, `SCFx`/`SCFx_batch`, `forces_shadow`/`forces_shadow_batch`.
-- Pattern: Add batch support beside the single-system path and keep names aligned with `_batch` suffixes.
+**Shell-Resolved Hubbard Ranges:**
+- Purpose: Provide open-shell and spin-aware code with shell-major Hubbard and occupation vectors.
+- Examples: `Hubbard_U_sr`, `shell_types`, `el_per_shell`, `H_INDEX_START_U`, `H_INDEX_END_U` in `src/dftorch/Structure.py:434`.
+- Pattern: Stack s/p/d/f arrays from `Constants`, mask by `shell_present`, and preserve atom-major shell order.
+
+**Validation Harness:**
+- Purpose: Local, direct-module f-orbital checks independent of public package imports.
+- Examples: `find_project_root`, `load_dftorch_module`, `run_bond_integral_tests`, `run_constants_tests`, `run_structure_tests` in `src/dftorch/script.py`.
+- Pattern: Build expected values by parsing SKF fixtures independently, then compare against the production parser/constants/structure output.
 
 ## Entry Points
 
-**Package Import:**
-- Location: `src/dftorch/__init__.py`
-- Triggers: `from dftorch import Constants, Structure, ESDriver, MDXL`
-- Responsibilities: Expose the supported user API and hide private modules by convention.
+**SKF Tensor Loading:**
+- Location: `src/dftorch/_bond_integral.py:947`
+- Triggers: `Constants.__init__` calls `get_skf_tensors(TYPE, SKFPATH)`.
+- Responsibilities: Load all ordered SKF pair files, normalize electronic channels, compute spline coefficients, parse repulsive splines, populate element metadata, apply optional `wfc.hsd` shell overrides.
 
-**Single Electronic Structure:**
-- Location: `src/dftorch/ESDriver.py`
-- Triggers: `es_driver(structure, const, do_scf=True)` and `es_driver.calc_forces(structure, const)`
-- Responsibilities: Build matrices, solve SCF, compute energies, forces, stress, and Hessian helper evaluations.
+**Constants Construction:**
+- Location: `src/dftorch/Constants.py:45`
+- Triggers: User or validation code instantiates `Constants(dftorch_params)`.
+- Responsibilities: Discover active species from `FILENAME`, create `pair_lookup`, register pair tensors and f-shell metadata fields.
 
-**Batched Electronic Structure:**
-- Location: `src/dftorch/ESDriver.py`
-- Triggers: `es_driver_batch(structure_batch, const, do_scf=True)`
-- Responsibilities: Vectorized multi-structure energy/force path for direct Coulomb workflows.
+**Single Structure Construction:**
+- Location: `src/dftorch/Structure.py:214`
+- Triggers: User or validation code instantiates `Structure(dftorch_params, const, ...)`.
+- Responsibilities: Build atom-major AO/shell layout, onsite diagonal, shell-resolved Hubbard data, and initial density.
 
-**Molecular Dynamics:**
-- Location: `src/dftorch/MD.py`
-- Triggers: `MDXL.run(...)`, `MDXLBatch.run(...)`
-- Responsibilities: Propagate coordinates, velocities, charge variables, thermostat/barostat state, and trajectory output.
+**Batched Structure Construction:**
+- Location: `src/dftorch/Structure.py:461`
+- Triggers: User or validation code instantiates `StructureBatch(dftorch_params, const, ...)`.
+- Responsibilities: Build padded per-structure AO rows, flattened/global AO offsets, shell-resolved metadata, and batched initial density.
 
-**Geometry Optimization:**
-- Location: `src/dftorch/Optimizer.py`
-- Triggers: `GeoOpt.run(...)`
-- Responsibilities: Iterate energy/force/stress evaluations and update atom positions and optional cell variables.
+**Single Electronic Structure Driver:**
+- Location: `src/dftorch/ESDriver.py:51`
+- Triggers: `ESDriver.forward(structure, const, do_scf=True)`.
+- Responsibilities: Pass f-orbital-aware structure metadata into Hamiltonian/overlap assembly and SCF.
 
-**SEDACS Integration:**
-- Location: `src/dftorch/sedacs/sedacs_interface.py`, `src/dftorch/sedacs/SCF.py`, `src/dftorch/sedacs/MD.py`
-- Triggers: SEDACS distributed workflows importing the DFTorch bridge.
-- Responsibilities: Prepare DFTorch structures, graph partition data, distributed SCF/MD kernels, and PME coupling.
+**Batched Electronic Structure Driver:**
+- Location: `src/dftorch/ESDriver.py:1150`
+- Triggers: `ESDriverBatch.forward(structure, const, do_scf=True)`.
+- Responsibilities: Pass batched f-orbital-aware structure metadata into batched Hamiltonian/overlap assembly and SCF.
+
+**Scoped f-Orbital Validation:**
+- Location: `src/dftorch/script.py:1232`
+- Triggers: `python src/dftorch/script.py [tests/f_orbital_data]`.
+- Responsibilities: Validate SKF normalization, spline reconstruction, constants exposure, and single/batch structure AO bookkeeping.
 
 ## Architectural Constraints
 
-- **Threading:** Core package execution is regular Python/PyTorch tensor execution; distributed large-scale paths use `torch.distributed` in `src/dftorch/sedacs/`.
-- **Global state:** `torch.set_default_dtype` is expected in user scripts/tests before constructing tensors; `_tools._maybe_compile` reads environment controls such as `DFTORCH_ENABLE_COMPILE`; `src/dftorch/ewald_pme/__init__.py` selects its backend at import time based on CUDA/Triton availability.
-- **Circular imports:** `src/dftorch/ewald_pme/__init__.py` imports `PME_torch` at the end because of a circular dependency comment; keep PME additions aware of package-import order.
-- **Mutable input config:** `dftorch_params` is mutated by drivers, MD, and SEDACS helpers; treat it as shared runtime state, not an immutable value object.
-- **Device/dtype consistency:** New tensors must be allocated on the same device and dtype as structure or constants tensors; follow existing `device=...` and `dtype=torch.get_default_dtype()` patterns.
-- **Batch limitations:** Batched PME is explicitly not implemented in `ESDriverBatch`; do not route `COUL_METHOD == "PME"` through batched force or energy paths without implementing the missing kernels.
+- **Threading:** Scoped f-orbital code uses regular Python and PyTorch tensor execution; no scoped file creates threads or distributed workers.
+- **Global state:** `torch.get_default_dtype()` controls parser and structure tensor dtypes in `_bond_integral.py`, `Constants.py`, and `Structure.py`; `src/dftorch/script.py:1233` sets `torch.float64` for validation.
+- **Circular imports:** `src/dftorch/script.py` deliberately creates a fake `dftorch` package and loads modules by file path to avoid importing `dftorch/__init__.py` while validating scoped internals.
+- **Nested shells:** `_validate_nested_shells` rejects f without s/p/d, d without s/p, and p without s (`src/dftorch/_bond_integral.py:496`).
+- **Channel count:** Downstream SKF tensors assume exactly 40 electronic channels after normalization; `Constants` validation checks `const.coeffs_tensor.shape[2] == 40` (`src/dftorch/script.py:663`).
+- **Fixed local AO positions:** f-shell starts at local AO index `9`; any non-nested basis would require changing `SHELL_LOCAL_STARTS`, mask logic, and validation expectations (`src/dftorch/Structure.py:11`).
+- **Metadata source:** Homonuclear SKF headers define `N_F`, `EF`, `UF`, and `n_f`; optional `wfc.hsd` changes shell presence and angular metadata only, not occupation totals (`src/dftorch/_bond_integral.py:876`).
+- **Batch padding:** `StructureBatch.diagonal` and `StructureBatch.D0` are padded to max `HDIM` per batch; downstream batch code must respect per-row `HDIM_struct` (`src/dftorch/Structure.py:595`).
 
 ## Anti-Patterns
 
-### Exporting Internal Kernels as Public API
+### Inferring f-Orbital Layout From `max_ang` Alone
 
-**What happens:** A new helper is imported from `src/dftorch/__init__.py` even though it is a low-level tensor kernel.
-**Why it's wrong:** The package docs and tests treat `__init__.py` as a stable public contract; exporting private kernels makes implementation details harder to change.
-**Do this instead:** Keep new numerical helpers in underscore modules such as `src/dftorch/_energy.py` or `src/dftorch/_forces.py`, and export only user-facing containers or explicitly supported functions from `src/dftorch/__init__.py`.
+**What happens:** New code assumes all shells from `s` through `max_ang` exist.
+**Why it's wrong:** The scoped implementation stores explicit `shell_present` metadata and supports optional `wfc.hsd` overrides; shell presence is the authoritative basis layout.
+**Do this instead:** Use `const.shell_present`, `structure.shell_present`, `structure.has_f`, `_ao_mask_from_shell_present`, and shell range fields from `src/dftorch/Structure.py`.
 
-### Adding Single-System Physics Without Batch Consideration
+### Passing Raw SKF Rows Downstream
 
-**What happens:** A correction is added only in `ESDriver.forward` or `ESDriver.calc_forces`.
-**Why it's wrong:** The codebase maintains parallel single/batch flows for many operations, and new behavior can silently diverge for `StructureBatch`.
-**Do this instead:** Add the single path in `src/dftorch/ESDriver.py`, then either add the matching batch path in `ESDriverBatch` and `_batch` kernels or raise a precise `ValueError` like the existing batched PME path.
+**What happens:** New parser or driver code branches on 20-column vs 40-column SKF rows outside `_bond_integral.py`.
+**Why it's wrong:** `Constants`, `Structure`, and drivers assume `coeffs_tensor` is already normalized to 40 channels.
+**Do this instead:** Normalize in `_normalize_skf_row` and keep all downstream tensors in `_CHANNELS` order (`src/dftorch/_bond_integral.py:397`).
 
-### Reading Geometry or Parameters Inside Low-Level Kernels
+### Manually Recomputing AO Offsets in Drivers
 
-**What happens:** A kernel opens files or reads `dftorch_params` paths directly.
-**Why it's wrong:** File IO and parameter loading are centralized in `Constants`, `Structure`, and `_io.py`; kernels should work with tensors passed by drivers.
-**Do this instead:** Load files in `src/dftorch/Constants.py`, `src/dftorch/Structure.py`, or `src/dftorch/_io.py`, then pass tensors into kernel functions such as `H0_and_S_vectorized`.
+**What happens:** Driver code recreates shell offsets by summing hard-coded shell dimensions.
+**Why it's wrong:** `Structure` and `StructureBatch` already own atom-major AO and shell ranges; recomputing in drivers risks drifting from `shell_present` and batch padding.
+**Do this instead:** Use `structure.H_INDEX_START`, `structure.H_INDEX_END`, `structure.shell_ao_start`, `structure.shell_ao_end`, and `structure.n_orbitals_per_atom` (`src/dftorch/Structure.py:334`).
+
+### Updating Single-Structure Metadata Without Batch Parity
+
+**What happens:** A new shell or AO metadata field is added to `Structure` only.
+**Why it's wrong:** `ESDriverBatch` depends on matching batched fields such as `diagonal`, `D0`, `n_orbitals_per_atom`, and shell-derived arrays.
+**Do this instead:** Add matching logic in `StructureBatch` and update validation checks in `src/dftorch/script.py:1058`.
 
 ## Error Handling
 
-**Strategy:** Raise explicit exceptions for unsupported configurations and invalid physical inputs; otherwise many numerical paths use printed warnings/timing and tensor outputs stored on state objects.
+**Strategy:** Fail early while parsing malformed or unsupported SKF basis data; use validation script assertions for contract checks.
 
 **Patterns:**
-- Use `ValueError` for invalid user parameters and unsupported modes, such as invalid spin/charge combinations and batched PME (`src/dftorch/Structure.py`, `src/dftorch/ESDriver.py`).
-- Use `NotImplementedError` for known physics gaps such as full off-diagonal DFTB3 with PME (`src/dftorch/ESDriver.py:172`).
-- Catch missing optional parameter files where the workflow can degrade, such as `spinw.txt` loading in `src/dftorch/Constants.py:136`.
-- Tests disable Torch compile paths for deterministic CPU smoke coverage (`tests/test_scf.py`).
+- `_normalize_skf_row` raises `ValueError` when an electronic row is neither 20 nor 40 values (`src/dftorch/_bond_integral.py:428`).
+- `_split_skf_pair_name` raises `ValueError` when a compact or dashed SKF basename cannot be parsed into element symbols (`src/dftorch/_bond_integral.py:493`).
+- `_validate_nested_shells` raises `ValueError` for unsupported non-nested shell layouts (`src/dftorch/_bond_integral.py:522`).
+- `read_skf_table` raises `ValueError` for empty files, malformed grid/header data, missing spline blocks, short electronic tables, and malformed repulsive spline rows (`src/dftorch/_bond_integral.py:592`).
+- `Constants` catches optional `spinw.txt` load failures and proceeds with `self.w = None` (`src/dftorch/Constants.py:127`).
+- `Structure` and `StructureBatch` raise `ValueError` for invalid closed-shell electron parity unless `ignore_spin` is used (`src/dftorch/Structure.py:355`, `src/dftorch/Structure.py:545`).
 
 ## Cross-Cutting Concerns
 
-**Logging:** Mostly `print` statements and `logging` in PME backend selection; timing and progress output appears in `src/dftorch/ESDriver.py`, `src/dftorch/MD.py`, `src/dftorch/Optimizer.py`, and `src/dftorch/ewald_pme/__init__.py`.
-**Validation:** Configuration validation is distributed across constructors and driver entry points; examples include spin/electron checks in `Structure`, Coulomb normalization in `_tools.py`, and unsupported-mode raises in `ESDriver`.
-**Authentication:** Not applicable; this is a local scientific-computing package with no built-in auth layer.
+**Logging:** Scoped code primarily uses `print` in `Constants` and validation output in `src/dftorch/script.py`; no scoped logging framework is used.
+**Validation:** `src/dftorch/script.py` is the focused f-orbital validation harness and checks parser, constants, and structure contracts against `tests/f_orbital_data`.
+**Authentication:** Not applicable in scoped files.
 
 ---
 
-*Architecture analysis: 2026-07-17*
+*Architecture analysis: 2026-07-20*

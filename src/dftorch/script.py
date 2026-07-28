@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import types
 from pathlib import Path
 
@@ -113,12 +114,13 @@ def read_data_lines(skf_path: Path) -> list[str]:
     ]
 
 
-def split_dashed_pair(skf_path: Path) -> tuple[str, str]:
-    name = skf_path.stem
-    parts = name.split("-")
-    if len(parts) != 2:
-        raise ValueError(f"Expected dashed SKF name like Eu-N.skf, got {skf_path.name}")
-    return parts[0], parts[1]
+def split_skf_pair(skf_path: Path, bond) -> tuple[str, str]:
+    """Split dashed or compact SKF basenames using the production parser helper."""
+    return bond._split_skf_pair_name(skf_path.stem)
+
+
+def resolve_homonuclear_skf(skf_dir: Path, sym: str, bond) -> Path:
+    return Path(bond._resolve_skf_path(str(skf_dir), f"{sym}-{sym}"))
 
 
 def get_original_electronic_row_count(skf_path: Path) -> int:
@@ -178,7 +180,7 @@ def parse_expected_homonuclear_metadata(skf_path: Path, bond) -> dict[str, objec
     Heteronuclear files return None because they do not define element-level
     onsite/Hubbard/reference-occupation data.
     """
-    elem_a, elem_b = split_dashed_pair(skf_path)
+    elem_a, elem_b = split_skf_pair(skf_path, bond)
     if elem_a != elem_b:
         return None
 
@@ -298,6 +300,51 @@ def max_error_location(err: torch.Tensor, channel_names: list[str]) -> tuple[flo
     row_idx = flat_idx // n_channels
     channel_idx = flat_idx % n_channels
     return float(err[row_idx, channel_idx].item()), row_idx, channel_names[channel_idx]
+
+
+def format_skf_row(values: list[float]) -> str:
+    return " ".join(f"{value:.8f}" for value in values)
+
+
+def write_minimal_simple_skf(path: Path, *, homonuclear: bool = False) -> list[list[float]]:
+    """Write a tiny simple-format SKF file and return its source electronic rows."""
+    source_rows = [
+        [0.01 * (row + 1) + 0.001 * (col + 1) for col in range(20)]
+        for row in range(3)
+    ]
+    lines = ["0.20 4"]
+    if homonuclear:
+        # Simple homonuclear order: Ed Ep Es SPE Ud Up Us fd fp fs.
+        lines.append("-0.30 -0.20 -0.10 0.0 0.03 0.02 0.01 0.30 0.20 0.10")
+    lines.extend(
+        [
+            "0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0",
+            *[format_skf_row(row) for row in source_rows],
+            "Spline",
+            "2 2.0",
+            "0.0 0.0 0.0",
+            "0.0 1.0 0.0 0.0 0.0 0.0",
+            "1.0 2.0 0.0 0.0 0.0 0.0 0.0 0.0",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n")
+    return source_rows
+
+
+def read_skf_as_matrix(
+    skf_path: Path,
+    bond,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    metadata = make_metadata_tensors(device, dtype)
+    R, channels, _R_rep, _rep_splines, _close_exp = bond.read_skf_table(
+        str(skf_path),
+        *metadata,
+        device=device,
+        dtype=dtype,
+    )
+    return R, bond.channels_to_matrix(channels)
 
 
 # =============================================================================
@@ -455,10 +502,243 @@ def check_one_skf(skf_path: Path, bond, device: torch.device, dtype: torch.dtype
     }
 
 
+def check_simple_canonical_channels(
+    bond,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        skf_path = Path(tmp) / "C-N.skf"
+        source_rows = write_minimal_simple_skf(skf_path)
+        _R, M = read_skf_as_matrix(skf_path, bond, device, dtype)
+
+    if len(bond._CHANNELS) != 40:
+        raise AssertionError(f"_CHANNELS expected 40 entries, got {len(bond._CHANNELS)}")
+    if len(bond._SIMPLE_CHANNELS) != 20:
+        raise AssertionError(f"_SIMPLE_CHANNELS expected 20 entries, got {len(bond._SIMPLE_CHANNELS)}")
+    if len(bond._SIMPLE_TO_EXTENDED) != len(bond._SIMPLE_CHANNELS):
+        raise AssertionError("_SIMPLE_TO_EXTENDED length does not match _SIMPLE_CHANNELS")
+    if M.shape[1] != len(bond._CHANNELS):
+        raise AssertionError(f"simple SKF matrix expected {len(bond._CHANNELS)} channels, got {M.shape[1]}")
+
+    for row_idx, source_row in enumerate(source_rows):
+        for simple_idx, channel_name in enumerate(bond._SIMPLE_CHANNELS):
+            channel_idx = bond._CHANNELS.index(channel_name)
+            mapped_idx = int(bond._SIMPLE_TO_EXTENDED[simple_idx])
+            if mapped_idx != channel_idx:
+                raise AssertionError(
+                    f"_SIMPLE_TO_EXTENDED[{simple_idx}] for {channel_name} expected {channel_idx}, got {mapped_idx}"
+                )
+            got = float(M[row_idx, channel_idx].item())
+            expected = source_row[simple_idx] * EV_PER_HARTREE
+            err = abs(got - expected)
+            if err > ATOL:
+                raise AssertionError(
+                    f"simple row {row_idx} channel {channel_name} expected {expected:.16e}, "
+                    f"got {got:.16e}, err={err:.3e}"
+                )
+
+    simple_channels = set(bond._SIMPLE_CHANNELS)
+    for channel_idx, channel_name in enumerate(bond._CHANNELS):
+        if channel_name in simple_channels:
+            continue
+        values = M[: len(source_rows), channel_idx].abs()
+        max_abs = float(values.max().item())
+        if max_abs > ATOL:
+            raise AssertionError(
+                f"simple SKF non-simple channel {channel_name} expected zero, max_abs={max_abs:.3e}"
+            )
+
+    return {
+        "file": skf_path.name,
+        "rows": len(source_rows),
+        "channels": M.shape[1],
+        "mapped_channels": len(bond._SIMPLE_CHANNELS),
+        "zero_filled_channels": len(bond._CHANNELS) - len(bond._SIMPLE_CHANNELS),
+    }
+
+
+def check_simple_homonuclear_metadata(
+    bond,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        skf_path = Path(tmp) / "C-C.skf"
+        write_minimal_simple_skf(skf_path, homonuclear=True)
+        metadata = make_metadata_tensors(device, dtype)
+        metadata_dict = metadata_tuple_to_dict(metadata)
+        bond.read_skf_table(str(skf_path), *metadata, device=device, dtype=dtype)
+        expected = parse_expected_homonuclear_metadata(skf_path, bond)
+
+    if expected is None:
+        raise AssertionError("temporary simple homonuclear SKF did not produce expected metadata")
+
+    Z = int(expected["Z"])
+    source = skf_path.name
+
+    assert_int_metadata(metadata_dict["N_ORB"], Z, int(expected["N_ORB"]), "N_ORB", source)
+    assert_int_metadata(metadata_dict["MAX_ANG"], Z, int(expected["MAX_ANG"]), "MAX_ANG", source)
+    assert_int_metadata(metadata_dict["MAX_ANG_OCC"], Z, int(expected["MAX_ANG_OCC"]), "MAX_ANG_OCC", source)
+
+    for name in ["TORE", "N_S", "N_P", "N_D", "N_F", "ES", "EP", "ED", "EF", "US", "UP", "UD", "UF"]:
+        assert_float_metadata(metadata_dict[name], Z, float(expected[name]), name, source)
+
+    assert_bool_metadata(metadata_dict["SHELL_PRESENT"], Z, list(expected["SHELL_PRESENT"]), "SHELL_PRESENT", source)
+
+    if float(metadata_dict["N_F"][Z].item()) != 0.0:
+        raise AssertionError("simple homonuclear N_F should be zero")
+    if float(metadata_dict["EF"][Z].item()) != 0.0:
+        raise AssertionError("simple homonuclear EF should be zero")
+    if float(metadata_dict["UF"][Z].item()) != 0.0:
+        raise AssertionError("simple homonuclear UF should be zero")
+
+    return {
+        "file": skf_path.name,
+        "N_ORB": int(metadata_dict["N_ORB"][Z].item()),
+        "N_F": float(metadata_dict["N_F"][Z].item()),
+        "SHELL_PRESENT": [bool(x) for x in metadata_dict["SHELL_PRESENT"][Z].detach().cpu().tolist()],
+    }
+
+
+def check_extended_fixture_channel_width(
+    skf_dir: Path,
+    bond,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict:
+    skf_path = sorted(skf_dir.glob("*.skf"))[0]
+    _R, M = read_skf_as_matrix(skf_path, bond, device, dtype)
+    if M.shape[1] != len(bond._CHANNELS):
+        raise AssertionError(f"{skf_path.name}: expected {len(bond._CHANNELS)} channels, got {M.shape[1]}")
+    return {"file": skf_path.name, "channels": M.shape[1]}
+
+
+def check_pair_name_and_path_helpers(bond) -> dict:
+    if bond._split_skf_pair_name("Eu-Ga") != ("Eu", "Ga"):
+        raise AssertionError("dashed pair name Eu-Ga did not parse to ('Eu', 'Ga')")
+    if bond._split_skf_pair_name("EuGa") != ("Eu", "Ga"):
+        raise AssertionError("compact pair name EuGa did not parse to ('Eu', 'Ga')")
+    if bond._split_skf_pair_name("NN") != ("N", "N"):
+        raise AssertionError("compact pair name NN did not parse to ('N', 'N')")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        dashed = tmp_dir / "Eu-Ga.skf"
+        compact = tmp_dir / "EuGa.skf"
+        dashed.write_text("dashed\n")
+        compact.write_text("compact\n")
+
+        resolved = Path(bond._resolve_skf_path(str(tmp_dir), "Eu-Ga"))
+        if resolved != dashed:
+            raise AssertionError(f"resolver expected dashed path {dashed}, got {resolved}")
+
+        dashed.unlink()
+        resolved = Path(bond._resolve_skf_path(str(tmp_dir), "Eu-Ga"))
+        if resolved != compact:
+            raise AssertionError(f"resolver expected compact fallback {compact}, got {resolved}")
+
+        compact.unlink()
+        resolved = Path(bond._resolve_skf_path(str(tmp_dir), "Eu-Ga"))
+        if resolved != dashed:
+            raise AssertionError(f"resolver expected missing dashed target {dashed}, got {resolved}")
+
+    return {"pairs_checked": ["Eu-Ga", "EuGa", "NN"], "resolver_cases": 3}
+
+
+def check_skipped_shell_errors(bond) -> dict:
+    cases = [
+        ("p-without-s", ("N", False, True, False, False, "p_without_s.skf"), "p-shell basis requires an s shell"),
+        ("d-without-p", ("Ga", True, False, True, False, "d_without_p.skf"), "d-shell basis requires nested s/p/d shells"),
+        ("f-without-d", ("Eu", True, True, False, True, "f_without_d.skf"), "f-shell basis requires nested s/p/d/f shells"),
+    ]
+    for name, args, expected_fragment in cases:
+        try:
+            bond._validate_nested_shells(*args)
+        except ValueError as exc:
+            message = str(exc)
+            if expected_fragment not in message:
+                raise AssertionError(f"{name}: expected message containing {expected_fragment!r}, got {message!r}") from exc
+        else:
+            raise AssertionError(f"{name}: expected ValueError")
+    return {"cases_checked": [name for name, _args, _fragment in cases]}
+
+
+def check_simple_spline_reconstruction(
+    bond,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        skf_path = Path(tmp) / "C-N.skf"
+        source_rows = write_minimal_simple_skf(skf_path)
+        R, M = read_skf_as_matrix(skf_path, bond, device, dtype)
+
+    if M.shape[1] != len(bond._CHANNELS):
+        raise AssertionError(f"simple spline matrix expected {len(bond._CHANNELS)} channels, got {M.shape[1]}")
+
+    return check_source_grid_reconstruction(
+        "temporary-simple-format.skf",
+        bond,
+        R,
+        M,
+        len(source_rows),
+        bond._CHANNELS,
+    )
+
+
+def check_source_grid_reconstruction(
+    name: str,
+    bond,
+    R: torch.Tensor,
+    M: torch.Tensor,
+    original_rows: int,
+    channel_names: list[str],
+) -> dict:
+    coeffs = bond.cubic_spline_coeffs(R, M)
+    a = coeffs[:, :, 0]
+    b = coeffs[:, :, 1]
+    c = coeffs[:, :, 2]
+    d = coeffs[:, :, 3]
+
+    left_err = (a[:original_rows] - M[:original_rows]).abs()
+    h = (R[1:] - R[:-1]).unsqueeze(1)
+    right_reconstructed = a + b * h + c * h**2 + d * h**3
+    if original_rows > 1:
+        right_err = (right_reconstructed[: original_rows - 1] - M[1:original_rows]).abs()
+    else:
+        right_err = torch.zeros((0, M.shape[1]), dtype=M.dtype, device=M.device)
+
+    left_max, left_row, left_channel = max_error_location(left_err, channel_names)
+    if right_err.numel() > 0:
+        right_max, right_row, right_channel = max_error_location(right_err, channel_names)
+        right_target_row = right_row + 1
+    else:
+        right_max, right_target_row, right_channel = 0.0, 0, "none"
+
+    if left_max > ATOL or right_max > ATOL:
+        raise AssertionError(
+            f"{name}: source-grid reconstruction failed: "
+            f"left_max={left_max:.3e} at row {left_row} channel {left_channel}, "
+            f"right_max={right_max:.3e} at target row {right_target_row} channel {right_channel}"
+        )
+
+    return {
+        "file": name,
+        "original_rows": original_rows,
+        "left_max": left_max,
+        "left_row": left_row,
+        "left_channel": left_channel,
+        "right_max": right_max,
+        "right_target_row": right_target_row,
+        "right_channel": right_channel,
+    }
+
+
 def collect_elements_from_skf_dir(skf_dir: Path, bond) -> list[str]:
     elements = set()
     for skf_path in skf_dir.glob("*.skf"):
-        elem_a, elem_b = split_dashed_pair(skf_path)
+        elem_a, elem_b = split_skf_pair(skf_path, bond)
         if elem_a not in bond.symbol_to_number:
             raise ValueError(f"Unknown element {elem_a} in {skf_path.name}")
         if elem_b not in bond.symbol_to_number:
@@ -523,7 +803,7 @@ def check_get_skf_tensors_metadata(skf_dir: Path, bond, device: torch.device) ->
 
     checked = 0
     for sym in elements:
-        homonuclear = skf_dir / f"{sym}-{sym}.skf"
+        homonuclear = resolve_homonuclear_skf(skf_dir, sym, bond)
         if not homonuclear.is_file():
             continue
         expected = parse_expected_homonuclear_metadata(homonuclear, bond)
@@ -566,6 +846,79 @@ def run_bond_integral_tests(skf_dir: Path, bond, device: torch.device, dtype: to
     failures = []
     metadata_count = 0
 
+    try:
+        simple_result = check_simple_canonical_channels(bond, device, dtype)
+        print(
+            "PASS temporary simple-format canonicalization: "
+            f"rows={simple_result['rows']}, "
+            f"channels={simple_result['channels']}, "
+            f"mapped_channels={simple_result['mapped_channels']}, "
+            f"zero_filled_channels={simple_result['zero_filled_channels']}"
+        )
+    except Exception as exc:
+        failures.append({"file": "temporary-simple-format.skf", "error": repr(exc)})
+        print(f"FAIL temporary simple-format canonicalization: {exc!r}")
+
+    try:
+        simple_meta_result = check_simple_homonuclear_metadata(bond, device, dtype)
+        print(
+            "PASS temporary simple-format homonuclear metadata: "
+            f"{simple_meta_result['file']} "
+            f"N_ORB={simple_meta_result['N_ORB']}, "
+            f"N_F={simple_meta_result['N_F']}, "
+            f"SHELL_PRESENT={simple_meta_result['SHELL_PRESENT']}"
+        )
+    except Exception as exc:
+        failures.append({"file": "temporary-simple-homonuclear-metadata", "error": repr(exc)})
+        print(f"FAIL temporary simple-format homonuclear metadata: {exc!r}")
+
+    try:
+        extended_result = check_extended_fixture_channel_width(skf_dir, bond, device, dtype)
+        print(
+            "PASS extended fixture parser boundary: "
+            f"{extended_result['file']} channels={extended_result['channels']}"
+        )
+    except Exception as exc:
+        failures.append({"file": "extended-fixture-channel-width", "error": repr(exc)})
+        print(f"FAIL extended fixture parser boundary: {exc!r}")
+
+    try:
+        pair_result = check_pair_name_and_path_helpers(bond)
+        print(
+            "PASS compact/dashed SKF helper behavior: "
+            f"pairs={pair_result['pairs_checked']}, "
+            f"resolver_cases={pair_result['resolver_cases']}"
+        )
+    except Exception as exc:
+        failures.append({"file": "compact-dashed-resolver", "error": repr(exc)})
+        print(f"FAIL compact/dashed SKF helper behavior: {exc!r}")
+
+    try:
+        skipped_result = check_skipped_shell_errors(bond)
+        print(f"PASS skipped-shell rejection: cases={skipped_result['cases_checked']}")
+    except Exception as exc:
+        failures.append({"file": "skipped-shell-rejection", "error": repr(exc)})
+        print(f"FAIL skipped-shell rejection: {exc!r}")
+
+    try:
+        simple_spline_result = check_simple_spline_reconstruction(bond, device, dtype)
+        print(
+            "PASS temporary simple-format source-grid spline reconstruction: "
+            f"rows={simple_spline_result['original_rows']}, "
+            f"channels={len(bond._CHANNELS)}, "
+            f"left_max={simple_spline_result['left_max']:.3e} "
+            f"at row {simple_spline_result['left_row']} channel {simple_spline_result['left_channel']}, "
+            f"right_max={simple_spline_result['right_max']:.3e} "
+            f"at target row {simple_spline_result['right_target_row']} "
+            f"channel {simple_spline_result['right_channel']}"
+        )
+    except Exception as exc:
+        failures.append({"file": "temporary-simple-format-spline", "error": repr(exc)})
+        print(f"FAIL temporary simple-format source-grid spline reconstruction: {exc!r}")
+
+    print()
+    print(f"Source-grid spline reconstruction for {len(skf_files)} f-orbital SKF fixtures:")
+
     for skf_path in skf_files:
         try:
             result = check_one_skf(skf_path, bond, device, dtype)
@@ -597,7 +950,9 @@ def run_bond_integral_tests(skf_dir: Path, bond, device: torch.device, dtype: to
                 f"MAX_ANG={md['MAX_ANG']}, "
                 f"MAX_ANG_OCC={md['MAX_ANG_OCC']}, "
                 f"SHELL_PRESENT={md['SHELL_PRESENT']}, "
-                f"N=[s={md['N_S']}, p={md['N_P']}, d={md['N_D']}, f={md['N_F']}]"
+                f"N=[s={md['N_S']}, p={md['N_P']}, d={md['N_D']}, f={md['N_F']}], "
+                f"EF={md['EF']:.8e}, "
+                f"UF={md['UF']:.8e}"
             )
 
         if not result["passed"]:
@@ -674,7 +1029,7 @@ def check_constants_against_expected(const, skf_dir: Path, bond, elements: list[
 
     checked = 0
     for sym in elements:
-        homonuclear = skf_dir / f"{sym}-{sym}.skf"
+        homonuclear = resolve_homonuclear_skf(skf_dir, sym, bond)
         if not homonuclear.is_file():
             continue
 
@@ -842,7 +1197,7 @@ def expected_metadata_by_element(skf_dir: Path, bond, elements: list[str]) -> di
     """Return independently parsed homonuclear metadata for every test element."""
     out: dict[str, dict[str, object]] = {}
     for sym in elements:
-        homonuclear = skf_dir / f"{sym}-{sym}.skf"
+        homonuclear = resolve_homonuclear_skf(skf_dir, sym, bond)
         if not homonuclear.is_file():
             raise AssertionError(f"Missing homonuclear SKF needed for Structure test: {homonuclear.name}")
         expected = parse_expected_homonuclear_metadata(homonuclear, bond)

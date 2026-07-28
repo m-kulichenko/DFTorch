@@ -1,0 +1,6 @@
+REMARK  Step 0, Etot = -8.992569 eV, Epot = -9.031347 eV, Ekin = 0.038778 eV, T = 150.00 K, NS = 2.0000, Res = 0.000000
+REMARK  ATOM columns use VX VY VZ in place of X Y Z; appended columns are q and n
+MODEL            0
+ATOM      1  O   MOL A   1       0.005  -0.000   0.000  1.00  0.00           O    0.0000    0.0000
+ATOM      2  O   MOL A   1      -0.005  -0.000  -0.000  1.00  0.00           O   -0.0000   -0.0000
+ENDMDL
