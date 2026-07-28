@@ -1,0 +1,4 @@
+
+# GSD local settings (per-developer, not shared)
+.planning/config.json
+.planning/research/.cache/
