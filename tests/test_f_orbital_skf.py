@@ -337,18 +337,85 @@ def test_sk_channel_lookup_matches_bond_integral_order():
         else:
             raise AssertionError("Unknown channel names must raise KeyError")
 
-        assert sk_mod.F_ANGULAR_FORMULAS_AVAILABLE is False, (
-            "f angular formulas must stay disabled until the source lock lands"
-        )
-        assert sk_mod.PAPER_F_AO_ORDER is None
-        assert sk_mod.PAPER_TO_STRUCTURE_F_PERMUTATION is None
-        assert sk_mod.PAPER_TO_STRUCTURE_F_SIGN is None
-
         structure_mod = validation.load_dftorch_module(project_root, "Structure")
         assert (
             tuple(sk_mod.STRUCTURE_F_AO_ORDER)
             == tuple(structure_mod.AO_LABEL_TEMPLATE[9:16])
         ), "STRUCTURE_F_AO_ORDER must mirror Structure.AO_LABEL_TEMPLATE offsets 9..15"
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_f_angular_formula_source_lock():
+    """HSK-03..HSK-06 / D-03, D-04, D-05: the approved source lock is recorded.
+
+    Checkpoint 03-01-02 required a human to supply and confirm the f-electron
+    Slater-Koster tables before any formula could be hard-coded.  This test
+    pins the recorded provenance and the paper-to-Structure adapter so a later
+    edit cannot quietly swap the source or reorder the f block.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        structure_mod = validation.load_dftorch_module(project_root, "Structure")
+
+        source = sk_mod.F_FORMULA_SOURCE
+        assert source["doi"] == "10.1088/0022-3719/13/4/016", source["doi"]
+        assert source["title"] == "Slater-Koster tables for f electrons"
+        assert "Takegahara" in source["authors"], source["authors"]
+        assert "Aoki" in source["authors"] and "Yanase" in source["authors"]
+        assert "13 (1980) 583-588" in source["journal"], source["journal"]
+        assert "03-SOURCE-LOCK.md" in source["record"], source["record"]
+
+        record = project_root / source["record"]
+        assert record.is_file(), f"source-lock record missing at {record}"
+        record_text = record.read_text(encoding="utf-8")
+        assert source["doi"] in record_text
+        assert "APPROVED" in record_text
+
+        paper = tuple(sk_mod.PAPER_F_AO_ORDER)
+        struct = tuple(sk_mod.STRUCTURE_F_AO_ORDER)
+        perm = tuple(sk_mod.PAPER_TO_STRUCTURE_F_PERMUTATION)
+        sign = tuple(sk_mod.PAPER_TO_STRUCTURE_F_SIGN)
+
+        assert len(paper) == 7 and len(perm) == 7 and len(sign) == 7
+        assert sorted(perm) == list(range(7)), f"adapter is not a permutation: {perm}"
+        assert set(paper) == set(struct), "paper and Structure f bases differ"
+
+        # The paper prints xyz (A_2u) first; Structure.py keeps it last.
+        assert paper[0] == "fxyz"
+        assert struct[-1] == "fxyz"
+        assert perm == (1, 2, 3, 4, 5, 6, 0), perm
+
+        # Applying the adapter to the paper order must reproduce Structure order.
+        assert tuple(paper[perm[i]] for i in range(7)) == struct
+
+        # Same Cartesian polynomials and normalisation => no sign flips.
+        assert sign == (1.0,) * 7, sign
+
+        # Structure.py's AO order is locked and must not have moved.
+        assert tuple(structure_mod.AO_LABEL_TEMPLATE) == (
+            "s",
+            "px",
+            "py",
+            "pz",
+            "dxy",
+            "dyz",
+            "dzx",
+            "dx2_y2",
+            "dz2",
+            "fx3",
+            "fy3",
+            "fz3",
+            "fx_y2_z2",
+            "fy_z2_x2",
+            "fz_x2_y2",
+            "fxyz",
+        )
 
         return []
 

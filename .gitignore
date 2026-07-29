@@ -8,3 +8,10 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .tmp_f_orbital_validation/
+
+# Copyrighted literature used to source-lock the f angular tables.
+# The transcription lives in src/dftorch/_slater_koster_pair.py and the
+# provenance record in .planning/phases/03-*/03-SOURCE-LOCK.md; the articles
+# themselves must never be committed.
+*.pdf
+S002199918471014X.htm

@@ -102,17 +102,71 @@ STRUCTURE_F_AO_ORDER: Final[tuple[str, ...]] = (
     "fxyz",
 )
 
-# The following stay ``None`` until the f-electron Slater-Koster paper tables are
-# supplied and verified by a human (see the Phase 3 source-lock checkpoint).
-# They must record, in order: the paper's own f AO ordering, the permutation
-# that maps paper row/column positions onto ``STRUCTURE_F_AO_ORDER``, and the
-# per-orbital sign applied during that mapping.  Populating them by guesswork
-# would produce numerically plausible but physically wrong f blocks.
-PAPER_F_AO_ORDER: tuple[str, ...] | None = None
-PAPER_TO_STRUCTURE_F_PERMUTATION: tuple[int, ...] | None = None
-PAPER_TO_STRUCTURE_F_SIGN: tuple[float, ...] | None = None
+# ---------------------------------------------------------------------------
+# Source lock (Phase 3 checkpoint 03-01-02, human-approved)
+# ---------------------------------------------------------------------------
+# Every f angular formula in this module is transcribed from:
+#
+#   K. Takegahara, Y. Aoki and A. Yanase,
+#   "Slater-Koster tables for f electrons",
+#   J. Phys. C: Solid State Phys. 13 (1980) 583-588,
+#   DOI 10.1088/0022-3719/13/4/016.
+#
+# Table 1 (p585) fixes the cubic-harmonic basis, Table 2 (pp586-587) gives the
+# s-f, p-f, d-f and f-f entries, equation (13) (p586) fixes the direction
+# cosines, and equations (14)-(15) (p586) supply the orthogonality relation used
+# as the correctness gate.  See
+# ``.planning/phases/03-h0-s-routing-and-f-angular-blocks/03-SOURCE-LOCK.md``
+# for the full provenance record, including the rejection of Sharma,
+# Phys. Rev. B 19, 2813 (1979) as a primary source and the known misprints in
+# Lendi (1974) and Sharma (1979) that must not be copied.
+F_FORMULA_SOURCE: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "title": "Slater-Koster tables for f electrons",
+        "authors": "K. Takegahara, Y. Aoki, A. Yanase",
+        "journal": "J. Phys. C: Solid State Phys. 13 (1980) 583-588",
+        "doi": "10.1088/0022-3719/13/4/016",
+        "tables": "Table 1 (p585), Table 2 (pp586-587)",
+        "direction_cosines": "equation (13), p586",
+        "orthogonality_check": "equations (14)-(15), p586",
+        "record": (
+            ".planning/phases/03-h0-s-routing-and-f-angular-blocks/"
+            "03-SOURCE-LOCK.md"
+        ),
+    }
+)
+
+#: Table 2 row/column order for the f shell, as printed in the paper.  ``xyz``
+#: (the A_2u cubic harmonic) is listed first, then the three T_1u harmonics,
+#: then the three T_2u harmonics.  The Cartesian forms are exactly those of
+#: ``Structure.AO_LABEL_TEMPLATE`` offsets 9..15, so the adapter below is a pure
+#: reordering rather than a change of basis.
+PAPER_F_AO_ORDER: Final[tuple[str, ...]] = (
+    "fxyz",  # A_2u        xyz
+    "fx3",  # T_1u alpha  x(5x^2 - 3r^2)
+    "fy3",  # T_1u beta   y(5y^2 - 3r^2)
+    "fz3",  # T_1u gamma  z(5z^2 - 3r^2)
+    "fx_y2_z2",  # T_2u xi     x(y^2 - z^2)
+    "fy_z2_x2",  # T_2u eta    y(z^2 - x^2)
+    "fz_x2_y2",  # T_2u zeta   z(x^2 - y^2)
+)
+
+#: ``PAPER_TO_STRUCTURE_F_PERMUTATION[i]`` is the *paper* index of the orbital
+#: that sits at ``STRUCTURE_F_AO_ORDER[i]``.  Structure.py lists ``fxyz`` last,
+#: the paper lists it first; everything else keeps its relative order.
+PAPER_TO_STRUCTURE_F_PERMUTATION: Final[tuple[int, ...]] = (1, 2, 3, 4, 5, 6, 0)
+
+#: Per-orbital sign applied while permuting.  The paper's cubic harmonics are
+#: defined with the same Cartesian polynomials and the same positive
+#: normalisation constants as ``Structure.AO_LABEL_TEMPLATE``, so no orbital
+#: needs a sign flip.  This vector exists so that a future source with a
+#: different phase convention can be adapted without touching the formulas.
+PAPER_TO_STRUCTURE_F_SIGN: Final[tuple[float, ...]] = (1.0,) * 7
 
 #: ``True`` only once source-locked s-f/p-f/d-f/f-f angular formulas exist.
+#: The source lock (checkpoint 03-01-02) is approved and recorded above; this
+#: flag additionally requires the transcribed formulas to be implemented, which
+#: happens further down in this module.
 F_ANGULAR_FORMULAS_AVAILABLE: bool = False
 
 
