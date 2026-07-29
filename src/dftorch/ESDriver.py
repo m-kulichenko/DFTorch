@@ -1,3 +1,4 @@
+import contextlib
 import math
 import time
 
@@ -8,6 +9,7 @@ from dftorch._spin import get_h_spin, get_spin_energy #For charge unbinding
 
 from ._coulomb_matrix import coulomb_matrix_vectorized
 from ._dftd3 import create_dftd3 #DFTB 3 correction
+from ._dm_fermi_x import dm_fermi_x #single diagonalization + Fermi occupations
 from ._energy import energy #returns energy decomposed into band, coulomb, dipole, entropy
 from ._forces import Forces, Forces_PME, forces_spin #Gets forces
 from ._forces_batch import forces_batch
@@ -93,9 +95,18 @@ class ESDriver(torch.nn.Module):
         const : Constants
             Slater-Koster parameters and element data.
         do_scf : bool, default True
-            If True, run the self-consistent charge (SCC) loop. If False,
-            evaluate energy and forces at the current charge state (useful for
-            non-SCC DFTB or for shadow-energy MD restart steps).
+            If True, run the self-consistent charge (SCC) loop. If False, run
+            the single-shot (non-SCC, DFTB1) path: build H0/S, perform one
+            non-self-consistent diagonalization at the reference charge state,
+            and report ``e_tot = e_elec_tot + e_repulsion`` — band structure
+            plus nuclear repulsion, with **no** charge-fluctuation Coulomb term
+            (``e_coul`` is exactly 0). Mulliken charges are still recorded on
+            the structure as a diagnostic but are deliberately excluded from
+            the energy, because a single unconverged iterate is not a charge
+            state (Phase 4 decision D-11). Solvation, D3 dispersion and spin
+            are likewise not evaluated on this path — all are charge-dependent
+            — and no forces are computed by either branch; call
+            :meth:`calc_forces` explicitly for those.
         verbose : bool, default False
             If True, print timing info from neighbor-list construction.
 
@@ -611,6 +622,107 @@ class ESDriver(torch.nn.Module):
                 structure.e_tot = structure.e_tot + structure.e_d3
             else:
                 structure.e_d3 = 0.0
+
+        else:
+            # ── Single-shot (non-SCC / DFTB1) energy — Phase 4, D-11 ────────
+            #
+            # One non-self-consistent diagonalization at the reference charge
+            # state. H0, S, Z and e_repulsion are already populated above, so
+            # everything this branch needs is in place.
+            #
+            # No Coulomb term is added. `energy()` is called with C=None and
+            # dq_p1=None, which selects its `Ecoul = 0` arm. This is a
+            # deliberate definition, not an omission: the charges available
+            # here are first-iterate Mulliken charges with no self-consistency
+            # behind them (q_Eu ~ -2.7 for the Eu-N reference case, drifting to
+            # -2.99 at 4 A — not even neutral at separation). Feeding those
+            # into the electrostatic energy would not produce a single-shot
+            # energy, it would produce one broken SCF step, and it destroys the
+            # binding curve. Self-consistent SCF for f systems is deferred to
+            # its own phase.
+            _no_grad_ctx = (
+                contextlib.nullcontext()
+                if self.dftorch_params.get("SCF_GRAD", False)
+                else torch.no_grad()
+            )
+            with _no_grad_ctx:
+                # Orbital -> atom map, as in _scf.SCFx.
+                atom_ids = torch.repeat_interleave(
+                    torch.arange(structure.Nats, device=structure.H0.device),
+                    structure.n_orbitals_per_atom,
+                )
+
+                # External-field (dipole) term, symmetrised against S exactly
+                # as SCFx does. Added to a *local* Hamiltonian only: the
+                # subsequent energy() call must receive the unmodified
+                # structure.H0.
+                Hdipole = torch.diag(
+                    -structure.RX[atom_ids] * structure.e_field[0]
+                    - structure.RY[atom_ids] * structure.e_field[1]
+                    - structure.RZ[atom_ids] * structure.e_field[2]
+                )
+                Hdipole = 0.5 * Hdipole @ structure.S + 0.5 * structure.S @ Hdipole
+                H_single_shot = structure.H0 + Hdipole
+
+                # The single diagonalization.
+                Dorth, Q, e, f, mu0 = dm_fermi_x(
+                    structure.Z.T @ H_single_shot @ structure.Z,
+                    structure.Te,
+                    structure.Nocc,
+                    mu_0=None,
+                    eps=1e-9,
+                    MaxIt=50,
+                )
+                structure.D = structure.Z @ Dorth @ structure.Z.T
+                structure.e = e
+                structure.f = f
+                structure.mu0 = mu0
+
+                # Diagnostic Mulliken charges. Recorded for inspection only —
+                # see the note above on why they stay out of the energy.
+                DS = 2 * torch.diag(structure.D @ structure.S)
+                structure.q = -1.0 * structure.Znuc
+                structure.q.scatter_add_(0, atom_ids, DS)
+
+                (
+                    structure.e_elec_tot,
+                    structure.e_band0,
+                    structure.e_coul,
+                    structure.e_dipole,
+                    structure.e_entropy,
+                    structure.s_ent,
+                ) = energy(
+                    structure.H0,
+                    structure.Hubbard_U,
+                    structure.e_field,
+                    structure.D0,
+                    None,  # C: no Coulomb matrix (D-11)
+                    None,  # dq_p1: no PME charge response (D-11)
+                    structure.D,
+                    structure.q,
+                    structure.RX,
+                    structure.RY,
+                    structure.RZ,
+                    structure.f,
+                    structure.Te,
+                    None,  # dU_dq: no DFTB3 correction on this path
+                    thirdorder=None,
+                )
+
+                # Corrections the SCF branch may add are all charge-dependent
+                # and are therefore not evaluated here. They are pinned to zero
+                # (rather than left unset) so a caller inspecting the structure
+                # after a single-shot run sees the same attribute set the SCF
+                # branch produces instead of an AttributeError.
+                structure.e_spin = 0.0
+                structure.e_gb = 0.0
+                structure.e_sasa = 0.0
+                structure.e_solv = 0.0
+                structure.e_d3 = 0.0
+                structure.gbsa = None
+                structure.dftd3 = None
+
+                structure.e_tot = structure.e_elec_tot + structure.e_repulsion
 
     def calc_forces(self, structure, const):
         # Phase 3 supplies source-locked f angular *values* only; dH0/dS are
