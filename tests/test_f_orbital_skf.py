@@ -35,11 +35,25 @@ def load_validation_script():
     return module
 
 
-def write_xyz(path: Path, elements: list[str], spacing: float = 1.5) -> None:
-    """Write atoms evenly spaced along +x, so (L, M, N) = (1, 0, 0) for every pair."""
+def write_xyz(
+    path: Path, elements: list[str], spacing: float = 1.5, axis: str = "x"
+) -> None:
+    """Write atoms evenly spaced along ``axis``.
+
+    With the default ``axis="x"`` every ordered pair (I, J) with J after I has
+    direction cosines (L, M, N) = (1, 0, 0), which is what the metadata and
+    channel regressions rely on. ``axis="z"`` gives (0, 0, 1) and is what the
+    hand-calculated f block tests use, because the Takegahara formulas collapse
+    to clean closed forms there.
+    """
+    offsets = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}[axis]
     lines = [str(len(elements)), "metadata regression"]
     for idx, sym in enumerate(elements):
-        lines.append(f"{sym} {spacing * idx:.8f} 0.00000000 0.00000000")
+        step = spacing * idx
+        lines.append(
+            f"{sym} {step * offsets[0]:.8f} {step * offsets[1]:.8f} "
+            f"{step * offsets[2]:.8f}"
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -99,7 +113,7 @@ def build_structure(validation, project_root: Path, skf_dir: Path, xyz_path: Pat
     )
 
 
-def build_h0_and_s(validation, project_root: Path, skf_dir: Path, elements: list[str], xyz_path: Path, *, rcut: float = 10.0, spacing: float = 1.5):
+def build_h0_and_s(validation, project_root: Path, skf_dir: Path, elements: list[str], xyz_path: Path, *, rcut: float = 10.0, spacing: float = 1.5, axis: str = "x"):
     """Directly assemble single-system H0/S for ``elements`` without running SCF.
 
     Mirrors the ``ESDriver.forward`` call sequence (neighbor list, then
@@ -109,7 +123,7 @@ def build_h0_and_s(validation, project_root: Path, skf_dir: Path, elements: list
     const = validation.build_test_constants(project_root, skf_dir, None, elements, xyz_path)
     # Constants only needs the species list; rewrite the geometry so callers can
     # pick a separation that lies inside the fixture's radial grid.
-    write_xyz(xyz_path, elements, spacing=spacing)
+    write_xyz(xyz_path, elements, spacing=spacing, axis=axis)
     struct = build_structure(validation, project_root, skf_dir, xyz_path, const)
 
     nnl_mod = validation.load_dftorch_module(project_root, "_nearestneighborlist")
@@ -640,6 +654,220 @@ def test_f_angular_orthogonality_identity():
     assert run_with_float64(check) == []
 
 
+# ---------------------------------------------------------------------------
+# Hand-calculated angular constants (D-07 / D-08 / HSK-08)
+# ---------------------------------------------------------------------------
+# Evaluated by hand from the printed Takegahara Table 2 entries plus the p586
+# cyclic rule E_{sA,sB}(l, m, n) = E_{A,B}(m, n, l), then reordered from paper
+# order into STRUCTURE_F_AO_ORDER:
+#
+#     0 fx3        1 fy3        2 fz3
+#     3 fx_y2_z2   4 fy_z2_x2   5 fz_x2_y2   6 fxyz
+#
+# Along a coordinate axis two of the three direction cosines vanish and almost
+# every term drops out, so these matrices can be re-derived on paper in a few
+# lines. Each block is additionally consistent with the projector identities
+# checked in test_f_angular_orthogonality_identity (e.g. the p-f pi rows below
+# have norm 3/8 + 5/8 = 1 and the s/p/d row projectors sum to the identity).
+
+_A = 3.0 / 8.0
+_B = 5.0 / 8.0
+_R38 = (3.0 / 8.0) ** 0.5
+_R58 = (5.0 / 8.0) ** 0.5
+_R3_2 = (3.0**0.5) / 2.0
+_R15_8 = (15.0**0.5) / 8.0
+
+
+def _axis_expectations():
+    """Hand-derived angular blocks keyed by axis.
+
+    Each entry maps a shell pair to a list of ``(channel, row, col, value)``;
+    every unlisted position must be exactly zero.
+    """
+    return {
+        # --------------------------------------------------------- +z axis
+        # (l, m, n) = (0, 0, 1)
+        "z": {
+            # E_s,z(5z^2-3r^2) = 1/2 * n(5n^2 - 3) = 1; all other columns carry
+            # a factor l, m, or (m^2 - n^2)*l and vanish.
+            "sf": [(0, 0, 2, 1.0)],
+            # px: E_x,x(5x^2-3r^2) = -sqrt(3/8)(5l^2-1)(l^2-1) = -sqrt(3/8) (pi)
+            #     E_x,x(y^2-z^2)   = -sqrt(5/8)(3l^2-1)(m^2-n^2) = -sqrt(5/8)
+            # py: cyclic image; pz: E_z,z(5z^2-3r^2) = 1/2 n^2(5n^2-3) = sigma.
+            "pf": [
+                (1, 0, 0, -_R38),
+                (1, 0, 3, -_R58),
+                (1, 1, 1, -_R38),
+                (1, 1, 4, +_R58),
+                (0, 2, 2, 1.0),
+            ],
+            # dxy couples only to xyz: E_xy,xyz = n(3l^2m^2 + 2n^2 - 1) = delta.
+            # dyz / dzx are its cyclic images; the E_g rows keep one delta each:
+            # E_x2-y2,z(x^2-y^2) = 1/4 n[3(l^2-m^2)^2 + 8n^2 - 4] = 1,
+            # E_3z2-r2,z(5z^2-3r^2) = 1/4 n(3n^2-1)(5n^2-3) = sigma.
+            "df": [
+                (2, 0, 6, 1.0),
+                (1, 1, 1, -_R38),
+                (1, 1, 4, +_R58),
+                (1, 2, 0, -_R38),
+                (1, 2, 3, -_R58),
+                (2, 3, 5, 1.0),
+                (0, 4, 2, 1.0),
+            ],
+            # f-f. E_z(5z^2-3r^2),z(5z^2-3r^2) = 1/4 n^2(5n^2-3)^2 = sigma;
+            # E_xyz,xyz and E_z(x^2-y^2),z(x^2-y^2) collapse to delta; the
+            # T_1u/T_2u pairs perpendicular to z mix pi and phi in a rank-1
+            # 2x2 block with trace 1.
+            "ff": [
+                (1, 0, 0, _A),
+                (3, 0, 0, _B),
+                (1, 0, 3, +_R15_8),
+                (3, 0, 3, -_R15_8),
+                (1, 3, 0, +_R15_8),
+                (3, 3, 0, -_R15_8),
+                (1, 3, 3, _B),
+                (3, 3, 3, _A),
+                (1, 1, 1, _A),
+                (3, 1, 1, _B),
+                (1, 1, 4, -_R15_8),
+                (3, 1, 4, +_R15_8),
+                (1, 4, 1, -_R15_8),
+                (3, 4, 1, +_R15_8),
+                (1, 4, 4, _B),
+                (3, 4, 4, _A),
+                (0, 2, 2, 1.0),
+                (2, 5, 5, 1.0),
+                (2, 6, 6, 1.0),
+            ],
+        },
+        # --------------------------------------------------------- +x axis
+        # (l, m, n) = (1, 0, 0)
+        "x": {
+            "sf": [(0, 0, 0, 1.0)],
+            "pf": [
+                (0, 0, 0, 1.0),
+                (1, 1, 1, -_R38),
+                (1, 1, 4, -_R58),
+                (1, 2, 2, -_R38),
+                (1, 2, 5, +_R58),
+            ],
+            # E_xy,y(5y^2-3r^2) = -sqrt(3/8) l(5m^2-1)(2m^2-1) = -sqrt(3/8);
+            # E_xy,y(z^2-x^2)   = -sqrt(5/8) l[(6m^2-1)(n^2-l^2) + 2m^2]
+            #                   = -sqrt(5/8);
+            # E_x2-y2,x(5x^2-3r^2) = 1/4 sqrt(3) l(l^2-m^2)(5l^2-3) = sqrt(3)/2;
+            # E_x2-y2,x(y^2-z^2)   = 1/4 l[3(l^2-m^2)(m^2-n^2) - 4l^2 + 2] = -1/2;
+            # E_3z2-r2,x(5x^2-3r^2) = 1/4 l(3n^2-1)(5l^2-3) = -1/2;
+            # E_3z2-r2,x(y^2-z^2)   = 1/4 sqrt(3) l[(3n^2-1)(m^2-n^2) - 4l^2 + 2]
+            #                       = -sqrt(3)/2.
+            "df": [
+                (1, 0, 1, -_R38),
+                (1, 0, 4, -_R58),
+                (2, 1, 6, 1.0),
+                (1, 2, 2, -_R38),
+                (1, 2, 5, +_R58),
+                (0, 3, 0, +_R3_2),
+                (2, 3, 3, -0.5),
+                (0, 4, 0, -0.5),
+                (2, 4, 3, -_R3_2),
+            ],
+            # Selected f-f entries only; the full block is pinned at +z.
+            "ff_selected": [
+                # E_x(5x^2-3r^2),x(5x^2-3r^2) = 1/4 l^2(5l^2-3)^2 = sigma
+                ((0, 0), {0: 1.0}),
+                # E_z(5z^2-3r^2),z(5z^2-3r^2) = 3/8 (pi) + 5/8 (phi)
+                ((2, 2), {1: _A, 3: _B}),
+                # E_z(x^2-y^2),z(x^2-y^2) = 5/8 (pi) + 3/8 (phi)
+                ((5, 5), {1: _B, 3: _A}),
+                # E_z(x^2-y^2),z(5z^2-3r^2)
+                #   = -sqrt(15)/8 (pi) + sqrt(15)/8 (phi)
+                ((5, 2), {1: -_R15_8, 3: +_R15_8}),
+                # E_xyz,xyz = [1 - 4(l^2m^2 + m^2n^2 + n^2l^2) + 9l^2m^2n^2] = delta
+                ((6, 6), {2: 1.0}),
+            ],
+        },
+        # --------------------------------------------------------- +y axis
+        # (l, m, n) = (0, 1, 0)
+        "y": {
+            "sf": [(0, 0, 1, 1.0)],
+            "pf": [
+                (1, 0, 0, -_R38),
+                (1, 0, 3, +_R58),
+                (0, 1, 1, 1.0),
+                (1, 2, 2, -_R38),
+                (1, 2, 5, -_R58),
+            ],
+        },
+    }
+
+
+def assert_block_equals(block, entries, label, n_channel, n_row, n_col):
+    """``block`` is ``(channel, row, col, P)``; ``entries`` lists the non-zeros."""
+    expected = torch.zeros(n_channel, n_row, n_col, dtype=torch.float64)
+    for channel, row, col, value in entries:
+        expected[channel, row, col] = value
+    for pair in range(block.shape[-1]):
+        error = float((block[..., pair] - expected).abs().max())
+        assert error < 1e-12, (
+            f"{label}: hand-calculated block mismatch, max error {error:.3e}\n"
+            f"got:\n{block[..., pair]}\nexpected:\n{expected}"
+        )
+
+
+def test_f_angular_axis_blocks_match_hand_calculation():
+    """D-07 / D-08 / HSK-08: x, y and z axis blocks against hand calculation.
+
+    Independent of the implementation: every constant here was evaluated by
+    hand from the printed table entries (see the comments above), so agreement
+    means two separate derivations of the same physics coincide.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+
+        axes = {
+            "x": (1.0, 0.0, 0.0),
+            "y": (0.0, 1.0, 0.0),
+            "z": (0.0, 0.0, 1.0),
+        }
+        shapes = {"sf": (1, 1, 7), "pf": (2, 3, 7), "df": (3, 5, 7), "ff": (4, 7, 7)}
+        helpers = {
+            "sf": sk_mod.f_angular_sf,
+            "pf": sk_mod.f_angular_pf,
+            "df": sk_mod.f_angular_df,
+            "ff": sk_mod.f_angular_ff,
+        }
+        expectations = _axis_expectations()
+
+        for axis, (lx, my, nz) in axes.items():
+            L = torch.tensor([lx], dtype=torch.float64)
+            M = torch.tensor([my], dtype=torch.float64)
+            N = torch.tensor([nz], dtype=torch.float64)
+            for key, entries in expectations[axis].items():
+                if key == "ff_selected":
+                    block = helpers["ff"](L, M, N)[..., 0]
+                    for (row, col), channels in entries:
+                        for channel in range(4):
+                            expected = channels.get(channel, 0.0)
+                            actual = float(block[channel, row, col])
+                            assert abs(actual - expected) < 1e-12, (
+                                f"{axis}-axis ff[{channel}, {row}, {col}]: "
+                                f"{actual} != {expected}"
+                            )
+                    continue
+                assert_block_equals(
+                    helpers[key](L, M, N),
+                    entries,
+                    f"{axis}-axis {key}",
+                    *shapes[key],
+                )
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
 def test_f_angular_parity_under_direction_reversal():
     """HSK-08: reversing the bond flips odd-degree angular polynomials.
 
@@ -729,6 +957,225 @@ def test_eu_containing_h0_s_is_finite_shaped_and_symmetric(tmp_path):
             assert float(f_rows_S.abs().max()) > 0.0, (
                 f"{label}: every off-diagonal f entry of S is zero"
             )
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+AO_SHELL_L = tuple([0] + [1] * 3 + [2] * 5 + [3] * 7)
+
+
+def directed_channel_value(validation, project_root, const, struct, i, j, channel_name):
+    """Evaluate one radial channel for the ordered pair (TYPE[i] -> TYPE[j]).
+
+    Uses exactly the interval/offset lookup that ``H0_and_S_vectorized`` uses
+    (``const.R_orb`` plus ``const.coeffs_tensor``), so the test isolates the
+    angular formulas and the AO placement rather than the radial grid.
+    """
+    sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+    channel = sk_mod.sk_channel_index(channel_name)
+
+    dR = torch.sqrt(
+        (struct.RX[j] - struct.RX[i]) ** 2
+        + (struct.RY[j] - struct.RY[i]) ** 2
+        + (struct.RZ[j] - struct.RZ[i]) ** 2
+    )
+    idx = torch.clamp(
+        torch.searchsorted(const.R_orb, dR.reshape(1), right=True) - 1,
+        0,
+        len(const.R_orb),
+    )
+    dx = dR - const.R_orb[idx][0]
+    pair_type = int(const.pair_lookup[int(struct.TYPE[i]), int(struct.TYPE[j])])
+    cs = const.coeffs_tensor[pair_type, idx[0], channel]
+    return cs[0] + cs[1] * dx + cs[2] * dx**2 + cs[3] * dx**3
+
+
+def test_f_block_entries_match_hand_calculated_values(tmp_path):
+    """HSK-03..HSK-06 / HSK-08 / D-08: assembled H0/S f entries, entry by entry.
+
+    A two-atom system aligned with +z makes the angular factors the closed-form
+    constants pinned by test_f_angular_axis_blocks_match_hand_calculation, so
+    every f entry of H0 and S must equal ``sum_k angular_k * radial_k`` with the
+    radial value read from the named 40-channel table. This is what catches a
+    block written at the wrong AO offset, through the wrong channel name, from
+    the wrong pair direction, or with the wrong reverse-direction sign.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        skf_dir = project_root / "tests" / "f_orbital_data"
+
+        expectations = _axis_expectations()["z"]
+
+        def dense(entries, n_channel, n_row, n_col):
+            out = torch.zeros(n_channel, n_row, n_col, dtype=torch.float64)
+            for channel, row, col, value in entries:
+                out[channel, row, col] = value
+            return out
+
+        angular = {
+            "sf": dense(expectations["sf"], 1, 1, 7),
+            "pf": dense(expectations["pf"], 2, 3, 7),
+            "df": dense(expectations["df"], 3, 5, 7),
+            "ff": dense(expectations["ff"], 4, 7, 7),
+        }
+
+        # (label, elements, spacing, blocks to check)
+        # ``blocks`` entries are
+        #   (angular key, channel bases, low-shell AO offset, parity, radial dir)
+        # where parity is (-1) ** (l_low + 3) and the radial direction says which
+        # ordered pair supplies the two-centre integrals: the f atom is atom 0,
+        # so a block with f on the *row* reads the (partner -> f) file.
+        cases = [
+            (
+                "Eu_N",
+                ["Eu", "N"],
+                2.4,
+                [
+                    ("sf", ("sf0",), 0, -1.0),
+                    ("pf", ("pf0", "pf1"), 1, +1.0),
+                ],
+            ),
+            (
+                "Eu_Eu",
+                ["Eu", "Eu"],
+                3.4,
+                [
+                    ("sf", ("sf0",), 0, -1.0),
+                    ("pf", ("pf0", "pf1"), 1, +1.0),
+                    ("df", ("df0", "df1", "df2"), 4, -1.0),
+                    ("ff", ("ff0", "ff1", "ff2", "ff3"), 9, +1.0),
+                ],
+            ),
+        ]
+
+        for label, elements, spacing, blocks in cases:
+            xyz_path = tmp_path / f"handcalc_{label}.xyz"
+            const, struct, H0, dH0, S, dS = build_h0_and_s(
+                validation,
+                project_root,
+                skf_dir,
+                elements,
+                xyz_path,
+                spacing=spacing,
+                axis="z",
+            )
+            i0 = int(struct.H_INDEX_START[0])  # Eu (16 orbitals)
+            j0 = int(struct.H_INDEX_START[1])  # partner
+
+            for matrix, prefix, scale in (
+                (H0, "H", 1.0),
+                (S, "S", 1.0 / 27.21138625),
+            ):
+                for key, bases, low_offset, parity in blocks:
+                    coefficients = angular[key]
+                    radial = [
+                        directed_channel_value(
+                            validation,
+                            project_root,
+                            const,
+                            struct,
+                            1,
+                            0,
+                            f"{prefix}{base}",
+                        )
+                        for base in bases
+                    ]
+                    n_low = coefficients.shape[1]
+                    largest = 0.0
+                    for a in range(n_low):
+                        for b in range(7):
+                            expected = parity * scale * sum(
+                                float(coefficients[k, a, b]) * float(radial[k])
+                                for k in range(len(bases))
+                            )
+                            actual = float(matrix[i0 + 9 + b, j0 + low_offset + a])
+                            assert abs(actual - expected) < 1e-9, (
+                                f"{label} {prefix} {key}[row f{b}, col {low_offset}+{a}]"
+                                f": {actual} != {expected}"
+                            )
+                            largest = max(largest, abs(expected))
+                    # An all-zero block would satisfy the comparison vacuously.
+                    assert largest > 1e-6, (
+                        f"{label} {prefix} {key}: every predicted entry is zero, "
+                        "so this block proves nothing"
+                    )
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_f_containing_pair_atom_order_reversal(tmp_path):
+    """HSK-08 / D-07: swapping the two atoms flips odd-parity blocks only.
+
+    Building Eu-N and N-Eu with both geometries along +z puts the Eu -> N bond
+    along +z in one case and along -z in the other, so every AO block must pick
+    up (-1) ** (l_a + l_b). This is the convention the reverse-direction writes
+    in Slater_Koster_Pair_SKF_vectorized rely on.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        skf_dir = project_root / "tests" / "f_orbital_data"
+        spacing = 2.4
+
+        _, struct_a, H0_a, _, S_a, _ = build_h0_and_s(
+            validation,
+            project_root,
+            skf_dir,
+            ["Eu", "N"],
+            tmp_path / "order_eu_n.xyz",
+            spacing=spacing,
+            axis="z",
+        )
+        _, struct_b, H0_b, _, S_b, _ = build_h0_and_s(
+            validation,
+            project_root,
+            skf_dir,
+            ["N", "Eu"],
+            tmp_path / "order_n_eu.xyz",
+            spacing=spacing,
+            axis="z",
+        )
+
+        # Eu is atom 0 in case A and atom 1 in case B.
+        eu_a = int(struct_a.H_INDEX_START[0])
+        n_a = int(struct_a.H_INDEX_START[1])
+        n_b = int(struct_b.H_INDEX_START[0])
+        eu_b = int(struct_b.H_INDEX_START[1])
+
+        assert struct_a.HDIM == struct_b.HDIM == 20
+
+        checked = 0
+        nontrivial = 0
+        for matrix_a, matrix_b, label in ((H0_a, H0_b, "H0"), (S_a, S_b, "S")):
+            for eu_ao in range(16):
+                for n_ao in range(4):
+                    parity = (-1.0) ** (AO_SHELL_L[eu_ao] + AO_SHELL_L[n_ao])
+                    value_a = float(matrix_a[eu_a + eu_ao, n_a + n_ao])
+                    value_b = float(matrix_b[eu_b + eu_ao, n_b + n_ao])
+                    assert abs(value_b - parity * value_a) < 1e-9, (
+                        f"{label}[Eu {eu_ao}, N {n_ao}]: reversing the bond gave "
+                        f"{value_b} but parity {parity:+.0f} predicts "
+                        f"{parity * value_a}"
+                    )
+                    checked += 1
+                    if abs(value_a) > 1e-6:
+                        nontrivial += 1
+
+        assert checked == 2 * 16 * 4
+        assert nontrivial > 0, "the Eu-N coupling block is entirely zero"
+
+        # Diagonal on-site terms are order-independent.
+        assert torch.allclose(
+            torch.diagonal(H0_a)[eu_a : eu_a + 16],
+            torch.diagonal(H0_b)[eu_b : eu_b + 16],
+        )
 
         return []
 
