@@ -24,7 +24,9 @@ from ._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
 from ._slater_koster_pair import (
     F_ANGULAR_DERIVATIVES_AVAILABLE,
     F_DERIVATIVE_UNSUPPORTED_MESSAGE,
+    F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE,
     FDerivativeUnsupportedError,
+    FSpinPolarizationUnsupportedError,
 )
 from ._stress import get_total_stress_analytical
 from ._thirdorder import ThirdOrderBatch, create_thirdorder
@@ -57,6 +59,46 @@ def _require_f_derivatives(structure, const, context: str) -> None:
             f"n_orb == 16 (an f-shell element).\n"
             f"{F_DERIVATIVE_UNSUPPORTED_MESSAGE}"
         )
+
+
+def _require_closed_shell_f_system(
+    structure, const, dftorch_params, context: str
+) -> None:
+    """Reject spin-polarized calculations for systems containing f orbitals.
+
+    Phase 4 supports closed-shell occupation only for f systems (decision
+    D-12). Eu 4f7 is genuinely open-shell, so silently returning a closed-shell
+    number for an ``UNRESTRICTED`` request would be wrong physics wearing the
+    costume of a result. See :class:`FSpinPolarizationUnsupportedError`.
+
+    f-free open-shell calculations are an existing supported capability and are
+    deliberately left untouched: this returns early unless the system actually
+    contains a 16-orbital atom.
+
+    ``dftorch_params`` is passed explicitly because this is a module-level
+    function with no ``self`` to read it from.
+    """
+    type_ids = getattr(structure, "TYPE", None)
+    if type_ids is None:
+        return
+    n_orb = getattr(const, "n_orb", None)
+    if n_orb is None:
+        return
+    valid = type_ids >= 0
+    if not bool(valid.any()):
+        return
+    counts = n_orb[type_ids.clamp(min=0)]
+    if not bool((valid & (counts == 16)).any()):
+        return
+    if not dftorch_params.get("UNRESTRICTED", False):
+        return
+    # Only the requested mode and the orbital count are named here; no file
+    # path or parameter value is interpolated (threat T-04-02).
+    raise FSpinPolarizationUnsupportedError(
+        f"{context}: this system contains at least one atom with "
+        f"n_orb == 16 (an f-shell element), and UNRESTRICTED was requested.\n"
+        f"{F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE}"
+    )
 
 
 class ESDriver(torch.nn.Module):
@@ -117,6 +159,14 @@ class ESDriver(torch.nn.Module):
         forces : torch.Tensor, shape (Nats, 3)
             Atomic forces in eV/Å.
         """
+
+        # Phase 4 supports closed-shell occupation only for f systems (D-12).
+        # This is the first statement of forward() on purpose: it must fire for
+        # do_scf=False as well as do_scf=True, and before any neighbor list is
+        # built. Mirrors the calc_forces guard precedent.
+        _require_closed_shell_f_system(
+            structure, const, self.dftorch_params, "ESDriver.forward"
+        )
 
         self.dftorch_params["COULOMB_CUTOFF"] = self.dftorch_params.get(
             "COULOMB_CUTOFF", 10.0

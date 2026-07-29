@@ -256,6 +256,36 @@ F_DERIVATIVE_UNSUPPORTED_MESSAGE: Final[str] = (
 F_ANGULAR_DERIVATIVES_AVAILABLE: bool = False
 
 
+class FSpinPolarizationUnsupportedError(NotImplementedError):
+    """Raised when a spin-polarized calculation is requested for an f system.
+
+    Phase 4 supports **closed-shell occupation only** for f-containing systems.
+    Eu 4f7 is genuinely open-shell, so a closed-shell number returned for a
+    spin-polarized request would be quietly wrong rather than merely
+    approximate — the two treatments differ in physics, not in accuracy.
+    Refusing is therefore the only honest option.
+
+    There is a second, independent reason the open-shell path could not produce
+    a meaningful answer even if it did not fail: ``tests/f_orbital_data/`` ships
+    no ``spinw.txt``, so ``const.w`` is ``None`` for every f system in the
+    fixture set and the spin coupling constants simply do not exist.
+    """
+
+
+F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE: Final[str] = (
+    "Spin-polarized (open-shell) calculations are not supported for f-orbital "
+    "systems.\n"
+    "Doing this properly requires separate alpha/beta density matrices carried "
+    "through the whole SCF path plus shell-resolved spin W coupling extended to "
+    "the f shell; neither exists yet, and neither can be faked by scaling a "
+    "closed-shell result. This work is deferred to its own phase.\n"
+    "Workaround: run the system closed-shell by omitting UNRESTRICTED (or "
+    "setting it False). That is a genuine approximation for an open-shell 4f "
+    "ion and should be reported as such, but it is a defined calculation "
+    "rather than a wrong one."
+)
+
+
 # ---------------------------------------------------------------------------
 # f angular blocks -- transcription of Takegahara Table 2
 # ---------------------------------------------------------------------------
