@@ -20,6 +20,20 @@ except ImportError:
 USE_ALCHEMI: bool = False
 
 
+def _min_image_sort_key(
+    ri: torch.Tensor,
+    j_all: torch.Tensor,
+    d2_all: torch.Tensor,
+    n_atoms: int,
+    d2_max: float,
+) -> torch.Tensor:
+    """Composite sort key ordering neighbor pairs by (i, then j, then distance).
+
+    Returns a 1-D tensor with one entry per (i, j, image) candidate.
+    """
+    return ri.float() * (n_atoms * d2_max) + j_all.float() * d2_max + d2_all
+
+
 def _pair_lookup_for_const(
     TYPE: torch.Tensor, const, device: torch.device
 ) -> torch.Tensor:
@@ -175,7 +189,7 @@ def vectorized_nearestneighborlist(
             d2_all = dist2[ri, ci]
             d2_max = float(d2_all.max().item()) + 1.0
             order = torch.argsort(
-                ri.float() * (N * d2_max) + j_all.float() * d2_max + d2_all,
+                _min_image_sort_key(ri, j_all, d2_all, N, d2_max),
                 stable=True,
             )
             ri_s, ci_s = ri[order], ci[order]
