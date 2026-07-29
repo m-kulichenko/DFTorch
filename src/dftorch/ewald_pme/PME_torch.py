@@ -258,7 +258,11 @@ def calculate_PME_kspace_stress(
     )  # (K1,K2,K3,3,3)
 
     # Zero out the G=0 contribution (m_2 == 0)
-    g_mask = (m_2 > 0).float()  # (K1,K2,K3)
+    # (K1,K2,K3) — dtype is tied to the operand it is contracted against below
+    # rather than fixed at 32 bits: a hardcoded .float() here raises
+    # "expected scalar type Double but found Float" in the einsum whenever the
+    # project runs at its float64 default. Follow the `eye` precedent above.
+    g_mask = (m_2 > 0).to(dtype=E_G.dtype)
 
     # σ_{αβ} = (1/V) Σ_G  E_G · T_{αβ}(G)
     sigma = torch.einsum("ijk,ijk,ijkab->ab", E_G, g_mask, metric) / V
