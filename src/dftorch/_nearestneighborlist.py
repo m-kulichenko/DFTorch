@@ -29,9 +29,31 @@ def _min_image_sort_key(
 ) -> torch.Tensor:
     """Composite sort key ordering neighbor pairs by (i, then j, then distance).
 
-    Returns a 1-D tensor with one entry per (i, j, image) candidate.
+    Returns a 1-D tensor with one entry per (i, j, image) candidate, in the
+    dtype of ``d2_all``.
+
+    Why the accumulation width matters
+    ----------------------------------
+    The min-image deduplication sorts by this key with ``stable=True`` and then
+    keeps the first entry of every run of equal ``(i, j)`` — i.e. the nearest
+    periodic image. That is only correct while the key stays *injective* over
+    ``(i, j)``: two different pairs that round to the same key are merged into
+    one run, so a real neighbor is dropped and the wrong image is kept, silently
+    and with no error.
+
+    The key spans roughly ``n_atoms**2 * d2_max``. Accumulating it in 32-bit
+    float collides once that product exceeds about 1.7e9 — near 4200 atoms at a
+    typical ``d2_max``, because the 32-bit spacing there grows past the whole
+    ``d2_max`` band that separates consecutive ``j`` values. The index terms are
+    therefore cast to ``d2_all.dtype`` rather than to a fixed width, so the
+    composite is carried at the precision of the distances themselves.
     """
-    return ri.float() * (n_atoms * d2_max) + j_all.float() * d2_max + d2_all
+    idx_dtype = d2_all.dtype
+    return (
+        ri.to(dtype=idx_dtype) * (n_atoms * d2_max)
+        + j_all.to(dtype=idx_dtype) * d2_max
+        + d2_all
+    )
 
 
 def _pair_lookup_for_const(
