@@ -519,16 +519,18 @@ def H0_and_S_vectorized_batch(
     pair_mask_YX = valid_pairs & (norb_I == 9) & (norb_J == 4)
     pair_mask_YY = valid_pairs & (norb_I == 9) & (norb_J == 9)
 
-    # Batch f-orbital routing is deferred to a later phase. The nine masks above
+    # Batch f-orbital routing is deferred to a later phase (Phase 3 decision
+    # D-01 scopes f support to the single-system path). The nine masks above
     # cover only n_orb in {1, 4, 9}, so a 16-orbital atom would be dropped from
     # every off-diagonal block without warning. Fail explicitly instead.
     if bool((valid_pairs & ((norb_I == 16) | (norb_J == 16))).any()):
         raise FAngularFormulaSourceError(
             "H0_and_S_vectorized_batch: batched f-orbital (n_orb == 16) H0/S "
-            "assembly is not supported. Only the single-system path "
-            "H0_and_S_vectorized routes 16-orbital pairs, and even there the f "
-            "angular formulas are still pending their source lock. Refusing to "
-            "return H0/S with silently omitted f blocks."
+            "assembly is not supported. The source-locked f angular formulas "
+            "are wired into the single-system path H0_and_S_vectorized only; "
+            "the batched Slater-Koster routine still reconstructs the 1/4/9 "
+            "orbital masks alone. Refusing to return H0/S with silently "
+            "omitted f blocks."
         )
 
     nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list

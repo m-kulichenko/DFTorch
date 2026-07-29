@@ -1044,9 +1044,27 @@ def get_skf_tensors(
 
         channels_matrix = channels_to_matrix(channels)
         coeffs = cubic_spline_coeffs(R_orb_i, channels_matrix)
-        zero_row_idx = torch.nonzero(channels_matrix.eq(0).all(dim=1), as_tuple=False)
-        if zero_row_idx.numel() > 0:
-            coeffs[int(zero_row_idx[0].item()) :] = 0
+        # Beyond the tabulated cutoff every channel is zero, and a cubic spline
+        # fitted across that boundary rings. Truncate the spline there.
+        #
+        # The search must start at the first row that actually carries data.
+        # Extended f-electron SKF tables (e.g. tests/f_orbital_data) begin on a
+        # very fine radial grid and pad the first rows with zeros -- Eu-Eu.skf
+        # has 13 such rows below r = 0.56 A. Truncating from the first all-zero
+        # row anywhere in the table would therefore zero the *entire* table and
+        # silently return an identically-zero Hamiltonian for those elements.
+        nonzero_rows = torch.nonzero(
+            ~channels_matrix.eq(0).all(dim=1), as_tuple=False
+        )
+        if nonzero_rows.numel() == 0:
+            coeffs[:] = 0
+        else:
+            first_data_row = int(nonzero_rows[0].item())
+            zero_row_idx = torch.nonzero(
+                channels_matrix[first_data_row:].eq(0).all(dim=1), as_tuple=False
+            )
+            if zero_row_idx.numel() > 0:
+                coeffs[first_data_row + int(zero_row_idx[0].item()) :] = 0
 
         R_tensor[i, : len(R_orb_i)] = R_orb_i
         coeffs_tensor[i, : len(coeffs)] = coeffs

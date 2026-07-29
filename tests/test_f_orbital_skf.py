@@ -500,29 +500,235 @@ def test_f_free_h0_s_routing_regression(tmp_path):
     assert run_with_float64(check) == []
 
 
-def test_eu_containing_h0_s_reaches_f_formula_source_boundary(tmp_path):
-    """HSK-01: 16-orbital pairs are routed, then stopped at the f source lock."""
+def random_unit_directions(count: int, seed: int = 20260728):
+    generator = torch.Generator().manual_seed(seed)
+    vectors = torch.randn(count, 3, generator=generator, dtype=torch.float64)
+    vectors = vectors / vectors.norm(dim=1, keepdim=True)
+    return vectors[:, 0], vectors[:, 1], vectors[:, 2], vectors
+
+
+def f_angular_channel_matrices(sk_mod, L, M, N):
+    """Return (sf, pf, df, ff) as ``(P, n_channel, n_row, n_col)`` tensors."""
+    return tuple(
+        helper(L, M, N).permute(3, 0, 1, 2)
+        for helper in (
+            sk_mod.f_angular_sf,
+            sk_mod.f_angular_pf,
+            sk_mod.f_angular_df,
+            sk_mod.f_angular_ff,
+        )
+    )
+
+
+def test_f_angular_orthogonality_identity():
+    """HSK-03..HSK-06: the paper's own correctness gate, equations (14)-(15).
+
+    Takegahara p586: setting every two-centre integral of a shell pair to 1
+    must reproduce the identity, "This orthogonal relation is useful in
+    checking the results."
+
+    Concretely this makes the coefficient matrix of each channel an orthogonal
+    projector, which additionally ties the s-f, p-f and d-f tables to the f-f
+    table: for the shell pair (j', 3) the channel matrix C_k obeys
+    ``C_k^T C_k == P_k^(3)`` (the f-f channel projector) and the induced row
+    projectors ``C_k C_k^T`` must sum to the identity on the j' shell.
+
+    A mis-transcribed coefficient, a wrong sign, a wrong cyclic image or a
+    misplaced AO breaks this. Fix the transcription, never this test.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+
+        L, M, N, vectors = random_unit_directions(512)
+        sf, pf, df, ff = f_angular_channel_matrices(sk_mod, L, M, N)
+
+        tol = 1e-10
+        eye7 = torch.eye(7, dtype=torch.float64)
+        eye5 = torch.eye(5, dtype=torch.float64)
+        eye3 = torch.eye(3, dtype=torch.float64)
+
+        def close(actual, expected, label):
+            error = float((actual - expected).abs().max())
+            assert error < tol, f"{label}: max error {error:.3e}"
+
+        # --- equations (14)-(15) for the f shell ------------------------
+        close(ff.sum(dim=1), eye7, "sum_k C_k(ff) != I7")
+
+        # --- each f-f channel matrix is an orthogonal projector ---------
+        for k, rank in enumerate((1, 2, 2, 2)):  # sigma, pi, delta, phi
+            block = ff[:, k]
+            close(block, block.transpose(1, 2), f"ff C_{k} not symmetric")
+            close(block @ block, block, f"ff C_{k} not idempotent")
+            trace = torch.diagonal(block, dim1=1, dim2=2).sum(dim=1)
+            close(trace, torch.full_like(trace, float(rank)), f"tr(ff C_{k})")
+            for other in range(k + 1, 4):
+                close(
+                    block @ ff[:, other],
+                    torch.zeros_like(block),
+                    f"ff C_{k} C_{other} != 0",
+                )
+
+        # --- cross-shell blocks project onto the same f-shell subspaces --
+        for label, matrices, n_channel in (
+            ("sf", sf, 1),
+            ("pf", pf, 2),
+            ("df", df, 3),
+        ):
+            for k in range(n_channel):
+                block = matrices[:, k]
+                close(
+                    block.transpose(1, 2) @ block,
+                    ff[:, k],
+                    f"{label} C_{k}^T C_{k} != ff C_{k}",
+                )
+
+        # --- and the induced s / p / d projectors are complete ----------
+        close(
+            (sf[:, 0] @ sf[:, 0].transpose(1, 2)).reshape(-1),
+            torch.ones(sf.shape[0], dtype=torch.float64),
+            "sf C_0 C_0^T != 1",
+        )
+        close(
+            sum(pf[:, k] @ pf[:, k].transpose(1, 2) for k in range(2)),
+            eye3,
+            "sum_k P_k(p) != I3",
+        )
+        close(
+            sum(df[:, k] @ df[:, k].transpose(1, 2) for k in range(3)),
+            eye5,
+            "sum_k P_k(d) != I5",
+        )
+
+        # --- independent oracles from the classic s/p/d Slater-Koster rows
+        # p sigma column is just the direction cosine vector.
+        close(
+            pf[:, 0] @ pf[:, 0].transpose(1, 2),
+            vectors.unsqueeze(2) * vectors.unsqueeze(1),
+            "p sigma projector != outer(l,m,n)",
+        )
+        # d sigma column is the s-d row already implemented for 9-orbital atoms,
+        # in Structure order (dxy, dyz, dzx, dx2_y2, dz2).
+        root3 = 3.0**0.5
+        sd = torch.stack(
+            [
+                root3 * L * M,
+                root3 * M * N,
+                root3 * N * L,
+                0.5 * root3 * (L * L - M * M),
+                N * N - 0.5 * (L * L + M * M),
+            ],
+            dim=1,
+        )
+        close(
+            df[:, 0] @ df[:, 0].transpose(1, 2),
+            sd.unsqueeze(2) * sd.unsqueeze(1),
+            "d sigma projector != outer(s-d row)",
+        )
+        # f sigma column is the s-f row.
+        sf_row = sf[:, 0, 0]
+        close(
+            ff[:, 0],
+            sf_row.unsqueeze(2) * sf_row.unsqueeze(1),
+            "f sigma projector != outer(s-f row)",
+        )
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_f_angular_parity_under_direction_reversal():
+    """HSK-08: reversing the bond flips odd-degree angular polynomials.
+
+    E(-l, -m, -n) = (-1) ** (l_a + l_b) E(l, m, n) is what lets the SK routine
+    reuse one table for both the I->J and the J->I halves of a pair, with the
+    sign conventions the s-p and d-s blocks already use.
+    """
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+
+        L, M, N, _ = random_unit_directions(256, seed=99)
+        cases = (
+            ("sf", sk_mod.f_angular_sf, -1.0),  # (-1) ** (0 + 3)
+            ("pf", sk_mod.f_angular_pf, 1.0),  # (-1) ** (1 + 3)
+            ("df", sk_mod.f_angular_df, -1.0),  # (-1) ** (2 + 3)
+            ("ff", sk_mod.f_angular_ff, 1.0),  # (-1) ** (3 + 3)
+        )
+        for label, helper, parity in cases:
+            forward = helper(L, M, N)
+            reverse = helper(-L, -M, -N)
+            error = float((reverse - parity * forward).abs().max())
+            assert error < 1e-11, f"{label}: parity {parity:+.0f} violated by {error:.3e}"
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_eu_containing_h0_s_is_finite_shaped_and_symmetric(tmp_path):
+    """HSK-01 / HSK-07 / D-06: single-system f-containing H0/S actually builds.
+
+    Before Phase 3 every 16-orbital neighbor pair fell through the 1/4/9 masks
+    and was silently omitted; after the tracer it reached an explicit boundary;
+    now the source-locked angular blocks make it produce real numbers.
+    """
 
     def check():
         validation = load_validation_script()
         project_root = validation.find_project_root()
         skf_dir = project_root / "tests" / "f_orbital_data"
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
 
-        for label, elements in (("Eu_N", ["Eu", "N"]), ("Eu_Eu", ["Eu", "Eu"])):
+        for label, elements, spacing in (
+            ("Eu_N", ["Eu", "N"], 2.4),
+            ("Eu_Ga", ["Eu", "Ga"], 2.8),
+            ("Eu_Eu", ["Eu", "Eu"], 3.4),
+            ("Eu_N_Ga", ["Eu", "N", "Ga"], 2.4),
+        ):
             xyz_path = tmp_path / f"h0s_{label}.xyz"
-            try:
-                build_h0_and_s(validation, project_root, skf_dir, elements, xyz_path)
-            except sk_mod.FAngularFormulaSourceError as exc:
-                message = str(exc)
-                assert "n_orb == 16" in message, message
-                assert "source-lock" in message or "source-locked" in message, message
-                assert "sf/pf/df/ff" in message, message
-            else:
-                raise AssertionError(
-                    f"{label}: f-containing H0/S assembly silently succeeded; f pairs "
-                    "must reach the explicit formula-source boundary"
-                )
+            const, struct, H0, dH0, S, dS = build_h0_and_s(
+                validation, project_root, skf_dir, elements, xyz_path, spacing=spacing
+            )
+
+            assert int(const.n_orb[struct.TYPE[0]]) == 16, (
+                f"{label}: Eu must be a 16-orbital element"
+            )
+            assert H0.shape == (struct.HDIM, struct.HDIM), f"{label}: {tuple(H0.shape)}"
+            assert S.shape == (struct.HDIM, struct.HDIM), f"{label}: {tuple(S.shape)}"
+            assert torch.isfinite(H0).all(), f"{label}: H0 has non-finite entries"
+            assert torch.isfinite(S).all(), f"{label}: S has non-finite entries"
+            assert torch.allclose(H0, H0.transpose(0, 1)), f"{label}: H0 not symmetric"
+            assert torch.allclose(S, S.transpose(0, 1)), f"{label}: S not symmetric"
+            assert torch.isfinite(dH0).all(), f"{label}: dH0 has non-finite entries"
+            assert torch.isfinite(dS).all(), f"{label}: dS has non-finite entries"
+
+            # S keeps its AO identity contribution on the diagonal.
+            assert torch.allclose(
+                torch.diagonal(S), torch.ones_like(torch.diagonal(S))
+            ), f"{label}: S diagonal lost its identity term"
+
+            # The f rows/columns must not be all zero any more: that was exactly
+            # the silent-drop failure mode this phase exists to remove.
+            i0 = int(struct.H_INDEX_START[0])
+            f_rows = H0[i0 + 9 : i0 + 16, :]
+            off_diagonal = f_rows.clone()
+            off_diagonal[:, i0 + 9 : i0 + 16] -= torch.diag(
+                torch.diagonal(H0)[i0 + 9 : i0 + 16]
+            )
+            assert float(off_diagonal.abs().max()) > 0.0, (
+                f"{label}: every off-diagonal f entry of H0 is zero, so the f "
+                "blocks are still being dropped"
+            )
+            f_rows_S = S[i0 + 9 : i0 + 16, :].clone()
+            f_rows_S[:, i0 + 9 : i0 + 16] -= torch.eye(7, dtype=S.dtype)
+            assert float(f_rows_S.abs().max()) > 0.0, (
+                f"{label}: every off-diagonal f entry of S is zero"
+            )
 
         return []
 
@@ -530,7 +736,12 @@ def test_eu_containing_h0_s_reaches_f_formula_source_boundary(tmp_path):
 
 
 def test_f_containing_derivative_paths_are_guarded():
-    """HSK-01 / D-09: f pairs must not silently contribute zero derivatives."""
+    """HSK-01 / D-09: f pairs must not silently contribute zero derivatives.
+
+    Phase 3 delivers f angular *values* only. dH0/dS therefore carry exact
+    zeros in every f block, which is a perfectly plausible-looking gradient,
+    so every derivative consumer has to refuse f-containing systems.
+    """
 
     def check():
         validation = load_validation_script()
@@ -538,24 +749,78 @@ def test_f_containing_derivative_paths_are_guarded():
         sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
         h0ands_mod = validation.load_dftorch_module(project_root, "_h0ands")
         stress_mod = validation.load_dftorch_module(project_root, "_stress")
+        esdriver_mod = validation.load_dftorch_module(project_root, "ESDriver")
 
         assert h0ands_mod.FAngularFormulaSourceError is sk_mod.FAngularFormulaSourceError
-        assert stress_mod.FAngularFormulaSourceError is sk_mod.FAngularFormulaSourceError
+        assert (
+            stress_mod.FDerivativeUnsupportedError
+            is sk_mod.FDerivativeUnsupportedError
+        )
+        assert issubclass(sk_mod.FDerivativeUnsupportedError, NotImplementedError)
 
-        # The batch H0/S route and the analytical stress route both reconstruct
-        # only the 1/4/9 orbital masks, so both must reject n_orb == 16 rather
-        # than dropping those pairs.
+        # Values exist; derivatives explicitly do not.
+        assert sk_mod.F_ANGULAR_FORMULAS_AVAILABLE is True
+        assert sk_mod.F_ANGULAR_DERIVATIVES_AVAILABLE is False, (
+            "flip this only once f angular derivatives are implemented AND the "
+            "guards below are removed"
+        )
+
         import inspect
 
-        for module, func_name in (
-            (h0ands_mod, "H0_and_S_vectorized_batch"),
-            (stress_mod, "_pair_grad_from_sk"),
-        ):
-            source = inspect.getsource(getattr(module, func_name))
-            assert "FAngularFormulaSourceError" in source, (
-                f"{func_name} has no explicit f guard"
+        # The batch H0/S route reconstructs only the 1/4/9 orbital masks, so it
+        # must reject n_orb == 16 rather than dropping those pairs outright.
+        source = inspect.getsource(h0ands_mod.H0_and_S_vectorized_batch)
+        assert "FAngularFormulaSourceError" in source
+        assert "16" in source
+
+        # Analytical stress consumes dH0/dS.
+        source = inspect.getsource(stress_mod._pair_grad_from_sk)
+        assert "FDerivativeUnsupportedError" in source
+        assert "16" in source
+
+        # Both force entry points guard before assembling any force term.
+        guard = inspect.getsource(esdriver_mod._require_f_derivatives)
+        assert "FDerivativeUnsupportedError" in guard
+        assert "16" in guard
+        for cls in (esdriver_mod.ESDriver, esdriver_mod.ESDriverBatch):
+            source = inspect.getsource(cls.calc_forces)
+            assert "_require_f_derivatives" in source, (
+                f"{cls.__name__}.calc_forces has no f derivative guard"
             )
-            assert "16" in source, f"{func_name} does not test for n_orb == 16"
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_f_derivative_guard_rejects_f_systems():
+    """D-09: the shared force guard fires for f elements and not otherwise."""
+
+    def check():
+        validation = load_validation_script()
+        project_root = validation.find_project_root()
+        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        esdriver_mod = validation.load_dftorch_module(project_root, "ESDriver")
+
+        class _Struct:
+            def __init__(self, types):
+                self.TYPE = torch.tensor(types, dtype=torch.long)
+
+        class _Const:
+            n_orb = torch.tensor([1, 4, 9, 16], dtype=torch.long)
+
+        const = _Const()
+
+        # No f atom -> guard is a no-op.
+        esdriver_mod._require_f_derivatives(_Struct([0, 1, 2]), const, "unit-test")
+
+        # An f atom anywhere -> named refusal.
+        try:
+            esdriver_mod._require_f_derivatives(_Struct([2, 3]), const, "unit-test")
+        except sk_mod.FDerivativeUnsupportedError as exc:
+            assert "n_orb == 16" in str(exc), str(exc)
+        else:
+            raise AssertionError("f derivative guard did not fire for an f system")
 
         return []
 

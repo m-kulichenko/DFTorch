@@ -19,9 +19,42 @@ from ._nearestneighborlist import (
 )
 from ._repulsive_spline import get_repulsion_energy, get_repulsion_energy_batch #E_rep
 from ._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
+from ._slater_koster_pair import (
+    F_ANGULAR_DERIVATIVES_AVAILABLE,
+    F_DERIVATIVE_UNSUPPORTED_MESSAGE,
+    FDerivativeUnsupportedError,
+)
 from ._stress import get_total_stress_analytical
 from ._thirdorder import ThirdOrderBatch, create_thirdorder
 from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
+
+
+def _require_f_derivatives(structure, const, context: str) -> None:
+    """Reject derivative-consuming paths for systems containing f orbitals.
+
+    Phase 3 implements source-locked f angular *values* only, so ``dH0``/``dS``
+    are exactly zero throughout every f block. A force or stress assembled from
+    those zeros looks perfectly well formed, which is precisely why it must not
+    be produced. See :class:`FDerivativeUnsupportedError`.
+    """
+    if F_ANGULAR_DERIVATIVES_AVAILABLE:
+        return
+    type_ids = getattr(structure, "TYPE", None)
+    if type_ids is None:
+        return
+    n_orb = getattr(const, "n_orb", None)
+    if n_orb is None:
+        return
+    valid = type_ids >= 0
+    if not bool(valid.any()):
+        return
+    counts = n_orb[type_ids.clamp(min=0)]
+    if bool((valid & (counts == 16)).any()):
+        raise FDerivativeUnsupportedError(
+            f"{context}: this system contains at least one atom with "
+            f"n_orb == 16 (an f-shell element).\n"
+            f"{F_DERIVATIVE_UNSUPPORTED_MESSAGE}"
+        )
 
 
 class ESDriver(torch.nn.Module):
@@ -580,6 +613,11 @@ class ESDriver(torch.nn.Module):
                 structure.e_d3 = 0.0
 
     def calc_forces(self, structure, const):
+        # Phase 3 supplies source-locked f angular *values* only; dH0/dS are
+        # exactly zero inside every f block. Forces consume those derivatives,
+        # so an f-containing system would silently integrate a wrong (zero)
+        # gradient. Refuse before any force term is assembled.
+        _require_f_derivatives(structure, const, "ESDriver.calc_forces")
         # with torch.no_grad():
         if 1:
             # Compute solvation shift for force calculation
@@ -1553,6 +1591,9 @@ class ESDriverBatch(torch.nn.Module):
                 structure.e_d3 = torch.zeros(structure.batch_size, device=self.device)
 
     def calc_forces(self, structure, const):
+        # See ESDriver.calc_forces: f derivatives are not implemented, so an
+        # f-containing batch would silently integrate zero f gradients.
+        _require_f_derivatives(structure, const, "ESDriverBatch.calc_forces")
 
         # with torch.no_grad():
         if 1:

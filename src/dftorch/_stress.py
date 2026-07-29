@@ -8,7 +8,8 @@ from ._nearestneighborlist import (
     vectorized_nearestneighborlist,
 )
 from ._slater_koster_pair import (
-    FAngularFormulaSourceError,
+    F_DERIVATIVE_UNSUPPORTED_MESSAGE,
+    FDerivativeUnsupportedError,
     Slater_Koster_Pair_SKF_vectorized,
 )
 from ._tools import _maybe_compile
@@ -185,15 +186,15 @@ def _pair_grad_from_sk(
 
     # This is a derivative-consuming path: it reconstructs only the 1/4/9
     # orbital pair masks, so a 16-orbital atom would contribute exactly zero to
-    # the stress instead of raising. Trusted f derivatives do not exist yet, so
-    # a silent zero here would be indistinguishable from a real result.
+    # the stress instead of raising. Phase 3 implements source-locked f angular
+    # *values* only, so even a fully f-aware mask set would carry zero f
+    # derivatives here, and a silent zero is indistinguishable from a real
+    # result. See FAngularFormulaSourceError / FDerivativeUnsupportedError.
     if bool(((nI == 16) | (nJ == 16)).any()):
-        raise FAngularFormulaSourceError(
-            "_pair_grad_from_sk: f-orbital (n_orb == 16) stress "
-            "contributions are not supported. f angular formulas and their "
-            "derivatives are still pending their source lock, so f pairs would "
-            "silently contribute zero stress. Refusing to return an "
-            "f-incomplete stress tensor."
+        raise FDerivativeUnsupportedError(
+            "_pair_grad_from_sk: f-orbital (n_orb == 16) stress contributions "
+            "are not supported. Refusing to return an f-incomplete stress "
+            f"tensor.\n{F_DERIVATIVE_UNSUPPORTED_MESSAGE}"
         )
 
     # Reconstruct pair masks
