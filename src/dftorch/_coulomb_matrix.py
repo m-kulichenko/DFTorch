@@ -6,6 +6,10 @@ from typing import Dict, Optional  # <-- add Optional, Dict
 
 import torch
 
+from ._slater_koster_pair import (
+    F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE,
+    FShellResolvedCoulombUnsupportedError,
+)
 from ._tools import _maybe_compile
 
 # ── Van der Waals radii (Bondi / Mantina) in Angstrom ───────────────────
@@ -649,6 +653,38 @@ ewald_real_space_vectorized = _maybe_compile(ewald_real_space_vectorized)
 ewald_k_space_vectorized = _maybe_compile(ewald_k_space_vectorized)
 
 
+def _require_no_f_shell_resolved_coulomb(structure, TYPE, context: str) -> None:
+    """Reject shell-resolved Coulomb assembly for systems containing f orbitals.
+
+    :func:`ewald_real_space_vectorized_sr` covers ``max_ang`` 1, 2 and 3 only.
+    An f element has ``max_ang == 4``, so its p, d and f shell rows and columns
+    would come back exactly zero inside an otherwise finite, correctly shaped
+    matrix. Zero is a legal-looking Coulomb entry, which is why this refuses
+    rather than returning an f-incomplete result. See
+    :class:`~._slater_koster_pair.FShellResolvedCoulombUnsupportedError`.
+
+    Modelled on ``ESDriver._require_f_derivatives``: it tolerates a structure
+    that carries no ``const`` / ``n_orb`` (returning without opinion) so it can
+    be called unconditionally as the guarded function's first statement.
+    """
+    const = getattr(structure, "const", None)
+    if const is None:
+        return
+    n_orb = getattr(const, "n_orb", None)
+    if n_orb is None or TYPE is None:
+        return
+    valid = TYPE >= 0
+    if not bool(valid.any()):
+        return
+    counts = n_orb[TYPE.clamp(min=0)]
+    if bool((valid & (counts == 16)).any()):
+        raise FShellResolvedCoulombUnsupportedError(
+            f"{context}: this system contains at least one atom with "
+            f"n_orb == 16 (an f-shell element).\n"
+            f"{F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE}"
+        )
+
+
 ### not working shell-resolved ###
 def ewald_real_space_vectorized_sr(
     structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA
@@ -712,7 +748,20 @@ def ewald_real_space_vectorized_sr(
       Coulomb functions and short-range exponential terms.
     - Output matrices are assembled via scatter operations using index_put_ with accumulation.
     - Only the upper triangle of the interaction matrix is filled; symmetry must be enforced externally if needed.
+
+    Raises
+    ------
+    FShellResolvedCoulombUnsupportedError
+        If any atom carries 16 orbitals (an f element). The pair masks below
+        cover ``max_ang`` 1, 2 and 3 only, so an f system would otherwise get a
+        matrix whose non-s shell rows and columns are silently zero.
     """
+    # First statement on purpose: every caller, present and future, is covered
+    # rather than only the ESDriver call site.
+    _require_no_f_shell_resolved_coulomb(
+        structure, TYPE, "_coulomb_matrix.ewald_real_space_vectorized_sr"
+    )
+
     CALPHA2 = CALPHA**2
     RELPERM = 1.0
     KECONST = 14.3996437701414 * RELPERM
@@ -723,6 +772,12 @@ def ewald_real_space_vectorized_sr(
     max_ang_I = structure.const.max_ang[TYPE[neighbor_I]]
     max_ang_J = structure.const.max_ang[TYPE[neighbor_J]]
 
+    # H/X/Y below denote max_ang 1 (s only), 2 (s+p) and 3 (s+p+d).  These masks
+    # cover max_ang 1, 2 and 3 *only* — there is deliberately no Z (max_ang == 4,
+    # f) class.  An f atom is refused by _require_no_f_shell_resolved_coulomb
+    # above rather than falling through these masks to zero; do not re-derive
+    # that defect by "fixing" the fall-through here without implementing the
+    # seven f angular blocks.
     # pair_mask_HH = (max_ang_I == 1) * (max_ang_J == 1)
     pair_mask_HX = (max_ang_I == 1) * (max_ang_J == 2)
     pair_mask_XH = (max_ang_I == 2) * (max_ang_J == 1)

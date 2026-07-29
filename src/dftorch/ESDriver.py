@@ -7,7 +7,10 @@ import torch
 from dftorch._coulomb_matrix_batch import coulomb_matrix_vectorized_batch #Charge correction term added to Hamiltonian
 from dftorch._spin import get_h_spin, get_spin_energy #For charge unbinding
 
-from ._coulomb_matrix import coulomb_matrix_vectorized
+from ._coulomb_matrix import (
+    coulomb_matrix_vectorized,
+    ewald_real_space_vectorized_sr,
+)
 from ._dftd3 import create_dftd3 #DFTB 3 correction
 from ._dm_fermi_x import dm_fermi_x #single diagonalization + Fermi occupations
 from ._energy import energy #returns energy decomposed into band, coulomb, dipole, entropy
@@ -101,6 +104,32 @@ def _require_closed_shell_f_system(
     )
 
 
+def _select_coulomb_hubbard(structure, const) -> tuple[torch.Tensor, bool]:
+    """Choose the Hubbard U data the Coulomb path should use.
+
+    Returns ``(hubbard_tensor, shell_resolved)``. The flag is returned
+    alongside the tensor deliberately: a caller must not be able to consume
+    shell-resolved data while believing it is per-atom, since the two differ in
+    length (one entry per present shell versus one per atom) and in the index
+    map required to place them.
+
+    The gate is the **existing** ``MAGNETIC_HUBBARD_LDEP`` key, whose docstring
+    at ``Constants.py`` already reads "Use shell-dependent (l-dependent) Hubbard
+    U parameters" — exactly this behaviour, previously undelivered. Phase 4
+    decision **D-23** fixes it as the single knob and explicitly rejects
+    introducing a competing ``SHELL_RESOLVED`` flag; the "magnetic" misnomer is
+    an accepted wart, kept to hold the blast radius off the existing spin/SOC
+    call sites and ``script.py`` defaults.
+
+    ``structure.Hubbard_U_sr`` is built unconditionally in ``Structure``, so
+    this selects *consumption*, never construction — both branches are handed
+    data that already exists and agrees.
+    """
+    if getattr(const, "magnetic_hubbard_ldep", False):
+        return structure.Hubbard_U_sr, True
+    return structure.Hubbard_U, False
+
+
 class ESDriver(torch.nn.Module):
     def __init__( #Need to provide it the parameters and what device it should run on
         self,
@@ -151,6 +180,19 @@ class ESDriver(torch.nn.Module):
             :meth:`calc_forces` explicitly for those.
         verbose : bool, default False
             If True, print timing info from neighbor-list construction.
+
+        Notes
+        -----
+        When ``MAGNETIC_HUBBARD_LDEP`` is set, the non-PME branch additionally
+        builds the shell-resolved Coulomb matrix into ``structure.C_sr`` /
+        ``structure.dCC_sr`` alongside the per-atom ``structure.C``, which is
+        left untouched (decision D-23). Under ``COUL_METHOD="PME"`` the
+        shell-resolved matrix is **not** built and both attributes stay
+        ``None``: there is no real-space neighbor list at that point and no
+        shell-resolved reciprocal-space counterpart. ``C_sr`` has no consumer in
+        this phase — ``energy()`` and ``SCFx`` take ``(Nats, Nats)`` with
+        per-atom charges — and threading shell-resolved charges through the SCF
+        loop is deferred by D-11.
 
         Returns
         -------
@@ -258,6 +300,11 @@ class ESDriver(torch.nn.Module):
             )
         )
 
+        # Always defined, so a caller can inspect them without an AttributeError
+        # regardless of which Coulomb branch ran (D-23 / D-14).
+        structure.C_sr = None
+        structure.dCC_sr = None
+
         if self.dftorch_params["COUL_METHOD"] == "PME":
             if (
                 
@@ -331,6 +378,41 @@ class ESDriver(torch.nn.Module):
                 h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                 h5_params=self.dftorch_params.get("H5_PARAMS", None),
             )
+
+            # ── Shell-resolved (l-dependent) Coulomb matrix ─────────────
+            # D-16 as amended by D-23: MAGNETIC_HUBBARD_LDEP selects the
+            # shell-resolved Hubbard U for the Coulomb path.  This is built
+            # *alongside* structure.C and never instead of it: C is
+            # (Nats, Nats) and is what energy() and SCFx consume together with
+            # per-atom charges, whereas C_sr is (n_shells, n_shells) and has no
+            # consumer until shell-resolved charges are threaded through the
+            # SCF loop (deferred by D-11).  For an f system this call raises
+            # FShellResolvedCoulombUnsupportedError rather than returning a
+            # matrix whose non-s shell rows are silently zero.
+            _, shell_resolved_hubbard = _select_coulomb_hubbard(structure, const)
+            if shell_resolved_hubbard:
+                Ra_sr = torch.stack(
+                    (
+                        structure.RX.unsqueeze(-1),
+                        structure.RY.unsqueeze(-1),
+                        structure.RZ.unsqueeze(-1),
+                    ),
+                    dim=-1,
+                )
+                Rab_sr = torch.stack((nnRx, nnRy, nnRz), dim=-1) - Ra_sr
+                dR_sr = torch.norm(Rab_sr, dim=-1)
+                dR_dxyz_sr = Rab_sr / dR_sr.unsqueeze(-1).clamp(min=1e-30)
+                structure.C_sr, structure.dCC_sr = ewald_real_space_vectorized_sr(
+                    structure,
+                    dR_sr,
+                    dR_dxyz_sr,
+                    structure.TYPE,
+                    nnType,
+                    neighbor_I,
+                    neighbor_J,
+                    CALPHA,
+                )
+                del Ra_sr, Rab_sr, dR_sr, dR_dxyz_sr
 
             # ── Full off-diagonal DFTB3 third-order matrices ────────────
             if (

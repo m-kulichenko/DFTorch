@@ -286,6 +286,43 @@ F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE: Final[str] = (
 )
 
 
+class FShellResolvedCoulombUnsupportedError(NotImplementedError):
+    """Raised when a shell-resolved Coulomb matrix is requested for an f system.
+
+    ``_coulomb_matrix.ewald_real_space_vectorized_sr`` assembles its
+    ``(n_shells, n_shells)`` matrix from pair masks that test ``max_ang``
+    against 1, 2 and 3 only. An f element has ``max_ang == 4``, so every one of
+    its non-s shell rows and columns comes back exactly zero while the matrix
+    itself stays finite and correctly shaped — the Phase 3 silent-drop failure
+    mode reproduced in the electrostatics.
+
+    This class lives in ``_slater_koster_pair`` rather than in
+    ``_coulomb_matrix`` so that the whole f-unsupported exception taxonomy
+    (:class:`FAngularFormulaSourceError`, :class:`FDerivativeUnsupportedError`,
+    :class:`FSpinPolarizationUnsupportedError`) stays in one place and can be
+    reviewed as a single support policy.
+    """
+
+
+F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE: Final[str] = (
+    "The shell-resolved Coulomb matrix implements shell pair blocks for s, p "
+    "and d only.\n"
+    "The seven f-containing blocks (s-f, f-s, p-f, f-p, d-f, f-d, f-f) are not "
+    "implemented, so an f-containing system would receive a matrix in which "
+    "every non-s shell row and column of the f atom is exactly zero. That is a "
+    "finite, correctly shaped, completely wrong matrix, which is why this path "
+    "refuses to run rather than returning it.\n"
+    "Workaround: leave MAGNETIC_HUBBARD_LDEP unset (or False) so the per-atom "
+    "Coulomb path is used. That path is fully implemented for f systems and is "
+    "what the single-shot energy consumes.\n"
+    "Implementing the missing blocks is blocked on shell-resolved charges being "
+    "threaded through the SCF loop: the shell-resolved matrix is "
+    "(n_shells, n_shells) while energy() and SCFx consume (Nats, Nats) together "
+    "with per-atom charges, so there is currently no consumer that could "
+    "validate f values even if they were written."
+)
+
+
 # ---------------------------------------------------------------------------
 # f angular blocks -- transcription of Takegahara Table 2
 # ---------------------------------------------------------------------------

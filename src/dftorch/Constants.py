@@ -37,7 +37,13 @@ class Constants(torch.nn.Module):
         ``DFTB3`` : bool, default False
             Load Hubbard-derivative data for third-order corrections.
         ``MAGNETIC_HUBBARD_LDEP`` : bool, default False
-            Use shell-dependent (l-dependent) Hubbard U parameters.
+            Use shell-dependent (l-dependent) Hubbard U parameters.  This one
+            key has two consumers: it selects the shell- versus atom-resolved
+            spin W matrix below, and it selects the shell-resolved Hubbard U on
+            the Coulomb path (``ESDriver._select_coulomb_hubbard``), which also
+            makes ``ESDriver.forward`` build ``structure.C_sr``.  The name is a
+            known misnomer in the non-spin case, kept deliberately rather than
+            split into a second flag (decision D-23).
         ``GRAD_PARAM`` : bool, default False
             Enable parameter gradients (for ML-SK fitting workflows).
     """
