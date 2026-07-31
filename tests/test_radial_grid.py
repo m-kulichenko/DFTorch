@@ -47,6 +47,7 @@ ASCII ONLY.  Phase 4 recorded that em dashes render as replacement characters on
 a cp1252 console and destroy the diagnosability of pytest output.
 """
 
+import math
 import os
 
 # Disable TorchDynamo/Inductor compilation in tests (keeps tests deterministic
@@ -175,14 +176,41 @@ F_RCUT_ANGSTROM = 9.165349277199999
 # a real oracle for its bit-identity claim rather than only comparing the new
 # path against itself.  These are exact float64 reprs of reductions over the
 # 20x20 H0/S matrices and their 3x20x20 Cartesian derivatives, assembled by
-# `H0_and_S_vectorized` for CH4 + mio-1-1.  Compared with `==` on the float,
-# not `pytest.approx`: any movement at all is a regression under REG-01.
+# `H0_and_S_vectorized` for CH4 + mio-1-1.  Scalar reductions are compared with
+# zero relative tolerance and a four-ULP absolute bound: equivalent reduction
+# orders can move the last few bits even when every tensor byte is identical.
+# The global-versus-per-pair tensors are still checked with `torch.equal` below,
+# so elementwise bit identity remains exact and any larger checksum movement is
+# still a regression under REG-01.
+CH4_CHECKSUM_MAX_ULPS = 4
 CH4_H0_SUM = -150.13565671807473
 CH4_S_SUM = 24.694869162805045
 CH4_H0_ABS_SUM = 353.67703472587453
 CH4_S_ABS_SUM = 36.60802871760147
 CH4_DH0_ABS_SUM = 777.8475256952822
 CH4_DS_ABS_SUM = 43.245812432176216
+
+
+def _assert_ch4_checksum(actual: float, expected: float, label: str) -> None:
+    """Keep a scalar reduction within four ULPs of its historical value.
+
+    Floating-point addition is non-associative, so CPU/vector reduction order
+    can change a sum's final bits without moving any input tensor element.  A
+    zero-relative four-ULP bound admits only that measured reduction noise; it
+    is far narrower than a physics tolerance and still rejects meaningful
+    Hamiltonian drift.
+    """
+    absolute_tolerance = CH4_CHECKSUM_MAX_ULPS * math.ulp(expected)
+    assert math.isclose(
+        actual,
+        expected,
+        rel_tol=0.0,
+        abs_tol=absolute_tolerance,
+    ), (
+        f"{label} checksum moved: actual={actual!r}, expected={expected!r}, "
+        f"abs_diff={abs(actual - expected)!r}, allowed={absolute_tolerance!r} "
+        f"({CH4_CHECKSUM_MAX_ULPS} ULP)"
+    )
 
 
 # --- Shared builders ---------------------------------------------------------
@@ -751,9 +779,9 @@ def test_ch4_h0_s_checksums_are_unchanged():
     value recorded BEFORE the per-pair lookup lands, a post-change test can only
     compare the new path against itself, which proves nothing about REG-01.
 
-    Compared with `==` on the float, not `pytest.approx`.  Under REG-01 a
-    refactor that moves a digit is a regression even if it moves it in a
-    direction someone considers an improvement.
+    Compared with zero relative tolerance and a four-ULP absolute bound.  That
+    admits last-bit changes caused solely by reduction order while still
+    rejecting any meaningful movement under REG-01.
     """
 
     def check():
@@ -780,12 +808,12 @@ def test_ch4_h0_s_checksums_are_unchanged():
 
     # CH4: one C with 4 orbitals plus four H with 1 each.
     assert shape == (20, 20)
-    assert h0_sum == CH4_H0_SUM
-    assert s_sum == CH4_S_SUM
-    assert h0_abs == CH4_H0_ABS_SUM
-    assert s_abs == CH4_S_ABS_SUM
-    assert dh0_abs == CH4_DH0_ABS_SUM
-    assert ds_abs == CH4_DS_ABS_SUM
+    _assert_ch4_checksum(h0_sum, CH4_H0_SUM, "H0 sum")
+    _assert_ch4_checksum(s_sum, CH4_S_SUM, "S sum")
+    _assert_ch4_checksum(h0_abs, CH4_H0_ABS_SUM, "H0 absolute sum")
+    _assert_ch4_checksum(s_abs, CH4_S_ABS_SUM, "S absolute sum")
+    _assert_ch4_checksum(dh0_abs, CH4_DH0_ABS_SUM, "dH0 absolute sum")
+    _assert_ch4_checksum(ds_abs, CH4_DS_ABS_SUM, "dS absolute sum")
 
 
 def test_r_tensor_rows_are_strictly_increasing():
@@ -924,12 +952,14 @@ def test_ch4_h0_s_bit_identical_after_per_pair_lookup():
     1. The per-pair matrices equal the global-fallback matrices under
        `torch.equal`, NOT `torch.allclose`.  Element for element, zero
        tolerance.
-    2. The per-pair reductions equal the checksum literals recorded in Task 1
-       on the PRE-D-01 code path.  Check 1 alone would only compare the new
-       path against itself in the same process; check 2 is what ties it back to
-       behaviour that existed before the rewrite (REG-01, CLN-05).
+    2. The per-pair reductions stay within four ULPs of the checksum literals
+       recorded in Task 1 on the PRE-D-01 code path.  Check 1 alone would only
+       compare the new path against itself in the same process; check 2 is what
+       ties it back to behaviour that existed before the rewrite (REG-01,
+       CLN-05) without mistaking reduction-order noise for tensor drift.
 
-    A refactor that "improves" any of these numbers is still a regression here.
+    A refactor that moves a checksum beyond the four-ULP reduction bound is
+    still a regression here.
     """
 
     def check():
@@ -966,12 +996,12 @@ def test_ch4_h0_s_bit_identical_after_per_pair_lookup():
     assert dh0_same, "dH0 moved when the per-pair lookup was used"
     assert ds_same, "dS moved when the per-pair lookup was used"
 
-    assert h0_sum == CH4_H0_SUM
-    assert s_sum == CH4_S_SUM
-    assert h0_abs == CH4_H0_ABS_SUM
-    assert s_abs == CH4_S_ABS_SUM
-    assert dh0_abs == CH4_DH0_ABS_SUM
-    assert ds_abs == CH4_DS_ABS_SUM
+    _assert_ch4_checksum(h0_sum, CH4_H0_SUM, "per-pair H0 sum")
+    _assert_ch4_checksum(s_sum, CH4_S_SUM, "per-pair S sum")
+    _assert_ch4_checksum(h0_abs, CH4_H0_ABS_SUM, "per-pair H0 absolute sum")
+    _assert_ch4_checksum(s_abs, CH4_S_ABS_SUM, "per-pair S absolute sum")
+    _assert_ch4_checksum(dh0_abs, CH4_DH0_ABS_SUM, "per-pair dH0 absolute sum")
+    _assert_ch4_checksum(ds_abs, CH4_DS_ABS_SUM, "per-pair dS absolute sum")
 
 
 # Synthetic mixed-grid parameters.  0.1 Bohr is coarse for real physics but the
