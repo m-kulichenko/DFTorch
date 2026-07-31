@@ -287,13 +287,18 @@ def _global_knot_lookup(R_orb, dR_mskd):
     return idx, dx
 
 
-def _ch4_h0_and_s(tmp_path):
+def _ch4_h0_and_s(tmp_path, *, per_pair: bool = False):
     """Assemble CH4 + mio-1-1 H0/S through the live single-system path.
 
     Returns ``(const, H0, dH0, S, dS)``.  Deliberately calls
     ``H0_and_S_vectorized`` directly rather than driving ``ESDriver``, so that
     the checksums pin the H0/S assembly alone and are not perturbed by SCF,
     Coulomb, or repulsion.
+
+    ``per_pair=False`` passes neither ``R_tensor`` nor ``n_grid``, which selects
+    the pre-D-01 global ``R_orb`` fallback.  ``per_pair=True`` passes both,
+    which selects ``_pair_knot_lookup``.  Both are exercised, because the whole
+    REG-01 claim is that they agree bit for bit on a single-grid directory.
     """
     from dftorch.Constants import Constants
     from dftorch.Structure import Structure
@@ -330,6 +335,11 @@ def _ch4_h0_and_s(tmp_path):
         upper_tri_only=False,
     )
 
+    extra = {}
+    if per_pair:
+        extra["R_tensor"] = const.R_tensor
+        extra["n_grid"] = const.n_grid
+
     H0, dH0, S, dS = H0_and_S_vectorized(
         struct.TYPE,
         struct.RX,
@@ -348,6 +358,7 @@ def _ch4_h0_and_s(tmp_path):
         JI_pair_type,
         const.R_orb,
         const.coeffs_tensor,
+        **extra,
     )
     return const, H0, dH0, S, dS
 
@@ -564,14 +575,16 @@ def test_f_fixture_grids_are_all_identical():
         rows_equal = all(
             torch.equal(R_tensor[i], R_tensor[0]) for i in range(R_tensor.shape[0])
         )
-        nonzero_lengths = [
-            int((R_tensor[i] != 0).sum()) for i in range(R_tensor.shape[0])
-        ]
+        # Read the tabulated length from const.n_grid, not from a nonzero count.
+        # Since plan 05-01 Task 2 the row tail continues each pair's arithmetic
+        # progression instead of being zero, so counting nonzero entries would
+        # now return the full 1301-column width for every pair.
+        lengths = [int(v) for v in const.n_grid.detach().tolist()]
         R = const.R_orb.detach()
         return (
             R_tensor.shape[0],
             rows_equal,
-            nonzero_lengths,
+            lengths,
             len(R),
             (R[1] - R[0]).item(),
             R[-1].item(),
@@ -775,30 +788,24 @@ def test_ch4_h0_s_checksums_are_unchanged():
     assert ds_abs == CH4_DS_ABS_SUM
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "R_tensor rows are zero-padded past each pair's own grid length "
-        "(_bond_integral.py:985 allocates zeros, :1061 writes only the head), "
-        "so they are NOT monotonic and torch.searchsorted against a row is "
-        "undefined behaviour.  Plan 05-01 Task 2 fills the tail by continuing "
-        "the same arithmetic progression; this xfail flips to a pass there."
-    ),
-)
 def test_r_tensor_rows_are_strictly_increasing():
     """Every R_tensor row must be strictly increasing across its FULL width.
 
-    This is the single concrete blocker for the per-pair lookup.  `R_tensor` is
-    allocated as `zeros((n_pairs, 1301))` at `_bond_integral.py:985` and only
-    `R_tensor[i, :len(R_orb_i)]` is written at `:1061`, so today row 550 onward
-    is 0.0 for mio-1-1 while row 549 is 5.82095.  `torch.searchsorted` requires
-    a sorted boundary tensor; against a row that rises then drops to zero its
-    result is arbitrary, which is why Task 2 cannot simply index `R_tensor` as
-    it stands.
+    This was the single concrete blocker for the per-pair lookup, and this test
+    was written as a strict xfail in plan 05-01 Task 1 so that Task 2 would flip
+    it rather than invent it.  `R_tensor` is allocated as
+    `zeros((n_pairs, 1301))` at `_bond_integral.py:985` and only
+    `R_tensor[i, :len(R_orb_i)]` was written, so row 550 onward was 0.0 for
+    mio-1-1 while row 549 was 5.82095.  `torch.searchsorted` requires a sorted
+    boundary tensor; against a row that rises then drops to zero its result is
+    arbitrary, which is why the per-pair lookup could not simply index
+    `R_tensor` as it stood.
 
-    Masking around the zero tail at the call site was considered and rejected:
-    it makes the lookup correct only by caller discipline.  Filling the tail
-    makes it correct by construction.
+    Task 2 fills the tail by continuing each pair's own arithmetic progression
+    (`R[k] == (k + 1) * step`, and the grid starts one step in, so `R_orb_i[0]`
+    IS the step).  Masking around the zero tail at the call site was considered
+    and rejected: it makes the lookup correct only by caller discipline, while
+    filling the tail makes it correct by construction.
     """
 
     def check():
@@ -822,6 +829,444 @@ def test_r_tensor_rows_are_strictly_increasing():
                 f"{name} R_tensor row {i} is not strictly increasing across its "
                 f"full {R_TENSOR_WIDTH}-entry width"
             )
+
+
+# --- Per-pair lookup (plan 05-01 Task 2, decision D-01, requirement REG-06) --
+
+def test_per_pair_lookup_matches_global_for_single_grid():
+    """The per-pair lookup reproduces the global one exactly on one grid.
+
+    This is the REG-01 gate on the D-01 rewrite.  Both real parameter
+    directories use a single radial step throughout, so every pair's row is a
+    prefix of `R_orb` and `_pair_knot_lookup` must return exactly what the old
+    global expression returned.  `idx` is compared with `torch.equal` (integer
+    equality) and `dx` with `atol=0.0`, so a last-bit difference fails.
+
+    Also asserts that `const.R_orb` is still a registered attribute with an
+    unchanged shape for both directories.  That is not incidental: `_stress`,
+    `_ml_sk`, the SEDACS interface and the batched H0/S path all still read it,
+    and the per-pair path was added ALONGSIDE it rather than in place of it
+    precisely so that those out-of-scope callers keep working (REG-03).
+    """
+
+    def check():
+        from dftorch.Constants import Constants
+        from dftorch.Structure import Structure
+        from dftorch._h0ands import _pair_knot_lookup
+
+        results = []
+
+        mio = _mio_params(_ch4_xyz())
+        f_xyz = Path(_tmp_dir()) / "eu_n_perpair.xyz"
+        _write_eu_n_xyz(f_xyz, EU_N_SEPARATION)
+        eu = _f_params(f_xyz)
+
+        for label, params, expected_r_orb_len in (
+            ("mio-1-1", mio, MIO_GRID_LENGTH),
+            ("f_orbital_data", eu, F_GRID_LENGTH),
+        ):
+            const = Constants(params).to("cpu")
+            struct = Structure(params, const, device="cpu")
+            dR_mskd, IJ_pair_type = _neighbour_distances(
+                struct, const, params["RCUT_ELECTRONIC"]
+            )
+
+            idx_global, dx_global = _global_knot_lookup(
+                const.R_orb.detach(), dR_mskd
+            )
+            idx_pair, dx_pair = _pair_knot_lookup(
+                const.R_tensor.detach(),
+                const.n_grid.detach(),
+                IJ_pair_type,
+                dR_mskd,
+            )
+            results.append(
+                (
+                    label,
+                    bool(torch.equal(idx_global, idx_pair)),
+                    (dx_global - dx_pair).abs().max().item(),
+                    hasattr(const, "R_orb"),
+                    tuple(const.R_orb.shape),
+                    expected_r_orb_len,
+                    tuple(const.n_grid.shape),
+                    const.R_tensor.shape[0],
+                )
+            )
+        return results
+
+    for (
+        label,
+        idx_equal,
+        dx_max_diff,
+        has_r_orb,
+        r_orb_shape,
+        expected_len,
+        n_grid_shape,
+        n_pairs,
+    ) in run_with_float64(check):
+        assert idx_equal, f"{label}: per-pair idx differs from the global idx"
+        assert dx_max_diff == 0.0, (
+            f"{label}: per-pair dx differs from the global dx by {dx_max_diff!r}"
+        )
+        assert has_r_orb, f"{label}: const.R_orb was removed"
+        assert r_orb_shape == (expected_len,), (
+            f"{label}: const.R_orb shape changed to {r_orb_shape}"
+        )
+        # n_grid carries one entry per ordered element pair.
+        assert n_grid_shape == (n_pairs,)
+
+
+def test_ch4_h0_s_bit_identical_after_per_pair_lookup():
+    """CH4 + mio-1-1 H0/S are bit-identical through the per-pair path.
+
+    Two independent checks, and both are needed:
+
+    1. The per-pair matrices equal the global-fallback matrices under
+       `torch.equal`, NOT `torch.allclose`.  Element for element, zero
+       tolerance.
+    2. The per-pair reductions equal the checksum literals recorded in Task 1
+       on the PRE-D-01 code path.  Check 1 alone would only compare the new
+       path against itself in the same process; check 2 is what ties it back to
+       behaviour that existed before the rewrite (REG-01, CLN-05).
+
+    A refactor that "improves" any of these numbers is still a regression here.
+    """
+
+    def check():
+        _, H0_g, dH0_g, S_g, dS_g = _ch4_h0_and_s(_tmp_dir(), per_pair=False)
+        _, H0_p, dH0_p, S_p, dS_p = _ch4_h0_and_s(_tmp_dir(), per_pair=True)
+        return (
+            bool(torch.equal(H0_g, H0_p)),
+            bool(torch.equal(S_g, S_p)),
+            bool(torch.equal(dH0_g, dH0_p)),
+            bool(torch.equal(dS_g, dS_p)),
+            H0_p.sum().item(),
+            S_p.sum().item(),
+            H0_p.abs().sum().item(),
+            S_p.abs().sum().item(),
+            dH0_p.abs().sum().item(),
+            dS_p.abs().sum().item(),
+        )
+
+    (
+        h0_same,
+        s_same,
+        dh0_same,
+        ds_same,
+        h0_sum,
+        s_sum,
+        h0_abs,
+        s_abs,
+        dh0_abs,
+        ds_abs,
+    ) = run_with_float64(check)
+
+    assert h0_same, "H0 moved when the per-pair lookup was used"
+    assert s_same, "S moved when the per-pair lookup was used"
+    assert dh0_same, "dH0 moved when the per-pair lookup was used"
+    assert ds_same, "dS moved when the per-pair lookup was used"
+
+    assert h0_sum == CH4_H0_SUM
+    assert s_sum == CH4_S_SUM
+    assert h0_abs == CH4_H0_ABS_SUM
+    assert s_abs == CH4_S_ABS_SUM
+    assert dh0_abs == CH4_DH0_ABS_SUM
+    assert ds_abs == CH4_DS_ABS_SUM
+
+
+# Synthetic mixed-grid parameters.  0.1 Bohr is coarse for real physics but the
+# electronic table written by write_mixed_grid_skf_pair carries no physical
+# meaning; only the grid line matters here.
+MIXED_STEP_BOHR = 0.1
+MIXED_SHORT_NPTS = 40
+MIXED_LONG_NPTS = 80
+# The parser pads every table by 50 (_bond_integral.py:599), so the LOADED grid
+# lengths are npts + 50, not npts.
+MIXED_SHORT_LENGTH = MIXED_SHORT_NPTS + 50
+MIXED_LONG_LENGTH = MIXED_LONG_NPTS + 50
+BOHR_TO_ANGSTROM_LITERAL = 0.52917721
+
+
+def _write_mixed_skf_dir(directory: Path, pair_npts: dict, pair_step: dict) -> None:
+    """Write a four-file SKFPATH for the two-element systems below.
+
+    ``pair_npts`` and ``pair_step`` are keyed by the ``"H-H"`` style pair name.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in ("H-H", "H-N", "N-H", "N-N"):
+        elem_a, elem_b = name.split("-")
+        write_mixed_grid_skf_pair(
+            directory / f"{name}.skf",
+            elem_a,
+            elem_b,
+            step_bohr=pair_step[name],
+            npts=pair_npts[name],
+        )
+
+
+def _write_h_n_xyz(path: Path) -> None:
+    path.write_text(
+        "2\n"
+        "synthetic mixed-grid pair\n"
+        "H 0.00000000 0.00000000 0.00000000\n"
+        "N 1.00000000 0.00000000 0.00000000\n"
+    )
+
+
+def _mixed_const(skf_dir: Path, xyz: Path):
+    from dftorch.Constants import Constants
+
+    return Constants(
+        {
+            "FILENAME": str(xyz),
+            "SKFPATH": str(skf_dir) + os.sep,
+        }
+    ).to("cpu")
+
+
+def test_mixed_length_grids_use_their_own_rows():
+    """A short pair clamps to its OWN grid length; a long pair does not.
+
+    Built from `write_mixed_grid_skf_pair`: H-H, H-N and N-H are given 40
+    tabulated points (loaded length 90) while N-N is given 80 (loaded length
+    130), all at the same 0.1 Bohr step.  This is the BENIGN mixed case from
+    decision D-01, where the knots coincide and only the tabulated extent
+    differs, so it must load rather than being rejected.
+
+    The probe distance sits past the short pairs' own tabulated end but inside
+    the long pair's.  With the per-pair lookup the short pair's index clamps to
+    its own `n_grid` while the long pair's index does not, and the clamped index
+    selects an all-zero spline interval, so the short pair contributes nothing
+    instead of borrowing a coefficient from a longer grid.  The old global
+    expression gave BOTH pairs the same unclamped index, which is exactly the
+    shared-ruler behaviour REG-06 closes.
+
+    See `tests/f_orbital_data/README-MIXED-GRID-FIXTURE.md` for why this fixture
+    is synthesised and for the honest limitation of a synthetic case.
+    """
+
+    def check():
+        from dftorch._h0ands import _pair_knot_lookup
+
+        skf_dir = Path(_tmp_dir()) / "mixed_length_skf"
+        xyz = Path(_tmp_dir()) / "mixed_length.xyz"
+        _write_h_n_xyz(xyz)
+        _write_mixed_skf_dir(
+            skf_dir,
+            {
+                "H-H": MIXED_SHORT_NPTS,
+                "H-N": MIXED_SHORT_NPTS,
+                "N-H": MIXED_SHORT_NPTS,
+                "N-N": MIXED_LONG_NPTS,
+            },
+            dict.fromkeys(("H-H", "H-N", "N-H", "N-N"), MIXED_STEP_BOHR),
+        )
+        const = _mixed_const(skf_dir, xyz)
+
+        # TYPE holds atomic numbers, so pair_lookup is indexed by them.
+        pt_short = int(const.pair_lookup[1, 1])
+        pt_long = int(const.pair_lookup[7, 7])
+
+        step_a = const.R_tensor[pt_short, 0].item()
+        # Past the short pair's own tabulated end, inside the long pair's.
+        probe = step_a * (MIXED_SHORT_LENGTH + 13.5)
+
+        pair_type = torch.tensor([pt_short, pt_long])
+        dR = torch.tensor([probe, probe])
+        idx, dx = _pair_knot_lookup(
+            const.R_tensor.detach(), const.n_grid.detach(), pair_type, dR
+        )
+        idx_global, _ = _global_knot_lookup(const.R_orb.detach(), dR)
+
+        return (
+            int(const.n_grid[pt_short]),
+            int(const.n_grid[pt_long]),
+            len(const.R_orb),
+            step_a,
+            probe,
+            [int(v) for v in idx.tolist()],
+            [int(v) for v in idx_global.tolist()],
+            const.coeffs_tensor[pt_short, int(idx[0])].abs().sum().item(),
+        )
+
+    (
+        n_short,
+        n_long,
+        r_orb_len,
+        step_a,
+        probe,
+        idx_pair,
+        idx_global,
+        short_coeff_magnitude,
+    ) = run_with_float64(check)
+
+    # The directory loaded, and the two pairs really do carry different lengths.
+    assert n_short == MIXED_SHORT_LENGTH
+    assert n_long == MIXED_LONG_LENGTH
+    # R_orb still holds the LONGEST grid seen.
+    assert r_orb_len == MIXED_LONG_LENGTH
+    assert abs(step_a - MIXED_STEP_BOHR * BOHR_TO_ANGSTROM_LITERAL) < 1e-10
+
+    # The short pair clamps to its own n_grid; the long pair does not.
+    assert idx_pair[0] == n_short, (
+        f"short pair index {idx_pair[0]} did not clamp to its own n_grid {n_short}"
+    )
+    assert idx_pair[1] < n_long, (
+        f"long pair index {idx_pair[1]} clamped although {probe!r} is inside its grid"
+    )
+    assert idx_pair[0] != idx_pair[1], (
+        "both pairs selected the same knot, so the rows are still shared"
+    )
+
+    # The old global expression gave BOTH pairs the long grid's index.  That is
+    # the shared-ruler defect, recorded here so the difference is visible rather
+    # than asserted in the abstract.
+    assert idx_global[0] == idx_global[1] == idx_pair[1]
+
+    # The backstop truth: past its own cutoff the short pair lands on the zero
+    # spline interval rather than on a borrowed coefficient.
+    assert short_coeff_magnitude == 0.0
+
+
+def test_mixed_step_grids_read_their_own_radius():
+    """The hazardous case: differing STEP, where a shared ruler reads wrong.
+
+    Not required by the 05-01 acceptance criteria, and added deliberately.
+    `test_mixed_length_grids_use_their_own_rows` covers the BENIGN case where
+    the knots coincide, so on its own it never demonstrates that the defect
+    D-01 closes changes any radius at all.  Decision D-01 is explicit that the
+    hazard is a differing grid STEP: the f dataset uses 0.04 Bohr while
+    `mio-1-1`, `3ob-3-1`, `pbc-0-3` and `trans3d-0-1` all use 0.02, so a single
+    SKFPATH mixing them is wrong by a factor of two.
+
+    Here H-H (and the heteronuclear pairs) get 0.1 Bohr with 60 points, while
+    N-N gets 0.2 Bohr with 40.  H-H's grid is the longer one, so it becomes the
+    global `R_orb`.  The global expression therefore reads N-N's spline at
+    H-H's radius; the per-pair lookup reads it at N-N's own.  The two indices
+    differ by roughly the ratio of the steps, which is the factor-of-two error
+    D-01 describes.
+
+    Note this directory currently LOADS without complaint.  The explicit
+    refusal for a mixed-step SKFPATH is requirement REG-05 and belongs to plan
+    05-04; this test only records what the lookup does with such a directory.
+    """
+
+    def check():
+        from dftorch._h0ands import _pair_knot_lookup
+
+        skf_dir = Path(_tmp_dir()) / "mixed_step_skf"
+        xyz = Path(_tmp_dir()) / "mixed_step.xyz"
+        _write_h_n_xyz(xyz)
+        _write_mixed_skf_dir(
+            skf_dir,
+            {"H-H": 60, "H-N": 60, "N-H": 60, "N-N": 40},
+            {"H-H": 0.1, "H-N": 0.1, "N-H": 0.1, "N-N": 0.2},
+        )
+        const = _mixed_const(skf_dir, xyz)
+
+        pt_fine = int(const.pair_lookup[1, 1])
+        pt_coarse = int(const.pair_lookup[7, 7])
+
+        probe = 2.0  # Angstrom, comfortably inside both grids.
+        pair_type = torch.tensor([pt_fine, pt_coarse])
+        dR = torch.tensor([probe, probe])
+        idx, _ = _pair_knot_lookup(
+            const.R_tensor.detach(), const.n_grid.detach(), pair_type, dR
+        )
+        idx_global, _ = _global_knot_lookup(const.R_orb.detach(), dR)
+
+        return (
+            const.R_tensor[pt_fine, 0].item(),
+            const.R_tensor[pt_coarse, 0].item(),
+            len(const.R_orb),
+            [int(v) for v in idx.tolist()],
+            [int(v) for v in idx_global.tolist()],
+            const.R_tensor[pt_coarse, int(idx[1])].item(),
+            const.R_tensor[pt_coarse, int(idx_global[1])].item(),
+        )
+
+    (
+        step_fine,
+        step_coarse,
+        r_orb_len,
+        idx_pair,
+        idx_global,
+        radius_own,
+        radius_borrowed,
+    ) = run_with_float64(check)
+
+    # The two rows really do carry different steps, at a ratio of two.
+    assert abs(step_fine - 0.1 * BOHR_TO_ANGSTROM_LITERAL) < 1e-10
+    assert abs(step_coarse - 0.2 * BOHR_TO_ANGSTROM_LITERAL) < 1e-10
+    # R_orb is the LONGEST grid, which is H-H's 60 + 50 = 110 points.
+    assert r_orb_len == 110
+
+    # The fine pair is unaffected: its own row IS the global R_orb.
+    assert idx_pair[0] == idx_global[0]
+    # The coarse pair is not.  The shared ruler put its knot roughly twice as
+    # far along its own grid as it belongs.
+    assert idx_pair[1] != idx_global[1]
+    assert idx_global[1] > idx_pair[1]
+
+    # Stated as a radius rather than an index, which is what actually matters:
+    # the per-pair knot sits just below the 2.0 A probe, the borrowed one does
+    # not sit anywhere near it.
+    assert radius_own <= 2.0
+    assert radius_borrowed > 2.0
+    assert radius_borrowed > 1.9 * radius_own
+
+
+def test_mio_c_h_p_has_genuinely_mixed_grid_lengths():
+    """A REAL mixed-length case already lives in tests/data_skf_mio-1-1.
+
+    Not required by the 05-01 acceptance criteria, and added deliberately.  The
+    plan text states that no mixed-grid fixture exists in this repository.  That
+    is true of a mixed STEP but false of a mixed LENGTH: measured 2026-07-31,
+    the `mio-1-1` grid lines are `0.02, 500` for most pairs, `0.02 600` for
+    every Zn pair, and `0.02, 619` for every P pair.
+
+    A C/H/P system therefore loads nine ordered pairs whose rows carry two
+    genuinely different real lengths, 550 and 669, at one common step.  Pinning
+    that here means the per-pair machinery is exercised against real data and
+    not only against a generator, which is the weakest part of the synthetic
+    tests above.  It is also the benign case D-01 says must keep loading, so
+    this test doubles as a guard that the REG-05 work in plan 05-04 does not
+    start rejecting `mio-1-1`.
+    """
+
+    def check():
+        from dftorch.Constants import Constants
+
+        xyz = Path(_tmp_dir()) / "c_h_p.xyz"
+        xyz.write_text(
+            "3\n"
+            "C/H/P from mio-1-1: two real grid lengths at one step\n"
+            "C 0.00000000 0.00000000 0.00000000\n"
+            "H 1.10000000 0.00000000 0.00000000\n"
+            "P 2.90000000 0.00000000 0.00000000\n"
+        )
+        const = Constants(_mio_params(xyz)).to("cpu")
+        R_tensor = const.R_tensor.detach()
+        monotonic = all(
+            bool((R_tensor[i, 1:] > R_tensor[i, :-1]).all())
+            for i in range(R_tensor.shape[0])
+        )
+        return (
+            sorted(set(int(v) for v in const.n_grid.detach().tolist())),
+            len(const.R_orb),
+            monotonic,
+            R_tensor.shape[0],
+        )
+
+    lengths, r_orb_len, monotonic, n_pairs = run_with_float64(check)
+
+    # C, H, P give 3 x 3 = 9 ordered pairs.
+    assert n_pairs == 9
+    # 500 + 50 for the C/H pairs, 619 + 50 for every P pair.
+    assert lengths == [550, 669]
+    # R_orb is still the longest grid seen.
+    assert r_orb_len == 669
+    assert monotonic, "a real mixed-length load produced a non-monotonic row"
 
 
 # --- tmp dir helper ----------------------------------------------------------

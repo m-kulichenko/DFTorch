@@ -9,7 +9,7 @@ import torch
 
 from ._tools import ordered_pairs_from_TYPE
 
-symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the skf file header to the number of protons, NOTE should add more elements
+symbol_to_number: Final[dict[str, int]] = { #Converts element name to atomic number
     "H": 1,
     "He": 2,
     "Li": 3,
@@ -98,7 +98,7 @@ symbol_to_number: Final[dict[str, int]] = { #XConverts tthe first number in the 
     "Lr": 103,
 }
 
-_CHANNELS: Final[list[str]] = [ #Aryan NOTE -> keep an internal order of skf extended standard order?
+_CHANNELS: Final[list[str]] = [ #internal order of all channels, H, S and all spdf pairs. Extended skf format 
     "Hff0",
     "Hff1",
     "Hff2",
@@ -141,7 +141,7 @@ _CHANNELS: Final[list[str]] = [ #Aryan NOTE -> keep an internal order of skf ext
     "Sss0",
 ]
 
-_SIMPLE_CHANNELS: Final[list[str]] = [
+_SIMPLE_CHANNELS: Final[list[str]] = [#Simple channel format, gets converted to extended
     "Hdd0",
     "Hdd1",
     "Hdd2",
@@ -172,8 +172,6 @@ N_SK_CHANNELS: Final[int] = len(_CHANNELS)
 MAX_SHELLS: Final[int] = 4
 EV_PER_HARTREE: Final[float] = 27.21138625
 BOHR_TO_ANGSTROM: Final[float] = 0.52917721
-
-
 
 def load_bond_integral_parameters( #old function, not for skf files
     neighbor_I: torch.Tensor,
@@ -241,7 +239,6 @@ def load_bond_integral_parameters( #old function, not for skf files
     f.close()
     return fss_sigma
 
-
 def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor: #Old function, not for skf files
     """Compute bond integrals for many pairs in a vectorized piecewise form.
 
@@ -295,7 +292,6 @@ def bond_integral_vectorized(dR: torch.Tensor, f: torch.Tensor) -> torch.Tensor:
     )
     # Region 3 stays zero
     return f[:, 0] * X
-
 
 def bond_integral_with_grad_vectorized( #old function, not for skf files
     dR: torch.Tensor, f: torch.Tensor
@@ -366,7 +362,6 @@ def bond_integral_with_grad_vectorized( #old function, not for skf files
     # Region 3 stays zero
     return f[:, 0] * dSx
 
-
 def _expand_tokens(tokens: list[str]) -> list[str]: #Skf files use 8* 0.0 a lot, useful to expand this
     """Expand Fortran-style repetition tokens.
 
@@ -392,7 +387,6 @@ def _expand_tokens(tokens: list[str]) -> list[str]: #Skf files use 8* 0.0 a lot,
         else:
             out.append(t)
     return out
-
 
 def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]: #Converts everything to an extended format skf row
     """Return one electronic SKF row in the 40-column extended order.
@@ -429,7 +423,6 @@ def _normalize_skf_row(tokens: list[str], path: str, line: str) -> list[float]: 
         f"Expected 20 or 40 electronic values in {path}, got {len(values)} in line: {line}"
     )
 
-
 def _resolve_skf_path(skfpath: str, label_name: str) -> str: #File name formatting function, can change to dashed cuz it's easier
     """Resolve an SKF pair label to either dashed or undashed filenames.
 
@@ -460,7 +453,6 @@ def _resolve_skf_path(skfpath: str, label_name: str) -> str: #File name formatti
         return undashed
 
     return dashed
-
 
 def _split_skf_pair_name(name: str) -> tuple[str, str]: # different formatted files can still be found
     """Split an SKF basename into its two element symbols.
@@ -493,8 +485,7 @@ def _split_skf_pair_name(name: str) -> tuple[str, str]: # different formatted fi
 
     raise ValueError(f"Could not parse SKF pair name: {name}")
 
-
-def _validate_nested_shells(
+def _validate_nested_shells( #Requires all lower shells to exist if higher shell exists (s,p,d,f)
     elem: str,
     has_s: bool,
     has_p: bool,
@@ -528,24 +519,25 @@ def _validate_nested_shells(
         raise ValueError(f"{path}: {elem} p-shell basis requires an s shell")
 
 
-def _shell_metadata_from_presence(
+def _shell_metadata_from_presence(#returns n_orb, max_ang, max_ang_occ given shell presence and occupation masks
     shell_presence: tuple[bool, bool, bool, bool],
     shell_occ: tuple[float, float, float, float],
 ) -> tuple[int, int, int]:
     """Return ``(n_orb, max_ang, max_ang_occ)`` for s/p/d/f shell metadata."""
-    n_orb = sum((2 * l + 1) for l, present in enumerate(shell_presence) if present)
+    n_orb = sum((2 * l + 1) for l, present in enumerate(shell_presence) if present) #Number of atomic basis functions contributed
     max_ang = max(
         (l + 1 for l, present in enumerate(shell_presence) if present),
         default=0,
-    )
+    ) #(1,2,3,4) = (s,p,d,f), returns highest basis shell available to use
     max_ang_occ = max(
         (l + 1 for l, occ in enumerate(shell_occ) if occ != 0.0),
         default=0,
-    )
-    return n_orb, max_ang, max_ang_occ
+    ) #returns highest s,p,d,f with occupation (ex. Lanthanum could have f shell max_ang but no occupied f orbitals)
+    return n_orb, max_ang, max_ang_occ 
 
 
-def read_skf_table(
+#Reads skf table, fills out arrays with indices corresponding to atomic number with relevant info
+def read_skf_table( #Note that the parameters are the arrays where we should store all the respective info
     path: str,
     N_ORB: torch.Tensor,
     MAX_ANG: torch.Tensor,
@@ -645,7 +637,7 @@ def read_skf_table(
                     f"Expected 10 simple homonuclear header values in {path}, "
                     f"got {len(header_tokens)}"
                 )
-            (
+            ( #if the length = 10, so it's simple format
                 Ed,
                 Ep,
                 Es,
@@ -777,7 +769,7 @@ def channels_to_matrix(
     return torch.stack([channels[ch] for ch in order], dim=1)
 
 
-def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor: #Probably have to compute for f orbitals too
+def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor: #Splines all 40 channels across space in extended format
     """Compute cubic spline coefficients for all channels.
 
     Parameters
@@ -830,7 +822,7 @@ def cubic_spline_coeffs(R: torch.Tensor, M: torch.Tensor) -> torch.Tensor: #Prob
     return coeffs
 
 
-def _extract_blocks(text: str, keyword: str) -> list[str]:
+def _extract_blocks(text: str, keyword: str) -> list[str]: #Helps read wfc.hsd files
     """
     Extract all top-level blocks matching:
         keyword = { ... }
@@ -867,7 +859,7 @@ def _extract_blocks(text: str, keyword: str) -> list[str]:
     return results
 
 
-def read_wfc_hsd(
+def read_wfc_hsd( #can also get info from here
     path: str,
     N_ORB: torch.Tensor,
     MAX_ANG: torch.Tensor,
@@ -929,7 +921,7 @@ def read_wfc_hsd(
         if not any(shell_presence):
             continue
 
-        _validate_nested_shells(sym, *shell_presence, path)
+        _validate_nested_shells(sym, *shell_presence, path) #checks to make sure you don't skip a shell
         n_orb, max_ang, max_ang_occ = _shell_metadata_from_presence(
             tuple(shell_presence),
             tuple(shell_occ),
@@ -945,9 +937,10 @@ def read_wfc_hsd(
         MAX_ANG_OCC[Z] = max_ang_occ
 
 
-def get_skf_tensors(
+def get_skf_tensors( #master function that returns to you all of the information, after pulling from relevant files.
     TYPE: torch.Tensor, skfpath: str
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -977,11 +970,18 @@ def get_skf_tensors(
     All electronic SK tables are normalized to the official 40-channel extended
     order. The return tuple extends the historical layout with f-shell metadata:
     ``N_F``, ``EF``, ``UF``, and ``SHELL_PRESENT``.
+
+    The tuple also carries ``n_grid`` immediately after ``R_orb``: an integer
+    tensor of shape ``(n_pairs,)`` holding each pair's own tabulated grid
+    length. Together with the now strictly-increasing ``R_tensor`` rows it is
+    what lets ``_h0ands._pair_knot_lookup`` find each pair's spline knot against
+    that pair's own radial grid instead of against the single global ``R_orb``
+    (decision D-01, requirement REG-06).
     """
     _, _, label_list = ordered_pairs_from_TYPE(TYPE)
 
     n_pairs = len(label_list)
-    npts = 1300
+    npts = 1300 #NOTE MAGIC NUMBER, could be improved by directly reading in max length of the file
     dtype = torch.get_default_dtype()
     device = TYPE.device
 
@@ -991,9 +991,14 @@ def get_skf_tensors(
         device=device,
     )
     R_tensor = torch.zeros((n_pairs, npts + 1), dtype=dtype, device=device)
+    # Each pair's own tabulated grid length. R_tensor rows are all npts + 1 wide
+    # regardless of how long the real grid is, so the length has to be carried
+    # separately for the per-pair knot lookup to know where a pair's real data
+    # stops (decision D-01, requirement REG-06).
+    n_grid = torch.zeros(n_pairs, dtype=torch.int64, device=device)
 
     rep_splines_tensor = torch.zeros((n_pairs, 500, 6), dtype=dtype, device=device)
-    R_rep_tensor = torch.zeros((n_pairs, 500), dtype=dtype, device=device) + 1e8
+    R_rep_tensor = torch.zeros((n_pairs, 500), dtype=dtype, device=device) + 1e8 #NOTE 500 and 1e8 are both arbitrary. 1e8 is a placeholder and says there's no actual value here. 
     close_exp_tensor = torch.zeros((n_pairs, 3), dtype=dtype, device=device)
 
     N_ORB = torch.zeros(120, dtype=torch.int64, device=device)
@@ -1001,7 +1006,7 @@ def get_skf_tensors(
     MAX_ANG_OCC = torch.zeros(120, dtype=torch.int64, device=device)
     SHELL_PRESENT = torch.zeros((120, MAX_SHELLS), dtype=torch.bool, device=device)
 
-    TORE = torch.zeros(120, dtype=dtype, device=device)
+    TORE = torch.zeros(120, dtype=dtype, device=device) #120 since there's around 120 elements
     N_S = torch.zeros(120, dtype=dtype, device=device)
     N_P = torch.zeros(120, dtype=dtype, device=device)
     N_D = torch.zeros(120, dtype=dtype, device=device)
@@ -1067,6 +1072,36 @@ def get_skf_tensors(
                 coeffs[first_data_row + int(zero_row_idx[0].item()) :] = 0
 
         R_tensor[i, : len(R_orb_i)] = R_orb_i
+        n_grid[i] = len(R_orb_i)
+
+        # Continue the pair's own arithmetic progression across the rest of the
+        # row instead of leaving the tail at zero.
+        #
+        # A zero tail makes the row rise and then drop, so it is NOT sorted, and
+        # torch.searchsorted against an unsorted boundary tensor is undefined
+        # behaviour. The per-pair lookup indexes these rows directly, so the
+        # precondition has to hold by construction rather than by every caller
+        # remembering to mask. R[k] == (k + 1) * step by construction at the
+        # grid build above, and the grid starts one step in, so R_orb_i[0] IS
+        # the step and the extension is the same progression continued.
+        #
+        # Nothing is claimed about the physics out there: every coefficient
+        # beyond a pair's tabulated cutoff is already zero, so a knot landing in
+        # the extended region evaluates to zero either way. The extension only
+        # restores sortedness.
+        n_i = len(R_orb_i)
+        if n_i < R_tensor.shape[1]:
+            step_i = R_orb_i[0]
+            R_tensor[i, n_i:] = (
+                torch.arange(
+                    n_i + 1,
+                    R_tensor.shape[1] + 1,
+                    dtype=dtype,
+                    device=device,
+                )
+                * step_i
+            )
+
         coeffs_tensor[i, : len(coeffs)] = coeffs
 
         if R_orb_master is None or len(R_orb_i) > len(R_orb_master):
@@ -1102,6 +1137,7 @@ def get_skf_tensors(
     return (
         R_tensor,
         R_orb,
+        n_grid,
         coeffs_tensor,
         R_rep_tensor,
         rep_splines_tensor,

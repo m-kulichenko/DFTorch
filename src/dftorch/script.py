@@ -755,6 +755,11 @@ def check_get_skf_tensors_metadata(skf_dir: Path, bond, device: torch.device) ->
     (
         _R_tensor,
         _R_orb,
+        # Per-pair tabulated grid lengths, added to the get_skf_tensors return
+        # tuple by plan 05-01 (decision D-01, requirement REG-06). This file is
+        # loaded and executed by tests/test_f_orbital_skf.py via
+        # load_validation_script(), so a stale unpacking here is NOT inert.
+        _n_grid,
         coeffs_tensor,
         _R_rep_tensor,
         _rep_splines_tensor,

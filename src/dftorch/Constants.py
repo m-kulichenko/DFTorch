@@ -61,7 +61,7 @@ class Constants(torch.nn.Module):
         super().__init__()
 
         self.skfpath = dftorch_params["SKFPATH"] #Where to read the skf file from
-        self.magnetic_hubbard_ldep = dftorch_params.get("MAGNETIC_HUBBARD_LDEP", False)
+        self.magnetic_hubbard_ldep = dftorch_params.get("MAGNETIC_HUBBARD_LDEP", False) #Used in Spin-orbit coupling
         self.dftb3 = dftorch_params.get("DFTB3", False) 
         self.grad_param = dftorch_params.get("GRAD_PARAM", False)
         self.symbol_to_number = symbol_to_number
@@ -107,6 +107,7 @@ class Constants(torch.nn.Module):
         (
             R_tensor,
             R_orb,
+            n_grid,
             coeffs_tensor,
             R_rep_tensor,
             rep_splines_tensor,
@@ -152,6 +153,14 @@ class Constants(torch.nn.Module):
             self.w = None
 
         self.R_tensor = torch.nn.Parameter(R_tensor, requires_grad=False)
+        # Per-pair tabulated grid length, shape (n_pairs,). Companion to
+        # R_tensor for the per-pair knot lookup (decision D-01, REG-06).
+        self.n_grid = torch.nn.Parameter(n_grid, requires_grad=False)
+        # R_orb is the LONGEST grid seen across all pairs, kept unchanged and
+        # exported additively. ESDriver's batch path, _stress, _ml_sk and the
+        # SEDACS interface all still read it; the per-pair path was added
+        # alongside rather than in place of it so those callers keep working
+        # (REG-03 protected additively).
         self.R_orb = torch.nn.Parameter(R_orb, requires_grad=False)
         self.coeffs_tensor = torch.nn.Parameter(coeffs_tensor, requires_grad=False)
         self.R_rep_tensor = torch.nn.Parameter(R_rep_tensor, requires_grad=False)

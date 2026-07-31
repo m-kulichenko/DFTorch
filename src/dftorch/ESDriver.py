@@ -27,7 +27,7 @@ from ._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
 from ._slater_koster_pair import (
     F_ANGULAR_DERIVATIVES_AVAILABLE,
     F_DERIVATIVE_UNSUPPORTED_MESSAGE,
-    F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE,
+    F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE, #These are new error mesages
     FDerivativeUnsupportedError,
     FSpinPolarizationUnsupportedError,
 )
@@ -268,6 +268,12 @@ class ESDriver(torch.nn.Module):
             verbose=verbose,
             store_stress_metadata=const,
             ml_model_data=getattr(self, "ml_model_data", None),
+            # Per-pair radial grid rows and their tabulated lengths. Passing
+            # both selects the per-pair knot lookup, so each element pair is
+            # interpolated against its own grid instead of against the longest
+            # grid in the directory (decision D-01, requirement REG-06).
+            R_tensor=const.R_tensor,
+            n_grid=const.n_grid,
         )
         del (
             _,
