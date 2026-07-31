@@ -123,14 +123,14 @@ Plans:
   5. Batch, force, stress, MD, SEDACS, and ML-SK f-orbital status is explicitly documented as supported, deferred, or unsupported while preserving the validated prototype.
   6. An `SKFPATH` mixing radial grid steps either interpolates correctly per pair, or refuses loudly — never silently evaluates one pair's distances against another pair's grid.
 
-**Plans**: 2/8 plans executed
+**Plans**: 3/8 plans executed
 
 Plans:
 **Wave 1**
 
 - [x] 05-01-PLAN.md — Characterize today's knot arithmetic, then route each pair through its own radial grid row (D-01, REG-06)
 - [x] 05-02-PLAN.md — Settle REG-02 by developer decision and pin the simple-format baseline before any code changes
-- [ ] 05-03-PLAN.md — Port `script.py`'s independent-oracle SKF checks to pytest, then delete the file (D-03)
+- [x] 05-03-PLAN.md — Port `script.py`'s independent-oracle SKF checks to pytest, then delete the file (D-03)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -219,7 +219,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 2. Constants and Structure Basis Metadata | 1/1 | Complete    | 2026-07-27 |
 | 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
 | 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
-| 5. Regression Safety and Support Policy Cleanup | 2/8 | In Progress|  |
+| 5. Regression Safety and Support Policy Cleanup | 3/8 | In Progress|  |
 | 6. Self-Consistent SCF for f Systems | 0/TBD | Not started | - |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |

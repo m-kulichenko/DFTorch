@@ -47,3 +47,68 @@ to re-measure the literal on the current environment (and record the reason), or
 to leave it and document that this case is reproducible only to its stated
 `1e-8` eV band rather than bit-exactly. Do NOT widen the band; the band is
 already correct and already passes.
+
+---
+
+## 2. The CH4 derivative checksum misses its exact literal by 3e-13
+
+**Found during:** plan 05-03, Task 1 and Task 2 full-suite verification
+(2026-07-31).
+**Owner:** plan 05-01's exact radial-lookup regression gate
+(`tests/test_radial_grid.py:184`).
+**Status:** open, pre-existing and out of scope for 05-03. Not caused by the
+inventory document or deletion of `src/dftorch/script.py`.
+
+Both of these tests fail at the same assertion:
+
+- `test_ch4_h0_s_checksums_are_unchanged`
+- `test_ch4_h0_s_bit_identical_after_per_pair_lookup`
+
+The recorded literal and value measured on this machine are:
+
+    CH4_DH0_ABS_SUM = 777.8475256952822
+    measured         = 777.8475256952825
+    absolute delta   = 3.410605131648481e-13
+
+The failure reproduces when the two tests are run in isolation. The per-pair
+and global-fallback derivative tensors still compare bit-identical to each
+other inside `test_ch4_h0_s_bit_identical_after_per_pair_lookup`; only the
+historical scalar literal differs. Plan 05-03 changed no Hamiltonian,
+derivative, or radial-grid source, so changing either the literal or production
+arithmetic here would cross the plan boundary.
+
+**What should happen:** plan 05-01's regression owner should determine which
+environment produced the original scalar, then either restore that environment
+or re-record the literal with an explicit reproducibility decision. Plan 05-03
+must not weaken or rewrite a bit-identity gate it does not own.
+
+---
+
+## 3. D-02's pre-count of remaining runtime `print()` calls is stale
+
+**Found during:** plan 05-03, Task 2 deletion verification (2026-07-31).
+**Owner:** plan 05-05 (D-02 library-output classification).
+**Status:** open plan-time drift; out of scope for 05-03.
+
+Deleting `src/dftorch/script.py` removed exactly 57 `print(` occurrences, as
+promised. The count that remains at the current baseline is not the 112 stated
+in 05-CONTEXT.md:
+
+    git show 4d158dc:src/dftorch/script.py | rg -o 'print\(' | wc -l
+    57
+
+    rg -o 'print\(' src/dftorch/*.py | wc -l
+    124 across 15 top-level runtime modules
+
+    git ls-files 'src/dftorch/**/*.py' 'src/dftorch/*.py' | xargs rg -o 'print\(' | wc -l
+    182 across 20 runtime modules when subpackages are included
+
+The context's module count of 15 shows that 112 was intended to describe the
+top-level modules; that like-for-like count is now 124. No unrelated print site
+was edited in 05-03 because D-02 assigns their classification and gating to
+05-05.
+
+**What should happen:** plan 05-05 must regenerate its inventory from the
+current tree and use 124, not 112, as its top-level starting count. It should
+also state explicitly whether `_legacy/`, `sedacs/`, and `ewald_pme/` are in its
+scope; including them raises the recursive baseline to 182.

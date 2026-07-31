@@ -67,7 +67,7 @@ Requirements for the initial f-orbital support milestone. Each maps to roadmap p
 - [ ] **CLN-02**: Channel lookup and AO ordering are centralized enough for human troubleshooting.
 - [ ] **CLN-03**: Remaining hard-coded `1/4/9` orbital assumptions are audited and either extended to `16` or guarded.
 - [ ] **CLN-04**: Batch, force, stress, MD, SEDACS, and ML-SK f-orbital support status is explicitly documented as supported, deferred, or unsupported.
-- [ ] **CLN-05**: Cleanup preserves the working prototype and simple-format regression tests.
+- [x] **CLN-05**: Cleanup preserves the working prototype and simple-format regression tests.
 
 ### Self-Consistency and f Coulomb Blocks
 
@@ -159,7 +159,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLN-02 | Phase 5 | Pending |
 | CLN-03 | Phase 5 | Pending |
 | CLN-04 | Phase 5 | Pending |
-| CLN-05 | Phase 5 | Pending |
+| CLN-05 | Phase 5 | Complete |
 | SCC-01 | Phase 6 | Pending |
 | SCC-02 | Phase 6 | Pending |
 | SCC-03 | Phase 6 | Pending |

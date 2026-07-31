@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 05
-current_phase_name: Regression Safety and Support Policy Cleanup
+current_phase_name: regression-safety-and-support-policy-cleanup
 status: executing
-stopped_at: Completed 05-01-PLAN.md (per-pair Slater-Koster radial lookup, D-01/REG-06)
-last_updated: "2026-07-31T16:53:16.417Z"
+stopped_at: Completed 05-03-PLAN.md
+last_updated: "2026-07-31T19:46:21.427Z"
 last_activity: 2026-07-31
 last_activity_desc: Phase 05 execution started
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 17
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -23,16 +23,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-17)
 
 **Core value:** DFTorch can run scientifically valid f-orbital DFTB simulations without changing numerical results for existing simple-format calculations.
-**Current focus:** Phase 05 — Regression Safety and Support Policy Cleanup
+**Current focus:** Phase 05 — regression-safety-and-support-policy-cleanup
 
 ## Current Position
 
-Phase: 05 (Regression Safety and Support Policy Cleanup) — EXECUTING
-Plan: 2 of 8
+Phase: 05 (regression-safety-and-support-policy-cleanup) — EXECUTING
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-07-31 — Phase 05 execution started
 
-Progress: [██████░░░░] 59%
+Progress: [███████░░░] 65%
 
 ## Performance Metrics
 
@@ -73,6 +73,7 @@ Progress: [██████░░░░] 59%
 | Phase 04 P05 | 5min | 1 tasks | 2 files |
 | Phase 05 P02 | 35 min | 2 tasks | 2 files |
 | Phase 05 P01 | ~55 min | 2 tasks | 8 files |
+| Phase 05 P03 | 10 min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,9 @@ Recent decisions affecting current work:
 - [Phase ?]: R_tensor rows are made genuinely monotonic by continuing each pair's own arithmetic progression, rather than masking around the zero tail at the call site
 - [Phase ?]: The per-pair knot lookup loops over torch.unique(pair_type); a batched 2-D searchsorted is forbidden because it materialises (n_neighbour_pairs, 1301) (threat T-05-04)
 - [Phase ?]: script.py IS executed by tests/test_f_orbital_skf.py via load_validation_script(), so its get_skf_tensors unpacking is not inert and was updated
+- [Phase 05]: Keep the SKF header oracle in a standard-library-only test module, separate from production imports. — A structurally separate parser plus an AST independence gate prevents the production parser from becoming its own oracle.
+- [Phase 05]: Use the current 28-function mechanical sweep as the script.py inventory authority. — The plan-time claim of 30 check/run functions was stale; the current file contains 16 check/run and 28 expanded check/run/expected/parse functions.
+- [Phase 05]: Do not alter inherited CH4 checksum drift or unrelated print sites in plan 05-03. — Those failures predate 05-03 and belong to the 05-01 regression gate and 05-05 output inventory.
 
 ### Pending Todos
 
@@ -136,6 +140,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-31T16:53:16.399Z
-Stopped at: Completed 05-01-PLAN.md (per-pair Slater-Koster radial lookup, D-01/REG-06)
+Last session: 2026-07-31T19:46:21.420Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
