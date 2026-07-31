@@ -2,7 +2,7 @@
 status: resolved
 trigger: "During Phase 05 execute-phase post-wave gating, tests/test_radial_grid.py::test_ch4_h0_s_checksums_are_unchanged fails because dh0_abs is 777.8475256952825 while CH4_DH0_ABS_SUM is 777.8475256952822. The difference is about 3.4e-13. User selected Fix now before Wave 2."
 created: 2026-07-31T21:14:45Z
-updated: 2026-07-31T21:51:10Z
+updated: 2026-07-31T21:52:35Z
 ---
 
 ## Current Focus
@@ -10,7 +10,7 @@ updated: 2026-07-31T21:51:10Z
 hypothesis: "CONFIRMED: exact equality against a scalar floating-point reduction is an invalid bit-identity oracle; the tensor is unchanged, but reduction order/environment changes its last bits"
 test: complete
 expecting: complete
-next_action: archive this resolved session and record the known numeric-precision pattern
+next_action: none; session archived and knowledge-base pattern recorded
 
 reasoning_checkpoint:
   hypothesis: Exact scalar equality fails because non-associative reduction order changes the final two ULPs even when every dH0 tensor byte is unchanged.
