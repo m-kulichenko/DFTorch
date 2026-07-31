@@ -494,10 +494,10 @@ def read_xyz(files: list[str], sort: bool = True) -> tuple[np.ndarray, np.ndarra
     SPECIES = COORDINATES[:, :, 0].astype(int)
     COORDINATES = COORDINATES[:, :, 1:4]
 
-    return SPECIES, COORDINATES #So I have a list of all the species I see
+    return SPECIES, COORDINATES #So I have a list of all the species I see, which is then looked up in skf files
 
 
-# ── Element-symbol → atomic-number lookup (covers Z = 1–54) ──────────
+# ── Element-symbol → atomic-number lookup (covers Z = 1–118) ──────────
 
 
 def read_pdb(

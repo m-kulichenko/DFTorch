@@ -34,6 +34,7 @@ src/dftorch/_stress.py
 src/dftorch/_thirdorder.py
 src/dftorch/_tools.py
 src/dftorch/_xl_tools.py
+src/dftorch/script.py
 src/dftorch.egg-info/PKG-INFO
 src/dftorch.egg-info/SOURCES.txt
 src/dftorch.egg-info/dependency_links.txt
@@ -50,6 +51,7 @@ src/dftorch/sedacs/MD.py
 src/dftorch/sedacs/SCF.py
 src/dftorch/sedacs/__init__.py
 src/dftorch/sedacs/sedacs_interface.py
+tests/test_f_orbital_skf.py
 tests/test_import.py
 tests/test_io.py
 tests/test_nearestneighborlist.py

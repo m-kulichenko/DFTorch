@@ -1,38 +1,54 @@
-import importlib.util
 import shutil
 import sys
 from pathlib import Path
 
 import torch
 
+# The checks these tests drive used to live in `src/dftorch/script.py`, which
+# this module loaded by filesystem path via `importlib.util.spec_from_file_location`.
+# Phase 5 plan 03 (decision D-03) moved them into `tests/` and deleted that file,
+# so they are now imported like any other test helper.  `skf_validation_support`
+# imports torch and the standard library only; nothing under `dftorch` is
+# imported until a test asks for it, which is what keeps the float64 harness
+# below meaningful.
+import skf_validation_support as validation
+
+
+def _purge_dftorch_modules() -> None:
+    for name in [
+        name
+        for name in sys.modules
+        if name == "dftorch" or name.startswith("dftorch.")
+    ]:
+        sys.modules.pop(name, None)
+
 
 def run_with_float64(fn):
+    """Run ``fn`` with float64 defaults and a freshly imported dftorch.
+
+    The purge on ENTRY matters and is not decoration.  Module-level state inside
+    `dftorch` is built at import time under whatever `torch.get_default_dtype()`
+    happens to be, and the loader this module used before plan 05-03 re-executed
+    every module file on every call, so it always got a float64 import for free.
+    A plain `importlib.import_module` returns whatever is already cached, so the
+    harness now has to guarantee the same thing itself: purge first, set float64,
+    then let the test import.  Without the entry purge these tests would silently
+    depend on which test module ran before them.
+    """
     previous_dtype = torch.get_default_dtype()
     previous_modules = {
         name: module
         for name, module in sys.modules.items()
         if name == "dftorch" or name.startswith("dftorch.")
     }
+    _purge_dftorch_modules()
     torch.set_default_dtype(torch.float64)
     try:
         return fn()
     finally:
         torch.set_default_dtype(previous_dtype)
-        for name in [name for name in sys.modules if name == "dftorch" or name.startswith("dftorch.")]:
-            sys.modules.pop(name, None)
+        _purge_dftorch_modules()
         sys.modules.update(previous_modules)
-
-
-def load_validation_script():
-    project_root = Path(__file__).resolve().parents[1]
-    script_path = project_root / "src" / "dftorch" / "script.py"
-    spec = importlib.util.spec_from_file_location("dftorch_phase1_validation", script_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load validation script from {script_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def write_xyz(
@@ -97,7 +113,7 @@ def write_simple_skf(
 
 def build_structure(validation, project_root: Path, skf_dir: Path, xyz_path: Path, const):
     """Instantiate a single Structure from an already-written XYZ file."""
-    structure_mod = validation.load_dftorch_module(project_root, "Structure")
+    structure_mod = validation.import_dftorch_module("Structure")
     return structure_mod.Structure(
         {
             "SKFPATH": str(skf_dir),
@@ -120,14 +136,14 @@ def build_h0_and_s(validation, project_root: Path, skf_dir: Path, elements: list
     ``H0_and_S_vectorized``) but skips overlap inversion, repulsion, Coulomb,
     SCF, and forces so the H0/S contract can be tested in isolation.
     """
-    const = validation.build_test_constants(project_root, skf_dir, None, elements, xyz_path)
+    const = validation.build_test_constants(skf_dir, elements, xyz_path)
     # Constants only needs the species list; rewrite the geometry so callers can
     # pick a separation that lies inside the fixture's radial grid.
     write_xyz(xyz_path, elements, spacing=spacing, axis=axis)
     struct = build_structure(validation, project_root, skf_dir, xyz_path, const)
 
-    nnl_mod = validation.load_dftorch_module(project_root, "_nearestneighborlist")
-    h0ands_mod = validation.load_dftorch_module(project_root, "_h0ands")
+    nnl_mod = validation.import_dftorch_module("_nearestneighborlist")
+    h0ands_mod = validation.import_dftorch_module("_h0ands")
 
     (
         _,
@@ -177,10 +193,9 @@ def build_h0_and_s(validation, project_root: Path, skf_dir: Path, elements: list
 
 
 def find_element_with_shells(validation, skf_dir: Path, bond, shell_present: list[bool]) -> str:
-    for sym in validation.collect_elements_from_skf_dir(skf_dir, bond):
+    for sym in validation.collect_elements_independently(skf_dir):
         metadata = validation.parse_expected_homonuclear_metadata(
-            validation.resolve_homonuclear_skf(skf_dir, sym, bond),
-            bond,
+            validation.resolve_homonuclear_skf_independently(skf_dir, sym),
         )
         if metadata is not None and list(metadata["SHELL_PRESENT"]) == shell_present:
             return sym
@@ -188,12 +203,12 @@ def find_element_with_shells(validation, skf_dir: Path, bond, shell_present: lis
 
 
 def assert_simple_format_metadata_case(validation, project_root, bond, skf_dir: Path, tmp_path: Path, element: str) -> None:
-    metadata = validation.expected_metadata_by_element(skf_dir, bond, [element])
+    metadata = validation.expected_metadata_by_element(skf_dir, [element])
     xyz_path = tmp_path / f"{element}_metadata.xyz"
     write_xyz(xyz_path, [element])
-    const = validation.build_test_constants(project_root, skf_dir, bond, [element], xyz_path)
+    const = validation.build_test_constants(skf_dir, [element], xyz_path)
 
-    structure_mod = validation.load_dftorch_module(project_root, "Structure")
+    structure_mod = validation.import_dftorch_module("Structure")
     struct = structure_mod.Structure(
         {
             "SKFPATH": str(skf_dir),
@@ -208,15 +223,14 @@ def assert_simple_format_metadata_case(validation, project_root, bond, skf_dir: 
         ignore_spin=True,
     )
 
-    validation.check_constants_against_expected(const, skf_dir, bond, [element])
+    validation.check_constants_against_expected(const, skf_dir, [element])
     validation.check_single_structure_layout(struct, [element], metadata)
 
 
 def test_f_orbital_skf_parser_and_spline_gate():
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
         skf_dir = project_root / "tests" / "f_orbital_data"
 
         return validation.run_bond_integral_tests(
@@ -230,9 +244,8 @@ def test_f_orbital_skf_parser_and_spline_gate():
 
 def test_compact_only_f_orbital_skf_directory(tmp_path):
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
         source_dir = project_root / "tests" / "f_orbital_data"
 
         for source in source_dir.glob("*.skf"):
@@ -251,24 +264,22 @@ def test_compact_only_f_orbital_skf_directory(tmp_path):
 
 def test_f_orbital_constants_metadata_gate():
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
         skf_dir = project_root / "tests" / "f_orbital_data"
 
-        return validation.run_constants_tests(project_root, skf_dir, bond)
+        return validation.run_constants_tests(project_root, skf_dir)
 
     assert run_with_float64(check) == []
 
 
 def test_f_orbital_structure_metadata_gate():
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
         skf_dir = project_root / "tests" / "f_orbital_data"
 
-        return validation.run_structure_tests(project_root, skf_dir, bond)
+        return validation.run_structure_tests(project_root, skf_dir)
 
     assert run_with_float64(check) == []
 
@@ -279,7 +290,7 @@ def expected_ss_channel_value(validation, project_root, const, struct, channel_n
     Returns the mean of the I->J and J->I spline values, which is what the
     symmetrized H0/S s-s entry must equal for a two-atom system.
     """
-    sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+    sk_mod = validation.import_dftorch_module("_slater_koster_pair")
     channel = sk_mod.sk_channel_index(channel_name)
 
     dR = torch.sqrt(
@@ -310,10 +321,9 @@ def test_sk_channel_lookup_matches_bond_integral_order():
     """HSK-01/HSK-02 guard: SK channel names must track _bond_integral._CHANNELS."""
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
 
         assert list(sk_mod.SK_CHANNEL_NAMES) == list(bond._CHANNELS), (
             "SK_CHANNEL_NAMES drifted from _bond_integral._CHANNELS"
@@ -351,7 +361,7 @@ def test_sk_channel_lookup_matches_bond_integral_order():
         else:
             raise AssertionError("Unknown channel names must raise KeyError")
 
-        structure_mod = validation.load_dftorch_module(project_root, "Structure")
+        structure_mod = validation.import_dftorch_module("Structure")
         assert (
             tuple(sk_mod.STRUCTURE_F_AO_ORDER)
             == tuple(structure_mod.AO_LABEL_TEMPLATE[9:16])
@@ -372,10 +382,9 @@ def test_f_angular_formula_source_lock():
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
-        structure_mod = validation.load_dftorch_module(project_root, "Structure")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
+        structure_mod = validation.import_dftorch_module("Structure")
 
         source = sk_mod.F_FORMULA_SOURCE
         assert source["doi"] == "10.1088/0022-3719/13/4/016", source["doi"]
@@ -440,9 +449,8 @@ def test_f_free_h0_s_routing_regression(tmp_path):
     """HSK-02/HSK-07: 1-, 4-, and 9-orbital H0/S routes stay intact and correct."""
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
         simple_dir = project_root / "tests" / "data_skf_mio-1-1"
 
         sp_element = find_element_with_shells(validation, simple_dir, bond, [True, True, False, False])
@@ -552,9 +560,8 @@ def test_f_angular_orthogonality_identity():
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
 
         L, M, N, vectors = random_unit_directions(512)
         sf, pf, df, ff = f_angular_channel_matrices(sk_mod, L, M, N)
@@ -822,9 +829,8 @@ def test_f_angular_axis_blocks_match_hand_calculation():
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
 
         axes = {
             "x": (1.0, 0.0, 0.0),
@@ -877,9 +883,8 @@ def test_f_angular_parity_under_direction_reversal():
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
 
         L, M, N, _ = random_unit_directions(256, seed=99)
         cases = (
@@ -908,8 +913,7 @@ def test_eu_containing_h0_s_is_finite_shaped_and_symmetric(tmp_path):
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
+        project_root = validation.PROJECT_ROOT
         skf_dir = project_root / "tests" / "f_orbital_data"
 
         for label, elements, spacing in (
@@ -973,7 +977,7 @@ def directed_channel_value(validation, project_root, const, struct, i, j, channe
     (``const.R_orb`` plus ``const.coeffs_tensor``), so the test isolates the
     angular formulas and the AO placement rather than the radial grid.
     """
-    sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
+    sk_mod = validation.import_dftorch_module("_slater_koster_pair")
     channel = sk_mod.sk_channel_index(channel_name)
 
     dR = torch.sqrt(
@@ -1004,8 +1008,7 @@ def test_f_block_entries_match_hand_calculated_values(tmp_path):
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
+        project_root = validation.PROJECT_ROOT
         skf_dir = project_root / "tests" / "f_orbital_data"
 
         expectations = _axis_expectations()["z"]
@@ -1119,8 +1122,7 @@ def test_f_containing_pair_atom_order_reversal(tmp_path):
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
+        project_root = validation.PROJECT_ROOT
         skf_dir = project_root / "tests" / "f_orbital_data"
         spacing = 2.4
 
@@ -1191,12 +1193,11 @@ def test_f_containing_derivative_paths_are_guarded():
     """
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
-        h0ands_mod = validation.load_dftorch_module(project_root, "_h0ands")
-        stress_mod = validation.load_dftorch_module(project_root, "_stress")
-        esdriver_mod = validation.load_dftorch_module(project_root, "ESDriver")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
+        h0ands_mod = validation.import_dftorch_module("_h0ands")
+        stress_mod = validation.import_dftorch_module("_stress")
+        esdriver_mod = validation.import_dftorch_module("ESDriver")
 
         assert h0ands_mod.FAngularFormulaSourceError is sk_mod.FAngularFormulaSourceError
         assert (
@@ -1244,10 +1245,9 @@ def test_f_derivative_guard_rejects_f_systems():
     """D-09: the shared force guard fires for f elements and not otherwise."""
 
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        sk_mod = validation.load_dftorch_module(project_root, "_slater_koster_pair")
-        esdriver_mod = validation.load_dftorch_module(project_root, "ESDriver")
+        project_root = validation.PROJECT_ROOT
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
+        esdriver_mod = validation.import_dftorch_module("ESDriver")
 
         class _Struct:
             def __init__(self, types):
@@ -1276,9 +1276,8 @@ def test_f_derivative_guard_rejects_f_systems():
 
 def test_simple_format_f_free_metadata_regression(tmp_path):
     def check():
-        validation = load_validation_script()
-        project_root = validation.find_project_root()
-        bond = validation.load_dftorch_module(project_root, "_bond_integral")
+        project_root = validation.PROJECT_ROOT
+        bond = validation.import_dftorch_module("_bond_integral")
 
         s_only_dir = tmp_path / "s_only_skf"
         s_only_dir.mkdir()

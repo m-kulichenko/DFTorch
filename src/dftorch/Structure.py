@@ -22,7 +22,7 @@ SHELL_TYPE_IDS = (1, 2, 3, 4)  # 1=s, 2=p, 3=d, 4=f
 #   fy_z2_x2   = y(z^2 - x^2)
 #   fz_x2_y2   = z(x^2 - y^2)
 #   fxyz       = xyz
-AO_LABEL_TEMPLATE = (
+AO_LABEL_TEMPLATE = ( #An element has a set of basis functions. This maps basis functions to what they actually mean
     "s",
     "px",
     "py",
@@ -41,7 +41,7 @@ AO_LABEL_TEMPLATE = (
     "fxyz",
 )
 
-AO_SHELL_TEMPLATE = (
+AO_SHELL_TEMPLATE = ( #Maps basis functions to s,p,d,f
     1,
     2,
     2,
@@ -61,7 +61,7 @@ AO_SHELL_TEMPLATE = (
 )
 
 
-def _as_batched_species_and_coordinates(
+def _as_batched_species_and_coordinates( #format for batched mode
     species: torch.Tensor | Any,
     coordinates: torch.Tensor | Any,
     device: str,

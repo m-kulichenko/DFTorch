@@ -15,9 +15,13 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: SKF Canonicalization and Spline Validation** - Parser and spline paths prove simple and extended SKF files converge to one 40-channel representation. (completed 2026-07-21)
 - [x] **Phase 2: Constants and Structure Basis Metadata** - Constants and Structure expose consistent spdf shell, orbital, onsite, Hubbard, and density metadata. (completed 2026-07-27)
-- [ ] **Phase 3: H0/S Routing and f Angular Blocks** - H0/S assembly routes 16-orbital atom pairs and writes tested f-containing Slater-Koster blocks.
-- [ ] **Phase 4: SCF and Reference Simulation Validation** - f-containing single-system simulations reach the supported SCF path and are compared to documented reference observables.
+- [x] **Phase 3: H0/S Routing and f Angular Blocks** - H0/S assembly routes 16-orbital atom pairs and writes tested f-containing Slater-Koster blocks. (completed 2026-07-28)
+- [x] **Phase 4: SCF and Reference Simulation Validation** - f-containing single-system simulations reach the supported single-shot energy path and the Eu-N binding minimum is validated against a documented loose-band reference. (completed 2026-07-29)
 - [ ] **Phase 5: Regression Safety and Support Policy Cleanup** - Existing simple-format behavior, unsupported f modes, and prototype cleanup are locked behind tests and explicit policy.
+- [ ] **Phase 6: Self-Consistent SCF for f Systems** - f systems converge a real self-consistent charge loop, unlocking the shell-resolved Coulomb f angular blocks.
+- [ ] **Phase 7: f Angular Derivatives** - dH0/dS become correct and non-zero in f blocks, retiring the blanket derivative refusal.
+- [ ] **Phase 8: f Forces and Stress** - Forces and stress for f systems are produced and validated against finite differences.
+- [ ] **Phase 9: f Molecular Dynamics** - f systems run MDXL trajectories with validated forces.
 
 ## Phase Details
 
@@ -69,7 +73,9 @@ Plans:
   4. User can verify f-containing H0 and S matrices are finite, correctly shaped, and symmetric after assembly.
   5. Direction, atom-order, and AO-order conventions are covered by tests that fail on sign, ordering, or channel-selection drift.
 
-**Plans**: TBD
+**Plans**: 1/1 plans executed
+
+- [x] 03-01-PLAN.md
 
 ### Phase 4: SCF and Reference Simulation Validation
 
@@ -81,16 +87,33 @@ Plans:
   1. User can run a minimal f-containing system through H0/S construction without shape or routing failures.
   2. User can run a supported f-containing system through closed-shell SCF/energy calculation, or receive an explicit unsupported-mode error for a remaining blocker.
   3. Shell-resolved charge, Hubbard, and Coulomb data include f-shell dimensions wherever the supported SCF path requires them.
-  4. Reference-paper cases have documented geometry, parameter files, observables, units, and tolerances.
-  5. Supported f-orbital reference simulations reproduce selected reference observables within agreed tolerances.
+  4. The isolated Eu-N diatomic validation case has documented geometry, parameter files, observables, units, and tolerances.
+  5. The supported f-orbital Eu-N energy scan locates a minimum within the agreed loose sanity band (~10-20%) of the known Eu-N separation.
 
-**Plans**: TBD
+**Plans**: 5/5 plans executed
+Plans:
+**Wave 1**
+
+- [x] 04-01-PLAN.md — Single-shot non-SCC energy path for f systems, plus the spin-polarization guard (SIM-01, SIM-02).
+- [x] 04-02-PLAN.md — PME float32/float64 repair and the codebase-wide dtype audit (D-17, D-18).
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 04-03-PLAN.md — Validate f dimensions in shell-resolved Hubbard/charge data, gate the Coulomb Hubbard U on MAGNETIC_HUBBARD_LDEP, refuse silent f zeros (SIM-03).
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 04-04-PLAN.md — Document the Eu-N diatomic case and ship the energy-scan minimum gate (SIM-04, SIM-05).
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 04-05-PLAN.md — Human read of the Eu-N binding curve, applying the D-24 asymmetric failure rule (SIM-05).
 
 ### Phase 5: Regression Safety and Support Policy Cleanup
 
 **Goal**: The working f-orbital prototype is supportable, regression-safe, and explicit about deferred f-mode coverage.
 **Depends on**: Phase 4
-**Requirements**: REG-01, REG-02, REG-03, REG-04, CLN-01, CLN-02, CLN-03, CLN-04, CLN-05
+**Requirements**: REG-01, REG-02, REG-03, REG-04, REG-05, REG-06, CLN-01, CLN-02, CLN-03, CLN-04, CLN-05
 **Success Criteria** (what must be TRUE):
 
   1. User can run existing import, IO, neighbor-list, SCF, force smoke, and tutorial-style simple-format checks with unchanged supported behavior.
@@ -98,18 +121,106 @@ Plans:
   3. Unsupported f combinations fail with explicit errors instead of silent zero blocks or malformed matrices.
   4. Channel lookup, AO ordering, temporary branches, and remaining `1/4/9` assumptions are documented or centralized enough for human troubleshooting.
   5. Batch, force, stress, MD, SEDACS, and ML-SK f-orbital status is explicitly documented as supported, deferred, or unsupported while preserving the validated prototype.
+  6. An `SKFPATH` mixing radial grid steps either interpolates correctly per pair, or refuses loudly — never silently evaluates one pair's distances against another pair's grid.
+
+**Plans**: 2/8 plans executed
+
+Plans:
+**Wave 1**
+
+- [x] 05-01-PLAN.md — Characterize today's knot arithmetic, then route each pair through its own radial grid row (D-01, REG-06)
+- [x] 05-02-PLAN.md — Settle REG-02 by developer decision and pin the simple-format baseline before any code changes
+- [ ] 05-03-PLAN.md — Port `script.py`'s independent-oracle SKF checks to pytest, then delete the file (D-03)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 05-04-PLAN.md — Refuse mixed-grid-step SKF paths, disposition every remaining grid consumer, pin the public import surface (REG-05, REG-03)
+- [ ] 05-05-PLAN.md — Classify every library print and gate the status ones behind a noisy-by-default flag; delete `ConstantsTest` (D-02)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 05-06-PLAN.md — Sweep, inventory and disposition every hardcoded orbital-count site (D-04, CLN-03, REG-04)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 05-07-PLAN.md — Basis metadata map, prototype-branch record, f support status matrix, requirement ledger (CLN-01, CLN-02, CLN-04)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+
+- [ ] 05-08-PLAN.md — Human sign-off on the phase records and the unchanged-behaviour claim
+
+### Phase 6: Self-Consistent SCF for f Systems
+
+**Goal**: f-containing systems reach a converged self-consistent charge solution, and the shell-resolved Coulomb f angular blocks become implementable and verifiable.
+**Depends on**: Phase 5
+**Requirements**: SCC-01, SCC-02, SCC-03
+**Success Criteria** (what must be TRUE):
+
+  1. A supported f-containing system runs a real self-consistent charge loop to convergence, not the Phase 4 single-shot path.
+  2. Non-convergence warns and returns the last iterate with a convergence flag rather than raising (Phase 4 decision D-13, already pre-decided).
+  3. The seven f angular blocks of the shell-resolved Coulomb matrix are implemented and validated, and `FShellResolvedCoulombUnsupportedError` no longer fires for supported systems.
+  4. The shell-resolved f charge/Hubbard plumbing validated but unconsumed in Phase 4 (D-14) is consumed by the self-consistent path.
+  5. The Phase 4 single-shot path and its pinned reference energy remain available and unbroken.
+
+**Plans**: TBD
+
+### Phase 7: f Angular Derivatives
+
+**Goal**: dH0/dS are correct and non-zero in f blocks, so derivative-consuming paths stop being blanket-refused.
+**Depends on**: Phase 6
+**Requirements**: DRV-01, DRV-02
+**Success Criteria** (what must be TRUE):
+
+  1. f angular derivative formulas are implemented and `F_ANGULAR_DERIVATIVES_AVAILABLE` is `True`.
+  2. dH0/dS are non-zero and correctly shaped in s-f, p-f, d-f, and f-f blocks.
+  3. Derivative values are checked against finite differences of the Phase 3 angular values, so a sign or ordering error cannot pass.
+  4. The `FDerivativeUnsupportedError` guards are removed or narrowed to whatever genuinely remains unsupported, rather than refusing every 16-orbital system.
+  5. The derivative source basis is recorded the way Phase 3 source-locked the angular values, so a future reader can trace where each formula came from.
+
+**Plans**: TBD
+
+### Phase 8: f Forces and Stress
+
+**Goal**: Forces and stress for f-containing systems are produced and validated against finite differences.
+**Depends on**: Phase 7
+**Requirements**: PHY-01, PHY-02
+**Success Criteria** (what must be TRUE):
+
+  1. `ESDriver.calc_forces` returns forces for a supported f-containing system instead of raising.
+  2. Forces agree with finite differences of the total energy within a documented tolerance.
+  3. Stress contributions agree with finite differences or a documented reference within tolerance.
+  4. Geometry optimization of an f-containing system runs — the capability Phase 4 explicitly could not use (D-19 forced an energy scan instead).
+  5. Existing f-free force and stress behavior is unchanged.
+
+**Plans**: TBD
+
+### Phase 9: f Molecular Dynamics
+
+**Goal**: f-containing systems run molecular dynamics through `MDXL` with validated forces.
+**Depends on**: Phase 8
+**Requirements**: PHY-03, PHY-04
+**Success Criteria** (what must be TRUE):
+
+  1. An f-containing system runs an `MDXL` trajectory without hitting an unsupported-mode guard.
+  2. Energy conservation over the trajectory is within a documented tolerance for the chosen integrator and timestep.
+  3. Batched f H0/S routing is implemented and `FAngularFormulaSourceError` no longer fires for it. **This is on the critical path, not conditional** — `MDXL.__init__` and `MDXLBatch.__init__` both take an `ESDriverBatch` (`MD.py:38`, `MD.py:1216`), so MD cannot run on the single-system path. Verified 2026-07-29.
+  4. Existing f-free MD behavior is unchanged.
 
 **Plans**: TBD
 
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. SKF Canonicalization and Spline Validation | 1/1 | Complete    | 2026-07-21 |
 | 2. Constants and Structure Basis Metadata | 1/1 | Complete    | 2026-07-27 |
-| 3. H0/S Routing and f Angular Blocks | 0/TBD | Not started | - |
-| 4. SCF and Reference Simulation Validation | 0/TBD | Not started | - |
-| 5. Regression Safety and Support Policy Cleanup | 0/TBD | Not started | - |
+| 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
+| 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
+| 5. Regression Safety and Support Policy Cleanup | 2/8 | In Progress|  |
+| 6. Self-Consistent SCF for f Systems | 0/TBD | Not started | - |
+| 7. f Angular Derivatives | 0/TBD | Not started | - |
+| 8. f Forces and Stress | 0/TBD | Not started | - |
+| 9. f Molecular Dynamics | 0/TBD | Not started | - |
