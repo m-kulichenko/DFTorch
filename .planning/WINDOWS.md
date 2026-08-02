@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 0
 waived_count: 0
-fixed_count: 0
+fixed_count: 1
 total_count: 1
-last_updated: 2026-07-29T19:12:19.328Z
+last_updated: 2026-08-02T19:17:07.552Z
 ---
 
 # Broken Windows Ledger
@@ -15,7 +15,7 @@ last_updated: 2026-07-29T19:12:19.328Z
 
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
-| 1 | 04 | unrun-verify | tests/test_scf.py |  | CH4 SCF does not converge in 25 iterations and the residual grows (0.155 -> 0.389 -> 0.466); pre-existing, unasserted, governed by D-13 and out of Phase 4 scope | open |  | 2026-07-29T19:12:19.328Z |  |
+| 1 | 04 | unrun-verify | tests/test_scf.py |  | CH4 SCF does not converge in 25 iterations and the residual grows (0.155 -> 0.389 -> 0.466); pre-existing, unasserted, governed by D-13 and out of Phase 4 scope | fixed |  | 2026-07-29T19:12:19.328Z | 2026-08-02T19:17:07.552Z |
 
 ````json
 [
@@ -26,10 +26,10 @@ last_updated: 2026-07-29T19:12:19.328Z
     "file": "tests/test_scf.py",
     "line": null,
     "description": "CH4 SCF does not converge in 25 iterations and the residual grows (0.155 -> 0.389 -> 0.466); pre-existing, unasserted, governed by D-13 and out of Phase 4 scope",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-07-29T19:12:19.328Z",
-    "resolved_at": null
+    "resolved_at": "2026-08-02T19:17:07.552Z"
   }
 ]
 ````

@@ -21,6 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 6: Self-Consistent SCF for f Systems** - f systems converge a real self-consistent charge loop, unlocking the shell-resolved Coulomb f angular blocks.
 - [ ] **Phase 7: f Angular Derivatives** - dH0/dS become correct and non-zero in f blocks, retiring the blanket derivative refusal.
 - [ ] **Phase 8: f Forces and Stress** - Forces and stress for f systems are produced and validated against finite differences.
+- [ ] **Phase 8.1: Batched f H0/S Routing** *(INSERTED 2026-08-02)* - Batched H0/S routes 16-orbital atoms instead of refusing, unblocking MD.
 - [ ] **Phase 9: f Molecular Dynamics** - f systems run MDXL trajectories with validated forces.
 
 ## Phase Details
@@ -154,6 +155,21 @@ Plans:
 **Goal**: f-containing systems reach a converged self-consistent charge solution, and the shell-resolved Coulomb f angular blocks become implementable and verifiable.
 **Depends on**: Phase 5
 **Requirements**: SCC-01, SCC-02, SCC-03
+
+> **Scope note (2026-08-02).** User decision 6.1 originally put "fix the CH4 SCF divergence"
+> at the head of this phase, conditional on seeing the error first. That is now **discharged**
+> — the divergence was diagnosed and fixed during Phase 5 (commit `4dbffaa`). Its root cause
+> was not in the SCF machinery at all: the SKF parser gave hydrogen a phantom p shell, making
+> the overlap matrix indefinite so the density matrix never conserved electrons. CH4 now
+> converges in 6 iterations. **Phase 6 therefore starts from a working f-free SCF baseline**
+> and does not need to open with a repair task.
+>
+> Also settled: the convergence criterion this phase must assert against already exists —
+> `ResNorm <= SCF_TOL` **and** `dEc <= SCF_TOL * 100` (`_scf.py:381`, default `SCF_TOL = 1e-6`,
+> `SCF_MAX_ITER = 100`). Per decision 6.2(a), the f test asserts that `ResNorm` genuinely
+> reaches tolerance rather than the loop exhausting `MaxIt`. Per 6.3(a), closed-shell only —
+> spin stays deferred, and the converged number is recorded as not physically complete for
+> open-shell Eu 4f7.
 **Success Criteria** (what must be TRUE):
 
   1. A supported f-containing system runs a real self-consistent charge loop to convergence, not the Phase 4 single-shot path.
@@ -194,6 +210,27 @@ Plans:
 
 **Plans**: TBD
 
+### Phase 8.1: Batched f H0/S Routing
+
+**INSERTED 2026-08-02.** Split out of Phase 9 by user decision 9.1 in
+`.planning/DECISIONS-NEEDED.md` (recorded there as "Phase 9a"; renumbered to 8.1 to match
+this roadmap's decimal-insertion convention). It is a substantial capability with its own
+validation story — batched H0/S must reproduce single-system H0/S per structure — and
+bundling it into Phase 9 would have made that phase two phases wearing one hat, with its
+energy-conservation criterion unreachable until the batch work landed.
+
+**Goal**: Batched H0/S assembly routes 16-orbital atoms correctly instead of refusing, so MD can run on f systems.
+**Depends on**: Phase 8
+**Requirements**: PHY-04
+**Success Criteria** (what must be TRUE):
+
+  1. `H0_and_S_vectorized_batch` accepts 16-orbital atoms and `FAngularFormulaSourceError` no longer fires for the batched path.
+  2. Batched H0/S reproduces single-system H0/S for each structure in the batch, to bit identity or a stated tolerance.
+  3. Batched assembly for f-free systems is unchanged — the existing `n_orb in {1, 4, 9}` masks keep their behavior.
+  4. A batch mixing f-containing and f-free structures assembles correctly, with no structure silently dropped.
+
+**Plans**: TBD
+
 ### Phase 9: f Molecular Dynamics
 
 **Goal**: f-containing systems run molecular dynamics through `MDXL` with validated forces.
@@ -211,7 +248,7 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 8.1 -> 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -223,4 +260,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 6. Self-Consistent SCF for f Systems | 0/TBD | Not started | - |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |
+| 8.1. Batched f H0/S Routing | 0/TBD | Not started | - |
 | 9. f Molecular Dynamics | 0/TBD | Not started | - |

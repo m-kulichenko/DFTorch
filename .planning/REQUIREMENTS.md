@@ -168,7 +168,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PHY-01 | Phase 8 | Pending |
 | PHY-02 | Phase 8 | Pending |
 | PHY-03 | Phase 9 | Pending |
-| PHY-04 | Phase 9 | Pending |
+| PHY-04 | Phase 8.1 | Pending |
 
 **Coverage:**
 
