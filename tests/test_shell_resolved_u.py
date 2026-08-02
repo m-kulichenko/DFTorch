@@ -466,18 +466,28 @@ def _run_driver(params, const, structure):
 def test_shell_resolved_coulomb_builds_for_f_free_system(tmp_path):
     """The s/p/d path is untouched: CH4 still gets a fully populated matrix.
 
-    CH4 under mio-1-1 has 2 shells per atom (C s+p, H s+p), so the matrix is
-    (10, 10).  Every row carries a contribution — this is the control that
-    proves the new guard rejects f systems specifically rather than disabling
+    CH4 under mio-1-1 has 2 shells on carbon (s+p) and 1 on each hydrogen (s only),
+    so the matrix is (6, 6).  Every row carries a contribution — this is the control
+    that proves the new guard rejects f systems specifically rather than disabling
     the builder outright.
+
+    The shape is derived from ``n_shells_per_atom`` rather than hardcoded.  It was
+    previously pinned at (10, 10), which silently encoded a parser defect that gave
+    hydrogen a phantom p shell (see tests/test_shell_count_parsing.py); a literal
+    would let the same class of mistake pass again.
     """
 
     def check():
         const, structure, _ = _build_ch4(tmp_path, False)
         CC, dCC = _call_shell_resolved_coulomb(const, structure)
 
-        assert CC.shape == (10, 10)
-        assert dCC.shape == (3, 10, 10)
+        n_sh = int(structure.n_shells_per_atom.sum())
+        assert n_sh == 6, (
+            f"CH4/mio-1-1 must have 6 shells total (C: s+p, 4x H: s), got {n_sh} "
+            f"from n_shells_per_atom={structure.n_shells_per_atom.tolist()}"
+        )
+        assert CC.shape == (n_sh, n_sh)
+        assert dCC.shape == (3, n_sh, n_sh)
         assert torch.isfinite(CC).all()
         row_sums = CC.sum(dim=1)
         assert not bool((row_sums == 0.0).any()), (
@@ -569,12 +579,19 @@ def test_driver_builds_c_sr_when_flag_set_f_free(tmp_path):
         const, structure, params = _build_ch4(tmp_path, True)
         _run_driver(params, const, structure)
 
+        # Derived, not hardcoded: CH4/mio-1-1 is C(s+p) + 4x H(s) = 6 shells. This was
+        # pinned at (10, 10) while hydrogen carried a phantom p shell.
+        n_sh = int(structure.n_shells_per_atom.sum())
+        assert n_sh == 6, (
+            f"expected 6 shells for CH4/mio-1-1, got {n_sh} from "
+            f"n_shells_per_atom={structure.n_shells_per_atom.tolist()}"
+        )
         assert structure.C_sr is not None
-        assert structure.C_sr.shape == (10, 10)
+        assert structure.C_sr.shape == (n_sh, n_sh)
         assert torch.isfinite(structure.C_sr).all()
         assert structure.dCC_sr is not None
-        assert structure.dCC_sr.shape == (3, 10, 10)
-        assert structure.C.shape == (5, 5)
+        assert structure.dCC_sr.shape == (3, n_sh, n_sh)
+        assert structure.C.shape == (5, 5)          # per-atom, unaffected by shell count
 
     run_with_float64(check)
 

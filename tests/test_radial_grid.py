@@ -172,23 +172,33 @@ F_RCUT_ANGSTROM = 9.165349277199999
 
 # --- Pinned CH4 H0/S checksums ----------------------------------------------
 #
-# Recorded on the PRE-D-01 code path (global `R_orb` lookup) so that Task 2 has
-# a real oracle for its bit-identity claim rather than only comparing the new
-# path against itself.  These are exact float64 reprs of reductions over the
-# 20x20 H0/S matrices and their 3x20x20 Cartesian derivatives, assembled by
-# `H0_and_S_vectorized` for CH4 + mio-1-1.  Scalar reductions are compared with
-# zero relative tolerance and a four-ULP absolute bound: equivalent reduction
-# orders can move the last few bits even when every tensor byte is identical.
-# The global-versus-per-pair tensors are still checked with `torch.equal` below,
-# so elementwise bit identity remains exact and any larger checksum movement is
-# still a regression under REG-01.
+# Originally recorded on the PRE-D-01 code path (global `R_orb` lookup) so that Task 2
+# had a real oracle for its bit-identity claim rather than only comparing the new path
+# against itself.  That purpose is preserved; the values were RE-RECORDED 2026-08-02.
+#
+# Why they moved: the original numbers were reductions over 20x20 matrices, because the
+# SKF parser gave hydrogen a phantom p shell (4 orbitals instead of 1) from a rounding-
+# noise placeholder `Ep = 0.000039` in mio-1-1's H-H.skf.  CH4 is one carbon with 4
+# orbitals plus four hydrogens with 1 each, so the correct matrix is 8x8 -- exactly what
+# the comment beside the old `shape == (20, 20)` assertion already said.  The phantom
+# orbitals also made the overlap matrix indefinite, which is why CH4 could never reach
+# SCF convergence.  See tests/test_shell_count_parsing.py and the shell-presence block in
+# `_bond_integral.read_skf_table`.
+#
+# These are exact float64 reprs of reductions over the 8x8 H0/S matrices and their
+# 3x8x8 Cartesian derivatives, assembled by `H0_and_S_vectorized` for CH4 + mio-1-1.
+# Scalar reductions are compared with zero relative tolerance and a four-ULP absolute
+# bound: equivalent reduction orders can move the last few bits even when every tensor
+# byte is identical.  The global-versus-per-pair tensors are still checked with
+# `torch.equal` below, so elementwise bit identity remains exact and any larger checksum
+# movement is still a regression under REG-01.
 CH4_CHECKSUM_MAX_ULPS = 4
-CH4_H0_SUM = -150.13565671807473
-CH4_S_SUM = 24.694869162805045
-CH4_H0_ABS_SUM = 353.67703472587453
-CH4_S_ABS_SUM = 36.60802871760147
-CH4_DH0_ABS_SUM = 777.8475256952822
-CH4_DS_ABS_SUM = 43.245812432176216
+CH4_H0_SUM = -148.51616944363101
+CH4_S_SUM = 12.604087520050435
+CH4_H0_ABS_SUM = 251.90634572197465
+CH4_S_ABS_SUM = 18.651448940203256
+CH4_DH0_ABS_SUM = 500.92420893056124
+CH4_DS_ABS_SUM = 27.86760866378902
 
 
 def _assert_ch4_checksum(actual: float, expected: float, label: str) -> None:
@@ -806,8 +816,10 @@ def test_ch4_h0_s_checksums_are_unchanged():
         ds_abs,
     ) = run_with_float64(check)
 
-    # CH4: one C with 4 orbitals plus four H with 1 each.
-    assert shape == (20, 20)
+    # CH4: one C with 4 orbitals plus four H with 1 each. This assertion previously read
+    # (20, 20) directly beneath that comment -- the prose was right and the number was
+    # not, because hydrogen carried a phantom p shell.
+    assert shape == (8, 8)
     _assert_ch4_checksum(h0_sum, CH4_H0_SUM, "H0 sum")
     _assert_ch4_checksum(s_sum, CH4_S_SUM, "S sum")
     _assert_ch4_checksum(h0_abs, CH4_H0_ABS_SUM, "H0 absolute sum")
