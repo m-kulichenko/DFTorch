@@ -9,7 +9,7 @@ from ._slater_koster_pair import (
 )
 
 
-def _pair_knot_lookup(
+def _pair_knot_lookup( #Different SKFs can have different R's so we need to keep it consistent in lookup
     R_tensor: torch.Tensor,
     n_grid: torch.Tensor,
     pair_type: torch.Tensor,
@@ -57,9 +57,12 @@ def _pair_knot_lookup(
     pair_type : torch.Tensor
         Row selector for each entry of ``dR``, shape ``(N,)``.
     dR : torch.Tensor
-        Pair separations in Angstrom, shape ``(N,)``. Same units as the grid;
-        see the note on ``_ml_sk.py:437-450`` in the ``R_orb`` parameter doc of
-        :func:`H0_and_S_vectorized`.
+        Pair separations in Angstrom, shape ``(N,)``. Same units as the grid:
+        the SKF file declares its step in Bohr and ``read_skf_table`` multiplies
+        it by ``BOHR_TO_ANGSTROM`` when building the grid, so nothing here is
+        mixed-unit. See the "Units" note in
+        :func:`dftorch._ml_sk.build_pair_type_rcut`, which records the
+        measurement that settled this and the superseded claim it replaced.
 
     Returns
     -------

@@ -435,29 +435,55 @@ def build_pair_type_rcut(
 ) -> torch.Tensor:
     """Return a 1-D tensor of effective cutoffs (one per pair type).
 
-    DFTorch stores the spline radial grid ``R_orb`` in **Ångström** units,
-    but the pair distances ``dR_mskd`` are in **Bohr**.  Because
-    ``searchsorted(R_orb, dR_mskd)`` compares these mixed-unit arrays
-    directly, the effective cutoff *in dR_mskd (Bohr) units* for each
-    pair type is the **endpoint** of the last non-zero spline interval.
+    **Units.**  The spline radial grid ``R_orb`` and the pair distances
+    ``dR_mskd`` are BOTH in Ångström, so ``searchsorted(R_orb, dR_mskd)``
+    compares like with like and the cutoff returned here is in Ångström as
+    well.  ``_bond_integral`` reads a step the SKF file declares in Bohr and
+    builds the grid as ``arange(1, npts_pad + 1) * step * BOHR_TO_ANGSTROM``
+    (see ``read_skf_table``); that multiplication is where the conversion
+    happens, and nothing downstream converts back.  ``dR_mskd`` is a
+    neighbour-list distance and is in Ångström throughout, which is what the
+    annotation in :func:`ml_eval_channel` also records.
 
-    The cubic spline coefficient at index *i* covers the interval
-    ``R_orb[i] → R_orb[i+1]``.  So the cutoff is ``R_orb[last_nz + 1]``,
-    i.e. ``(last_nz + 2) * dr`` where ``dr = R_orb[1] - R_orb[0]``.
+    **Correction recorded, measured 2026-07-30/31.**  The text that stood here
+    previously claimed ``R_orb`` was in Ångström while ``dR_mskd`` was in Bohr,
+    and described the comparison as deliberately "mixed-unit".  That was wrong.
+    It was settled by measurement rather than by argument: a CH4 C-H separation
+    of 1.0566812742799978 Å against mio-1-1's 0.0105835442 Å step lands on
+    ``idx = 98``, where ``R_orb[98] = 1.0477708758`` Å — the correct physical
+    knot for that bond.  Under the old Bohr reading the knot would have sat at
+    roughly twice the true separation, and no DFTB energy in this repository
+    would be right.  The measurement is pinned by ``tests/test_radial_grid.py``.
+    The superseded claim is written down here rather than deleted so a reader
+    who remembers it can see it was corrected deliberately, not quietly lost.
 
-    For a 3ob SKF with ``dr_Bohr = 0.02`` and ``npts = 550`` data rows
-    (549 read + 1 zero-padded), the last non-zero interval is 548 and
-    the cutoff is ``(548 + 2) * dr = 550 * 0.02 * 0.52917721`` in the
-    mixed Å-units, corresponding to exactly 11.0 Bohr.
+    **What the cutoff is.**  The cubic spline coefficient at index *i* covers
+    the interval ``R_orb[i] → R_orb[i+1]``, so a pair type's effective cutoff is
+    the **endpoint** of its last non-zero interval: ``R_orb[last_nz + 1]``, i.e.
+    ``(last_nz + 2) * dr`` where ``dr = R_orb[1] - R_orb[0]``.
+
+    Measured example, mio-1-1 with ``dr_Bohr = 0.02``: the last non-zero
+    interval is 498, so the cutoff is ``(498 + 2) * 0.0105835442 = 5.2917721``
+    Å, which is exactly 10.0 Bohr.  For the f dataset at ``dr_Bohr = 0.04`` the
+    last non-zero interval is 431 and the cutoff is ``9.1653492772`` Å, i.e.
+    17.32 Bohr.  Both are pinned as literals in
+    ``tests/test_radial_grid.py::test_effective_cutoffs_are_unchanged``.
+
+    ``R_orb`` here is still the single global grid — the longest one seen in the
+    directory — rather than the per-pair rows introduced for H0/S by requirement
+    REG-06.  That is a deliberate deferral, not an oversight; see
+    ``docs/RADIAL-GRID-CONSUMERS.md`` for the disposition and the owning
+    requirement.
 
     Parameters
     ----------
     coeffs_tensor : Tensor, shape (n_pair_types, n_intervals, 20, 4)
     R_orb : Tensor, shape (n_intervals,) or (n_intervals + 1,)
+        The radial grid, in Ångström.
 
     Returns
     -------
-    rcut : Tensor, shape (n_pair_types,)  — effective cutoffs
+    rcut : Tensor, shape (n_pair_types,)  — effective cutoffs, in Ångström
     """
     n_pt = coeffs_tensor.shape[0]
     dr = (R_orb[1] - R_orb[0]).item()
@@ -519,7 +545,7 @@ def ml_eval_channel(
     TYPE = ml_ctx["TYPE"]
     nI = ml_ctx["neighbor_I"]
     nJ = ml_ctx["neighbor_J"]
-    dR_mskd = ml_ctx["dR_mskd"]  # Å (mixed units, same as R_orb)
+    dR_mskd = ml_ctx["dR_mskd"]  # Å, the same units as R_orb (not mixed)
 
     dev = next(model.parameters()).device
     dtype = dR_mskd.dtype

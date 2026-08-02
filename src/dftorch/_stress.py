@@ -176,6 +176,10 @@ def _pair_grad_from_sk(
     N_dxyz = torch.stack((N_dx, N_dy, N_dz))
 
     idx = metadata["idx"]
+    # const.R_orb is the single global grid (the longest one seen in the SKF
+    # directory), NOT the per-pair rows requirement REG-06 introduced for H0/S.
+    # This path is f-refused a few lines below and f stress is PHY-02, so the
+    # conversion is deferred rather than missed; see docs/RADIAL-GRID-CONSUMERS.md.
     dx = dR - const.R_orb[idx]
     IJ_pair_type = metadata["IJ_pair_type"]
     JI_pair_type = metadata["JI_pair_type"]

@@ -268,6 +268,22 @@ class ESDriver(torch.nn.Module):
             verbose=verbose,
             store_stress_metadata=const,
             ml_model_data=getattr(self, "ml_model_data", None),
+            # Per-pair radial grid rows and their tabulated lengths. Passing
+            # both selects the per-pair knot lookup, so each element pair is
+            # interpolated against its own grid instead of against the longest
+            # grid in the directory (decision D-01, requirement REG-06).
+            #
+            # RESTORED by plan 05-04. Plan 05-01 added these two arguments here,
+            # and commit 56091af removed them again as an unrelated side effect
+            # of a test-oracle commit. Without them H0_and_S_vectorized takes
+            # its `R_tensor is None` fallback, so the per-pair lookup existed
+            # but no production call ever reached it and REG-06 was inert in
+            # every real calculation. Do not drop them again: no test asserted
+            # this wiring before 05-04's
+            # test_esdriver_supplies_the_per_pair_grid_arguments, which is why
+            # the revert went unnoticed for eleven commits.
+            R_tensor=const.R_tensor,
+            n_grid=const.n_grid,
         )
         del (
             _,

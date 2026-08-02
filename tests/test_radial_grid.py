@@ -1639,6 +1639,173 @@ def test_guard_message_leaks_no_path(tmp_path):
     assert "N-N.skf" in message
 
 
+# --- REG-06: remaining shared-grid consumers (plan 05-04) --------------------
+
+def test_rcut_values_unchanged_after_docstring_fix():
+    """`build_pair_type_rcut` returns its pre-05-04 values, and now says why.
+
+    Plan 05-04 rewrote this function's docstring.  The text that stood there
+    claimed `R_orb` was in Angstrom while `dR_mskd` was in Bohr and called the
+    comparison deliberately "mixed-unit".  That was wrong, and it was
+    contradicted eleven lines below in the same file.  Only prose changed; not
+    one executable line was touched.  This test gates that claim from both
+    sides.
+
+    The value half overlaps `test_effective_cutoffs_are_unchanged` on purpose,
+    but asserts the WHOLE returned list against a literal instead of looping
+    element by element, so a function that started returning a different NUMBER
+    of cutoffs also fails here.
+
+    The docstring half is the only mechanical gate that the correction survives
+    a later edit.  Without it, someone restoring the old mixed-unit paragraph
+    would break nothing any test can see, which is precisely how the wrong text
+    survived long enough to be believed.
+    """
+
+    def check():
+        from dftorch.Constants import Constants
+        from dftorch._ml_sk import build_pair_type_rcut
+
+        mio_const = Constants(_mio_params(_ch4_xyz())).to("cpu")
+        mio_rcut = build_pair_type_rcut(
+            mio_const.coeffs_tensor.detach(), mio_const.R_orb.detach()
+        ).tolist()
+
+        xyz = Path(_tmp_dir()) / "eu_n_rcut_docstring.xyz"
+        _write_eu_n_xyz(xyz, EU_N_SEPARATION)
+        f_const = Constants(_f_params(xyz)).to("cpu")
+        f_rcut = build_pair_type_rcut(
+            f_const.coeffs_tensor.detach(), f_const.R_orb.detach()
+        ).tolist()
+
+        return mio_rcut, f_rcut, build_pair_type_rcut.__doc__ or ""
+
+    mio_rcut, f_rcut, doc = run_with_float64(check)
+
+    # Whole-list equality against the literals plan 05-01 measured.
+    assert len(mio_rcut) == 4 and len(f_rcut) == 4
+    for value in mio_rcut:
+        assert abs(value - MIO_RCUT_ANGSTROM) < 1e-6, (
+            f"a mio-1-1 cutoff moved: {value} vs {MIO_RCUT_ANGSTROM}"
+        )
+    for value in f_rcut:
+        assert abs(value - F_RCUT_ANGSTROM) < 1e-6, (
+            f"an f_orbital_data cutoff moved: {value} vs {F_RCUT_ANGSTROM}"
+        )
+
+    # The corrected claim, the record of the correction, and the place the
+    # conversion actually happens.  ASCII substrings only: the docstring itself
+    # spells out Angstrom with its accented characters, and this test module is
+    # ASCII-only (see the module docstring).
+    assert "are BOTH in" in doc, (
+        "the docstring no longer states that the grid and the pair distances "
+        "share one unit"
+    )
+    assert "Correction recorded" in doc, (
+        "the docstring no longer records that its previous text was corrected; "
+        "a reader who remembers the old claim cannot tell it was deliberate"
+    )
+    assert "BOHR_TO_ANGSTROM" in doc, (
+        "the docstring no longer names where the Bohr -> Angstrom conversion "
+        "happens, which is the evidence for the unit claim"
+    )
+    # The superseded sentence, verbatim, must be gone.
+    assert "compares these mixed-unit arrays" not in doc, (
+        "the contradicted mixed-unit paragraph is back in the docstring"
+    )
+
+
+class _CapturedH0SCall(Exception):
+    """Sentinel raised by the recorder below to stop `forward` early."""
+
+
+def test_esdriver_supplies_the_per_pair_grid_arguments(tmp_path):
+    """ESDriver's single-system H0/S call must pass BOTH R_tensor and n_grid.
+
+    REGRESSION TEST.  Plan 05-01 added `R_tensor=const.R_tensor` and
+    `n_grid=const.n_grid` to this call, which is what selects the per-pair knot
+    lookup; `H0_and_S_vectorized` falls back to the verbatim global `R_orb`
+    expression when EITHER is missing.  Commit 56091af then deleted both lines
+    as an unrelated side effect of a test-oracle commit.
+
+    Nothing failed.  The per-pair lookup and all thirteen of plan 05-01's tests
+    stayed green, because every one of them calls `_pair_knot_lookup` or
+    `H0_and_S_vectorized` directly and none went through the driver.  So REG-06
+    was implemented, tested, and then inert in every real calculation for
+    eleven commits.  A fallback that is silently correct-looking is exactly the
+    failure mode this project keeps hitting, and the fix is a test that watches
+    the WIRING rather than the lookup.
+
+    The recorder aborts `forward` as soon as H0/S is reached, so this costs an
+    SKF load and a neighbour list rather than a full single-shot calculation.
+    """
+
+    def check():
+        import importlib
+
+        from dftorch.Constants import Constants
+        from dftorch.ESDriver import ESDriver
+        from dftorch.Structure import Structure
+
+        # `dftorch/__init__.py` does `from .ESDriver import ESDriver`, which
+        # rebinds the attribute `dftorch.ESDriver` from the MODULE to the CLASS.
+        # `import dftorch.ESDriver as m` therefore hands back the class. Go
+        # through sys.modules instead.
+        esdriver_module = importlib.import_module("dftorch.ESDriver")
+
+        xyz = tmp_path / "eu_n_wiring.xyz"
+        _write_eu_n_xyz(xyz, EU_N_SEPARATION)
+        params = _f_params(xyz)
+
+        const = Constants(params).to("cpu")
+        structure = Structure(params, const, device="cpu")
+        driver = ESDriver(params, device="cpu")
+
+        captured = {}
+
+        def recorder(*args, **kwargs):
+            captured["kwargs"] = dict(kwargs)
+            raise _CapturedH0SCall
+
+        original = esdriver_module.H0_and_S_vectorized
+        esdriver_module.H0_and_S_vectorized = recorder
+        try:
+            driver(structure, const, do_scf=False)
+        except _CapturedH0SCall:
+            pass
+        finally:
+            esdriver_module.H0_and_S_vectorized = original
+
+        kwargs = captured.get("kwargs")
+        if kwargs is None:
+            return None, False, False
+        return (
+            sorted(kwargs),
+            kwargs.get("R_tensor") is not None
+            and bool(torch.equal(kwargs["R_tensor"], const.R_tensor.detach())),
+            kwargs.get("n_grid") is not None
+            and bool(torch.equal(kwargs["n_grid"], const.n_grid.detach())),
+        )
+
+    kwarg_names, r_tensor_ok, n_grid_ok = run_with_float64(check)
+
+    assert kwarg_names is not None, (
+        "ESDriver.forward never reached H0_and_S_vectorized, so this test "
+        "proved nothing; the recorder was not called"
+    )
+    assert r_tensor_ok, (
+        "ESDriver did not pass R_tensor=const.R_tensor to "
+        f"H0_and_S_vectorized. Keyword arguments seen: {kwarg_names}. "
+        "Without it the per-pair knot lookup (REG-06) is dead code and every "
+        "pair is interpolated against the longest grid in the directory."
+    )
+    assert n_grid_ok, (
+        "ESDriver did not pass n_grid=const.n_grid to H0_and_S_vectorized. "
+        f"Keyword arguments seen: {kwarg_names}. Both arguments are required: "
+        "H0_and_S_vectorized takes the global fallback if EITHER is None."
+    )
+
+
 # --- tmp dir helper ----------------------------------------------------------
 #
 # Several tests need a scratch directory but run their real work inside
