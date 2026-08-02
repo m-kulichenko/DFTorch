@@ -258,6 +258,12 @@ def parse_expected_homonuclear_metadata(skf_path: Path) -> dict[str, object] | N
     extended = data_lines[0].startswith("@")
     grid_idx = 1 if extended else 0
 
+    # Grid line, e.g. ``0.02, 500,1`` (s-only hydrogen) or ``0.02, 500 ,2`` (sp carbon).
+    # The optional third field is the declared shell count. Parsed here independently of
+    # the production parser; see the shell-presence block below for why it is preferred.
+    grid_tokens = data_lines[grid_idx].replace(",", " ").split()
+    n_shells_declared = int(grid_tokens[2]) if len(grid_tokens) >= 3 else None
+
     header_tokens = data_lines[grid_idx + 1].replace(",", " ").split()
 
     if extended:
@@ -299,16 +305,35 @@ def parse_expected_homonuclear_metadata(skf_path: Path) -> dict[str, object] | N
         ff = 0.0
         header_value_count = 10
 
-    # A shell exists if it carries either an onsite energy or a reference
-    # occupation.  Neither alone is sufficient: Ga's d shell has zero occupation
-    # but a real onsite energy, and a shell with zero onsite energy but nonzero
-    # occupation is still populated.
-    shell_present = [
-        Es != 0.0 or fs != 0.0,
-        Ep != 0.0 or fp != 0.0,
-        Ed != 0.0 or fd != 0.0,
-        Ef != 0.0 or ff != 0.0,
-    ]
+    # Shell presence. The declared shell count on the grid line is authoritative when the
+    # file supplies it; the energy/occupation inference is only a fallback.
+    #
+    # The inference alone is not safe, and this oracle previously got it wrong in exactly
+    # the way the production parser did -- which is why it confirmed a real defect instead
+    # of catching it. mio-1-1's H-H.skf carries ``Ep = 0.000039`` Hartree (~0.001 eV) as a
+    # placeholder even though hydrogen is s-only, so ``Ep != 0.0`` gave hydrogen a phantom
+    # p shell. An oracle that re-reads the file but reuses the production parser's decision
+    # rule is an independent transcription, not an independent derivation.
+    #
+    # The fallback's own reasoning stays intact and is still needed for files that omit the
+    # count (the f fixtures, mio-1-1's Zn-Zn): a shell exists if it carries either an onsite
+    # energy or a reference occupation, and neither alone suffices. Ga's d shell has zero
+    # occupation but a real onsite energy; lanthanum's f shell likewise carries an onsite
+    # energy with no f electrons. That is why the codebase separates ``max_ang`` (highest
+    # shell available) from ``max_ang_occ`` (highest shell actually occupied).
+    if n_shells_declared is not None:
+        if not 1 <= n_shells_declared <= 4:
+            raise ValueError(
+                f"{skf_path}: declared shell count {n_shells_declared} outside 1..4"
+            )
+        shell_present = [i < n_shells_declared for i in range(4)]
+    else:
+        shell_present = [
+            Es != 0.0 or fs != 0.0,
+            Ep != 0.0 or fp != 0.0,
+            Ed != 0.0 or fd != 0.0,
+            Ef != 0.0 or ff != 0.0,
+        ]
     shell_occ = [fs, fp, fd, ff]
     n_orb, max_ang, max_ang_occ = expected_shell_metadata(shell_present, shell_occ)
 
