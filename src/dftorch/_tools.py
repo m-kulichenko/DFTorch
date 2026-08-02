@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Tuple
 
 import torch
 
 from ._elements import label, symbol_to_number
 
 _COMPILE_ENABLED = os.environ.get("DFTORCH_ENABLE_COMPILE", "0") != "0"
+
+#: ``dftorch_params`` key that switches the library's status chatter off.
+#: Absent or ``True`` means "print", which is what every caller has always
+#: seen.  See :func:`library_output_enabled` for why the default is noisy.
+VERBOSE_LIBRARY_OUTPUT_KEY = "VERBOSE_LIBRARY_OUTPUT"
 
 # Pairs whose eigenvalue difference is smaller than this are treated as
 # degenerate: the 1/(lambda_i-lambda_j) term in the eigenvector gradient is
@@ -138,6 +143,65 @@ fractional_matrix_power_symm_eager = fractional_matrix_power_symm
 fractional_matrix_power_symm = _maybe_compile(
     fractional_matrix_power_symm,
 )
+
+
+def library_output_enabled(dftorch_params: Optional[Mapping[str, Any]]) -> bool:
+    """Return whether the library should emit its status chatter.
+
+    Reads ``VERBOSE_LIBRARY_OUTPUT`` from *dftorch_params* and returns ``True``
+    when the key is absent, so a caller who never heard of the key sees exactly
+    the output they saw before the key existed.
+
+    THE NOISY DEFAULT IS DELIBERATE.  DO NOT "FIX" IT.
+    ------------------------------------------------
+    Decision D-02 (``.planning/phases/05-regression-safety-and-support-policy-
+    cleanup/05-CONTEXT.md``) explicitly rejected both a quiet default and a
+    migration to :mod:`logging`.  Phase 5's whole purpose is regression safety:
+    requirements REG-02 and REG-03 say existing simple-format callers and the
+    tutorial notebook must be unchanged, and flipping this default to ``False``
+    would change what every existing caller observes on stdout.  The accepted
+    consequence, recorded in D-02, is that this phase makes the noise
+    *suppressible* but does not remove it.  A caller who wants silence opts in.
+
+    Flipping the default, or replacing this with a logger, is a deliberate
+    follow-up recorded under "Deferred Ideas" in 05-CONTEXT.md -- not a
+    tidy-up to be done in passing.
+
+    Parameters
+    ----------
+    dftorch_params : Mapping[str, Any] | None
+        The simulation parameter dictionary.  Any mapping works; this function
+        deliberately does NOT accept a :class:`~dftorch.Constants.Constants`,
+        because ``Constants`` imports from this module and the reverse import
+        would be circular.  ``None`` is treated as "no opinion" and yields
+        ``True``, so a ``None``-defaulted call site keeps printing.
+
+    Returns
+    -------
+    bool
+        ``True`` when status output should be printed (the default),
+        ``False`` only when the caller explicitly set the key to a falsy value.
+
+    Notes
+    -----
+    This flag governs *status* output only -- progress, timing and
+    informational lines.  Genuine failure, non-convergence and
+    silent-degradation warnings are deliberately left unconditional, so a user
+    who opts into quiet still learns that an SCF did not converge, that a
+    Krylov direction was degenerate, or that ``spinw.txt`` would not load.  The
+    per-print classification behind that split is in
+    ``docs/LIBRARY-OUTPUT-INVENTORY.md``.
+
+    Examples
+    --------
+    >>> library_output_enabled({})
+    True
+    >>> library_output_enabled({"VERBOSE_LIBRARY_OUTPUT": False})
+    False
+    """
+    if dftorch_params is None:
+        return True
+    return bool(dftorch_params.get(VERBOSE_LIBRARY_OUTPUT_KEY, True))
 
 
 def ordered_pairs_from_TYPE(

@@ -7,7 +7,12 @@ import torch
 
 from ._elements import atomic_num, label, mass, symbol_to_number
 from ._io import read_pdb, read_xyz
-from ._tools import load_hubbard_derivs, load_spinw_to_matrix, ordered_pairs_from_TYPE
+from ._tools import (
+    library_output_enabled,
+    load_hubbard_derivs,
+    load_spinw_to_matrix,
+    ordered_pairs_from_TYPE,
+)
 from ._bond_integral import get_skf_tensors  # TYPE WILL BE PASSED, TYPE IS THE LIST OF ALL SPECIES IN THE SYSTEM
 
 
@@ -46,6 +51,31 @@ class Constants(torch.nn.Module):
             split into a second flag (decision D-23).
         ``GRAD_PARAM`` : bool, default False
             Enable parameter gradients (for ML-SK fitting workflows).
+        ``VERBOSE_LIBRARY_OUTPUT`` : bool, default True
+            Whether the library prints its *status* chatter -- progress
+            banners, per-iteration lines, timings and informational notices --
+            to stdout.  **The default is True, which reproduces the output
+            every caller saw before this key existed.**  Set it to ``False``
+            to opt into a quiet run.
+
+            Scope, deliberately narrow (decision D-02):
+
+            * SUPPRESSED when False: status output only.  The exact set is
+              enumerated, one row per ``print`` call in the package, in
+              ``docs/LIBRARY-OUTPUT-INVENTORY.md``.
+            * NOT suppressed, ever: genuine failure, non-convergence and
+              silent-degradation warnings -- an SCF that hit ``SCF_MAX_ITER``,
+              a degenerate Krylov direction, a ``spinw.txt`` that would not
+              load, a ``COUL_METHOD='PME'`` request downgraded to ``'FULL'``.
+              Gating those would trade noise for silent wrongness.
+            * NOT affected: the ~28 prints already behind a per-call
+              ``verbose`` or ``debug`` argument.  Those default to off and
+              stay off; this key does not switch them on.
+
+            Read into ``self.verbose_output``.  The attribute is deliberately
+            NOT named ``verbose``: 17 function signatures across the package
+            already carry a parameter of that name whose default is the
+            opposite, and the collision would be a live footgun.
     """
 
     def __init__(self, dftorch_params: dict[str, Any]) -> None: #When you initialize this object, give it all the parameters
@@ -64,6 +94,11 @@ class Constants(torch.nn.Module):
         self.magnetic_hubbard_ldep = dftorch_params.get("MAGNETIC_HUBBARD_LDEP", False) #Used in Spin-orbit coupling
         self.dftb3 = dftorch_params.get("DFTB3", False) 
         self.grad_param = dftorch_params.get("GRAD_PARAM", False)
+        # Status-output switch (decision D-02). Defaults to True so that a
+        # caller who omits VERBOSE_LIBRARY_OUTPUT sees byte-identical output to
+        # before the key existed. NOT named `verbose`: 17 signatures in this
+        # package already use that name with the opposite default.
+        self.verbose_output = library_output_enabled(dftorch_params)
         self.symbol_to_number = symbol_to_number
         self.label = label
         self.atomic_num = atomic_num
@@ -147,6 +182,14 @@ class Constants(torch.nn.Module):
             else:
                 self.w = torch.nn.Parameter(w_atom.clone(), requires_grad=False)
         except (FileNotFoundError, OSError, ValueError):
+            # DELIBERATELY UNCONDITIONAL -- not gated on self.verbose_output.
+            # 05-CONTEXT.md leaves the fate of this warning to planning
+            # discretion; the choice made here (decision D-02) is that it stays
+            # on even for a caller who set VERBOSE_LIBRARY_OUTPUT=False,
+            # because spin-orbit coupling has just been silently dropped from
+            # the calculation. A user who opts into a quiet run is asking to
+            # not be told about progress, not asking to not be told that their
+            # physics changed.
             print(
                 "Warning: could not load spinw.txt file for spin-orbit coupling. Proceeding without SOC."
             )
@@ -209,7 +252,8 @@ class Constants(torch.nn.Module):
         else:
             self.dU_dq = None
             self.dftb3 = False
-        print(f"DFTB3: {self.dftb3}")
+        if self.verbose_output:
+            print(f"DFTB3: {self.dftb3}")
 
         # ─────────────────────────────────────────────────────────────────
 
