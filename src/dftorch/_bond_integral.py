@@ -963,6 +963,136 @@ def read_wfc_hsd( #can also get info from here
         MAX_ANG_OCC[Z] = max_ang_occ
 
 
+class SKFRadialGridStepMismatchError(ValueError):
+    """Raised when one ``SKFPATH`` mixes SKF files tabulated at different steps.
+
+    This subclasses :class:`ValueError` rather than :class:`NotImplementedError`
+    because it reports a rejected *input*, not an unimplemented capability. The
+    four ``F*UnsupportedError`` classes in ``_slater_koster_pair`` are
+    ``NotImplementedError`` subclasses because the calculation they refuse is one
+    DFTorch could perform once the missing work lands. A directory mixing radial
+    grid steps is different in kind: it is not a calculation waiting on support,
+    it is a parameter set that is not coherent as a whole, and no amount of
+    later work makes it meaningful.
+
+    Defined in this module rather than imported from ``_slater_koster_pair``
+    because that module already imports ``_CHANNELS`` from this one
+    (``_slater_koster_pair.py:8``), so the reverse import would be circular.
+    """
+
+
+SKF_GRID_STEP_MISMATCH_MESSAGE: Final[str] = (
+    "Every SKF file in one SKFPATH must be tabulated on the same radial grid "
+    "STEP.\n"
+    "The step is the resolution at which a pair's Slater-Koster and overlap "
+    "integrals were sampled. Two tables sampled at different steps hold their "
+    "values at different radii, so combining them evaluates at least one pair "
+    "at the wrong distance. The parameter sets in common use differ here by "
+    "exactly a factor of two -- the f-electron dataset in this repository is "
+    "tabulated at 0.04 Bohr while mio-1-1, 3ob-3-1, pbc-0-3 and trans3d-0-1 are "
+    "all at 0.02 Bohr -- so mixing them misplaces knots by roughly that factor. "
+    "That is a parameter-set error rather than an approximation, and it cannot "
+    "be repaired by interpolating harder.\n"
+    "Differing NUMBERS OF POINTS at the same step are FINE and are NOT what "
+    "this error reports. 3ob-3-1 ships C-C at 650 points and Br-Br at 850, both "
+    "at 0.02 Bohr, and mio-1-1 mixes 500, 600 and 619 points at 0.02 Bohr. Both "
+    "load, because every pair is interpolated against its own grid row. Do NOT "
+    "pad SKF files to a common length in response to this message.\n"
+    "Fix: use one parameter set per calculation, or obtain the missing element "
+    "pairs re-tabulated at the step the rest of the set already uses."
+)
+
+#: Relative tolerance used to decide that two SKF radial grid steps are "the
+#: same". See :func:`_require_uniform_grid_step` for the reasoning.
+_GRID_STEP_RELATIVE_TOLERANCE: Final[float] = 1e-6
+
+#: Cap on how many basenames are listed per step group in the mismatch message,
+#: so a directory holding hundreds of pairs still produces a readable error.
+_GRID_STEP_MISMATCH_MAX_FILES: Final[int] = 6
+
+
+def _require_uniform_grid_step(steps_by_file: dict[str, float]) -> None:
+    """Raise if the SKF files in one directory declare different grid steps.
+
+    Parameters
+    ----------
+    steps_by_file:
+        Mapping from SKF file BASENAME to that file's radial grid step in Bohr,
+        i.e. the first field of the file's grid line. Keyed by basename and
+        never by full path, so no absolute path, no ``SKFPATH`` value and no
+        geometry filename can reach the raised message (Phase 4 threat T-04-07
+        set that policy for exception text and it applies here).
+
+    Raises
+    ------
+    SKFRadialGridStepMismatchError
+        When two or more distinct steps are present, listing each step with the
+        basenames declaring it.
+
+    Notes
+    -----
+    **What is compared, and what is deliberately not.** This compares the grid
+    STEP only. It never compares grid LENGTH. A length comparison would look
+    like the obvious implementation and would pass the exact case this guard
+    exists to catch, while rejecting real shipped parameter sets: ``3ob-3-1``
+    carries C-C at 650 points and Br-Br at 850 at one common step, and
+    ``mio-1-1`` carries 500, 600 and 619. Those load correctly because plan
+    05-01 gave every pair its own grid row (requirement REG-06).
+
+    **Tolerance.** Steps are compared against a reference with
+    ``_GRID_STEP_RELATIVE_TOLERANCE == 1e-6``, relative rather than absolute so
+    the same band applies to a 0.02 Bohr set and to a much finer one. The
+    tolerance only has to survive a float round trip. The step is parsed from
+    text in ``read_skf_table``, multiplied by ``BOHR_TO_ANGSTROM`` when the grid
+    is built, and divided back out by the caller here, which can move the value
+    by a few ULP (order 1e-16 relative). It does NOT have to distinguish near
+    neighbours: the condition being caught is a factor of two, i.e. 100 percent
+    relative, five orders of magnitude outside this band. Tightening it far
+    enough to separate 0.0200 from 0.0201 would only add sensitivity to text
+    formatting noise, on a distinction no shipped parameter set makes.
+    """
+    if len(steps_by_file) < 2:
+        return
+
+    reference = next(iter(steps_by_file.values()))
+    if all(
+        abs(step - reference) <= _GRID_STEP_RELATIVE_TOLERANCE * abs(reference)
+        for step in steps_by_file.values()
+    ):
+        return
+
+    # Group the files by the step they declare so the message says WHICH files
+    # disagree, not merely THAT they disagree. Sorting the basenames first makes
+    # the message deterministic across filesystems.
+    groups: list[tuple[float, list[str]]] = []
+    for name in sorted(steps_by_file):
+        step = steps_by_file[name]
+        for group_step, members in groups:
+            if abs(step - group_step) <= _GRID_STEP_RELATIVE_TOLERANCE * abs(
+                group_step
+            ):
+                members.append(name)
+                break
+        else:
+            groups.append((step, [name]))
+    groups.sort(key=lambda item: item[0])
+
+    listing = []
+    for step, members in groups:
+        shown = members[:_GRID_STEP_MISMATCH_MAX_FILES]
+        text = ", ".join(shown)
+        if len(members) > len(shown):
+            text += f", (+{len(members) - len(shown)} more)"
+        listing.append(f"  step {step:.6g} Bohr: {text}")
+
+    raise SKFRadialGridStepMismatchError(
+        "SKF radial grid step mismatch within a single SKFPATH:\n"
+        + "\n".join(listing)
+        + "\n"
+        + SKF_GRID_STEP_MISMATCH_MESSAGE
+    )
+
+
 def get_skf_tensors( #master function that returns to you all of the information, after pulling from relevant files.
     TYPE: torch.Tensor, skfpath: str
 ) -> tuple[
@@ -1049,9 +1179,14 @@ def get_skf_tensors( #master function that returns to you all of the information
 
     R_orb_master = None
 
+    # REG-05: each file's declared radial grid step, keyed by BASENAME only, so
+    # the guard below cannot interpolate a path into its message.
+    steps_by_file: dict[str, float] = {}
+
     for i, label in enumerate(label_list):
+        skf_path = _resolve_skf_path(skfpath, label)
         R_orb_i, channels, R_rep, rep_splines, close_exp = read_skf_table(
-            _resolve_skf_path(skfpath, label),
+            skf_path,
             N_ORB,
             MAX_ANG,
             MAX_ANG_OCC,
@@ -1072,6 +1207,18 @@ def get_skf_tensors( #master function that returns to you all of the information
             device=device,
             dtype=dtype,
         )
+
+        # REG-05: record the step this file declares. The grid is built as
+        # arange(1, npts_pad + 1) * step * BOHR_TO_ANGSTROM in read_skf_table and
+        # therefore starts one step in, so R_orb_i[0] IS the step in Angstrom.
+        # Dividing BOHR_TO_ANGSTROM back out recovers the Bohr number the file's
+        # own grid line carries, which is what a user checking the message
+        # against their SKF files will be looking at. Reading it back off the
+        # loaded grid keeps read_skf_table's signature unchanged.
+        if len(R_orb_i) > 0:
+            steps_by_file[os.path.basename(skf_path)] = (
+                R_orb_i[0].item() / BOHR_TO_ANGSTROM
+            )
 
         channels_matrix = channels_to_matrix(channels)
         coeffs = cubic_spline_coeffs(R_orb_i, channels_matrix)
@@ -1136,6 +1283,12 @@ def get_skf_tensors( #master function that returns to you all of the information
         R_rep_tensor[i, : len(R_rep)] = R_rep
         rep_splines_tensor[i, : len(rep_splines)] = rep_splines
         close_exp_tensor[i] = close_exp
+
+    # REG-05, decision D-01. Placed here, immediately after the read loop and
+    # ahead of the R_orb_master check below, so a directory mixing radial grid
+    # steps fails on the grid mismatch itself rather than on some downstream
+    # symptom of it.
+    _require_uniform_grid_step(steps_by_file)
 
     wfc_path = os.path.join(skfpath, "wfc.hsd")
     if os.path.isfile(wfc_path):

@@ -1188,12 +1188,22 @@ def test_mixed_step_grids_read_their_own_radius():
     differ by roughly the ratio of the steps, which is the factor-of-two error
     D-01 describes.
 
-    Note this directory currently LOADS without complaint.  The explicit
-    refusal for a mixed-step SKFPATH is requirement REG-05 and belongs to plan
-    05-04; this test only records what the lookup does with such a directory.
+    UPDATED BY PLAN 05-04.  When this test was written such a directory loaded
+    without complaint, and the docstring said so.  It no longer does: plan 05-04
+    added `_bond_integral._require_uniform_grid_step`, which refuses a
+    mixed-step SKFPATH outright (requirement REG-05).  The refusal is asserted
+    by `test_mixed_step_skfpath_is_refused` below.
+
+    This test therefore now bypasses that guard deliberately, by replacing it
+    with a no-op for the single `Constants` construction.  The point of the test
+    is to keep showing WHAT THE GUARD PREVENTS as a measured radius rather than
+    as prose: with the guard removed the numbers below are what a user would
+    silently have received.  Deleting this test in favour of the refusal test
+    would leave the refusal justified only by assertion.
     """
 
     def check():
+        import dftorch._bond_integral as bond_integral
         from dftorch._h0ands import _pair_knot_lookup
 
         skf_dir = Path(_tmp_dir()) / "mixed_step_skf"
@@ -1204,7 +1214,14 @@ def test_mixed_step_grids_read_their_own_radius():
             {"H-H": 60, "H-N": 60, "N-H": 60, "N-N": 40},
             {"H-H": 0.1, "H-N": 0.1, "N-H": 0.1, "N-N": 0.2},
         )
-        const = _mixed_const(skf_dir, xyz)
+        # Bypass the REG-05 guard for this one load.  Restored in `finally` so a
+        # failure here cannot disarm the guard for any later test.
+        original_guard = bond_integral._require_uniform_grid_step
+        bond_integral._require_uniform_grid_step = lambda steps_by_file: None
+        try:
+            const = _mixed_const(skf_dir, xyz)
+        finally:
+            bond_integral._require_uniform_grid_step = original_guard
 
         pt_fine = int(const.pair_lookup[1, 1])
         pt_coarse = int(const.pair_lookup[7, 7])
@@ -1309,6 +1326,317 @@ def test_mio_c_h_p_has_genuinely_mixed_grid_lengths():
     # R_orb is still the longest grid seen.
     assert r_orb_len == 669
     assert monotonic, "a real mixed-length load produced a non-monotonic row"
+
+
+# --- REG-05: the mixed-step refusal (plan 05-04) -----------------------------
+#
+# The two steps below are the REAL hazard pair named by decision D-01, not
+# arbitrary numbers: tests/f_orbital_data is tabulated at 0.04 Bohr while
+# mio-1-1, 3ob-3-1, pbc-0-3 and trans3d-0-1 are all at 0.02 Bohr, so any single
+# SKFPATH mixing the f dataset with a mainstream parameter set is wrong by a
+# factor of two.
+GUARD_FINE_STEP_BOHR = 0.02
+GUARD_COARSE_STEP_BOHR = 0.04
+GUARD_NPTS = 40
+
+
+def _write_step_mismatch_dir(directory: Path) -> None:
+    """Write a four-file SKFPATH in which N-N alone declares the coarse step."""
+    _write_mixed_skf_dir(
+        directory,
+        dict.fromkeys(("H-H", "H-N", "N-H", "N-N"), GUARD_NPTS),
+        {
+            "H-H": GUARD_FINE_STEP_BOHR,
+            "H-N": GUARD_FINE_STEP_BOHR,
+            "N-H": GUARD_FINE_STEP_BOHR,
+            "N-N": GUARD_COARSE_STEP_BOHR,
+        },
+    )
+
+
+def _load_expecting_guard(skf_dir: Path, xyz: Path):
+    """Construct ``Constants`` and report whether the REG-05 guard fired.
+
+    Returns ``(outcome, message)`` where ``outcome`` is ``"refused"``,
+    ``"loaded"`` or ``"other-error"``.  Primitives are returned rather than the
+    exception object because ``run_with_float64`` evicts and restores the
+    ``dftorch`` modules afterwards, so a class captured inside the callable is
+    not the same object as one imported at assert time.
+    """
+    from dftorch._bond_integral import SKFRadialGridStepMismatchError
+
+    try:
+        _mixed_const(skf_dir, xyz)
+    except SKFRadialGridStepMismatchError as exc:
+        return "refused", str(exc)
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        return "other-error", f"{type(exc).__name__}: {exc}"
+    return "loaded", ""
+
+
+def test_mixed_step_skfpath_is_refused():
+    """A SKFPATH whose files disagree on grid STEP refuses to load (REG-05).
+
+    Decision D-01 keeps this guard even though plan 05-01 made the per-pair
+    lookup correct, because a per-pair lookup cannot rescue a mixed-STEP
+    directory.  Two tabulations sampled at different radial resolutions carry
+    different information at different radii; combining them is a parameter-set
+    error, not an indexing one.
+
+    Also pins the exception's base class.  `ValueError` is deliberate: this is a
+    rejected input, unlike the four `NotImplementedError` subclasses in
+    `_slater_koster_pair` which mark capability DFTorch has yet to implement.
+    """
+
+    def check():
+        from dftorch._bond_integral import SKFRadialGridStepMismatchError
+
+        skf_dir = Path(_tmp_dir()) / "guard_mixed_step"
+        xyz = Path(_tmp_dir()) / "guard_mixed_step.xyz"
+        _write_h_n_xyz(xyz)
+        _write_step_mismatch_dir(skf_dir)
+        outcome, message = _load_expecting_guard(skf_dir, xyz)
+        return (
+            outcome,
+            message,
+            issubclass(SKFRadialGridStepMismatchError, ValueError),
+        )
+
+    outcome, message, is_value_error = run_with_float64(check)
+
+    assert outcome == "refused", (
+        "a mixed-step SKFPATH must raise SKFRadialGridStepMismatchError; "
+        f"got outcome {outcome!r} with {message!r}"
+    )
+    assert is_value_error, (
+        "SKFRadialGridStepMismatchError must subclass ValueError: it reports a "
+        "rejected input, not an unimplemented capability"
+    )
+
+
+def test_mixed_step_error_names_both_files_and_steps():
+    """The refusal names the offending files AND both steps, not just 'mismatch'.
+
+    A message saying only that grids disagree leaves the user to find which of
+    possibly hundreds of SKF files is the odd one out.  The assertions below are
+    on the exact grouped lines the guard emits, and NOT merely on the substrings
+    `0.02` and `0.04`: the explanatory paragraph
+    `SKF_GRID_STEP_MISMATCH_MESSAGE` mentions both of those numbers in prose, so
+    a bare substring check would pass even if the guard reported no measured
+    value at all.
+    """
+
+    def check():
+        skf_dir = Path(_tmp_dir()) / "guard_message"
+        xyz = Path(_tmp_dir()) / "guard_message.xyz"
+        _write_h_n_xyz(xyz)
+        _write_step_mismatch_dir(skf_dir)
+        return _load_expecting_guard(skf_dir, xyz)
+
+    outcome, message = run_with_float64(check)
+
+    assert outcome == "refused", f"expected a refusal, got {outcome!r}: {message!r}"
+
+    fine_line = "step 0.02 Bohr: H-H.skf, H-N.skf, N-H.skf"
+    coarse_line = "step 0.04 Bohr: N-N.skf"
+    assert fine_line in message, (
+        f"the message does not group the fine-step files: expected {fine_line!r} "
+        f"in:\n{message}"
+    )
+    assert coarse_line in message, (
+        f"the message does not name the odd file out: expected {coarse_line!r} "
+        f"in:\n{message}"
+    )
+    # The message must also tell the reader NOT to respond by padding files,
+    # which is the plausible wrong repair once someone sees "grid" and "500".
+    assert "NUMBERS OF POINTS at the same step are FINE" in message
+
+
+def test_same_step_different_length_is_accepted():
+    """Same step, different point counts: BENIGN, and must keep loading.
+
+    This is the prohibition half of REG-05 and it matters more than the refusal.
+    The obvious implementation of the guard -- compare grid LENGTHS -- passes
+    the mixed-step case it exists to catch while rejecting real shipped
+    parameter sets:
+
+    * `3ob-3-1` ships C-C at 650 points and Br-Br at 850 points, both at the
+      same 0.02 Bohr step.
+    * `mio-1-1` mixes 500, 600 (Zn) and 619 (P) points, all at 0.02 Bohr.
+
+    Rejecting either would break a working parameter set for no benefit, since
+    plan 05-01 gave every pair its own grid row.  The two lengths are asserted
+    to be genuinely distinct in `const.n_grid`, so the test cannot pass on a
+    directory that quietly collapsed to one grid.
+    """
+
+    def check():
+        skf_dir = Path(_tmp_dir()) / "guard_same_step"
+        xyz = Path(_tmp_dir()) / "guard_same_step.xyz"
+        _write_h_n_xyz(xyz)
+        _write_mixed_skf_dir(
+            skf_dir,
+            {
+                "H-H": MIXED_SHORT_NPTS,
+                "H-N": MIXED_SHORT_NPTS,
+                "N-H": MIXED_SHORT_NPTS,
+                "N-N": MIXED_LONG_NPTS,
+            },
+            dict.fromkeys(("H-H", "H-N", "N-H", "N-N"), MIXED_STEP_BOHR),
+        )
+        outcome, message = _load_expecting_guard(skf_dir, xyz)
+        if outcome != "loaded":
+            return outcome, message, []
+        const = _mixed_const(skf_dir, xyz)
+        return (
+            outcome,
+            "",
+            sorted(set(int(v) for v in const.n_grid.detach().tolist())),
+        )
+
+    outcome, message, lengths = run_with_float64(check)
+
+    assert outcome == "loaded", (
+        "the guard rejected a same-step / different-length SKFPATH, which is "
+        "the benign configuration 3ob-3-1 and mio-1-1 both ship; "
+        f"got {outcome!r}: {message!r}"
+    )
+    assert lengths == [MIXED_SHORT_LENGTH, MIXED_LONG_LENGTH], (
+        "the accepted directory must really carry two different grid lengths, "
+        f"got {lengths}"
+    )
+
+
+def test_real_parameter_sets_still_load():
+    """Both parameter sets in this repository still construct Constants.
+
+    The blunt regression check that the guard did not become over-eager.
+    `tests/data_skf_mio-1-1` is uniform at 0.02 Bohr across a set that mixes
+    500 / 600 / 619 point counts, and `tests/f_orbital_data` is uniform at 0.04
+    Bohr; each is internally consistent in step and must load unchanged.  Every
+    other test in the suite that runs a real calculation depends on this.
+    """
+
+    def check():
+        from dftorch.Constants import Constants
+
+        outcomes = []
+
+        ch4 = _ch4_xyz()
+        try:
+            mio_const = Constants(_mio_params(ch4)).to("cpu")
+            outcomes.append(("mio-1-1", "loaded", len(mio_const.R_orb)))
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            outcomes.append(("mio-1-1", f"{type(exc).__name__}: {exc}", 0))
+
+        eu_n = Path(_tmp_dir()) / "guard_real_eu_n.xyz"
+        _write_eu_n_xyz(eu_n, EU_N_SEPARATION)
+        try:
+            f_const = Constants(_f_params(eu_n)).to("cpu")
+            outcomes.append(("f_orbital_data", "loaded", len(f_const.R_orb)))
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            outcomes.append(("f_orbital_data", f"{type(exc).__name__}: {exc}", 0))
+
+        return outcomes
+
+    outcomes = run_with_float64(check)
+
+    for name, status, _length in outcomes:
+        assert status == "loaded", f"{name} no longer loads: {status}"
+
+    lengths = {name: length for name, _status, length in outcomes}
+    assert lengths["mio-1-1"] == MIO_GRID_LENGTH
+    assert lengths["f_orbital_data"] == F_GRID_LENGTH
+
+
+def test_real_f_and_mio_files_mixed_are_refused(tmp_path):
+    """The backstop: the guard fires on REAL files from the two real datasets.
+
+    Every other refusal test above builds its SKFPATH with
+    `write_mixed_grid_skf_pair`, so on its own the guard is only ever shown
+    firing on a construction of this suite's own making.  Here the directory is
+    assembled by COPYING shipped files: Eu-Eu, Eu-N and N-Eu come from
+    `tests/f_orbital_data` at 0.04 Bohr, while N-N is taken from
+    `tests/data_skf_mio-1-1` at 0.02 Bohr.
+
+    That is precisely the case decision D-01 describes -- an Eu system whose
+    light-element ligand parameters are pulled from a mainstream set -- and it
+    is the combination this guard exists for.  The measured grid lines are
+    `0.04, 433` in the f files and `0.02, 500,2` in mio's N-N.skf.
+    """
+    import shutil
+
+    skf_dir = tmp_path / "eu_n_mixed_real"
+    skf_dir.mkdir()
+    for name in ("Eu-Eu.skf", "Eu-N.skf", "N-Eu.skf"):
+        shutil.copy(_f_dir() / name, skf_dir / name)
+    shutil.copy(_mio_dir() / "N-N.skf", skf_dir / "N-N.skf")
+
+    xyz = tmp_path / "eu_n_mixed_real.xyz"
+    _write_eu_n_xyz(xyz, EU_N_SEPARATION)
+
+    def check():
+        return _load_expecting_guard(skf_dir, xyz)
+
+    outcome, message = run_with_float64(check)
+
+    assert outcome == "refused", (
+        "mixing the real 0.04 Bohr f dataset with mio-1-1's real 0.02 Bohr "
+        f"N-N.skf must be refused; got {outcome!r}: {message!r}"
+    )
+    assert "step 0.02 Bohr: N-N.skf" in message, (
+        f"the borrowed mio file is not named as the odd one out:\n{message}"
+    )
+    assert "step 0.04 Bohr: Eu-Eu.skf, Eu-N.skf, N-Eu.skf" in message, (
+        f"the f-dataset files are not grouped at their own step:\n{message}"
+    )
+
+
+def test_guard_message_leaks_no_path(tmp_path):
+    """The refusal names basenames and numbers only, never a path.
+
+    Phase 4 threat T-04-07 set the policy that an exception message names
+    orbital counts and modes but never interpolates a path; the same applies to
+    this guard, whose message is the one place in plan 05-04 where
+    caller-supplied text could reach a log or a shared traceback.
+
+    The assertion is on the specific `tmp_path` string rather than on a general
+    path-shaped regex.  A regex for "looks like a path" could be satisfied by
+    accident on a short temporary directory name, or could fail on a message
+    that legitimately contains a slash; asserting that THIS directory's own path
+    is absent is exact.  Both the native form and the forward-slash form are
+    checked, because `os.sep` is a backslash here and code that normalises a
+    path before formatting it would otherwise slip through.
+    """
+    skf_dir = tmp_path / "guard_leak_check_dir"
+    xyz = tmp_path / "guard_leak_check.xyz"
+    _write_h_n_xyz(xyz)
+    _write_step_mismatch_dir(skf_dir)
+
+    def check():
+        return _load_expecting_guard(skf_dir, xyz)
+
+    outcome, message = run_with_float64(check)
+
+    assert outcome == "refused", f"expected a refusal, got {outcome!r}: {message!r}"
+
+    forbidden = {
+        "skf directory (native)": str(skf_dir),
+        "skf directory (posix)": skf_dir.as_posix(),
+        "tmp_path (native)": str(tmp_path),
+        "tmp_path (posix)": tmp_path.as_posix(),
+        "geometry file (native)": str(xyz),
+        "geometry file (posix)": xyz.as_posix(),
+    }
+    leaked = sorted(
+        label for label, value in forbidden.items() if value in message
+    )
+    assert not leaked, (
+        f"the guard's message leaked {leaked} into text a user may paste into a "
+        f"bug report:\n{message}"
+    )
+    # The message is still useful: it names the files, just not where they live.
+    assert "N-N.skf" in message
 
 
 # --- tmp dir helper ----------------------------------------------------------
