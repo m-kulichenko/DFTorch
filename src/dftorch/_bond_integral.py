@@ -597,6 +597,11 @@ def read_skf_table( #Note that the parameters are the arrays where we should sto
     step = float(first[0])
     npts_read = int(first[1])
     npts_pad = npts_read + 50
+    # Optional third field: number of occupied shells (e.g. ``0.02, 500,1`` for s-only
+    # hydrogen, ``0.02, 500 ,2`` for sp carbon). Authoritative when present; see the
+    # shell-presence block below for why the E_l inference alone is not safe. Absent in
+    # the f fixtures and in mio-1-1's Zn-Zn, which keep using the inference.
+    n_shells_declared = int(first[2]) if len(first) >= 3 else None
 
     base = os.path.basename(path)
     name, _ext = os.path.splitext(base)
@@ -655,12 +660,33 @@ def read_skf_table( #Note that the parameters are the arrays where we should sto
 
         el_num = symbol_to_number[elemA]
 
-        # This is still a parser-level inference. If wfc.hsd exists, it can
-        # override shell presence below in get_skf_tensors().
-        has_s = Es != 0.0 or fs != 0.0
-        has_p = Ep != 0.0 or fp != 0.0
-        has_d = Ed != 0.0 or fd != 0.0
-        has_f = Ef != 0.0 or ff != 0.0
+        # Shell presence. Prefer the shell count declared on the grid line; fall back to
+        # inference from onsite energies / occupations only when the file omits it.
+        #
+        # The inference alone is NOT safe. mio-1-1's H-H.skf carries a placeholder
+        # ``Ep = 0.000039`` Hartree (~0.001 eV) even though hydrogen is s-only, so
+        # ``Ep != 0.0`` gave hydrogen a phantom p shell and ``n_orb = 4`` instead of 1.
+        # Those phantom functions then received real Slater-Koster overlap from the C-H
+        # sp channel rather than zeros, which made the overlap matrix S indefinite
+        # (eigenvalue -0.159). S is a Gram matrix, so S^(-1/2) was undefined: one
+        # Hamiltonian eigenvalue reached 6.1e16 eV, the density matrix lost symmetry, and
+        # 2*Tr(D S) stopped equalling the electron count -- which is why CH4 could never
+        # converge. The same file's ``fp = 0.0`` and its declared shell count ``1`` were
+        # both correct and both ignored. See tests/test_shell_count_parsing.py.
+        #
+        # If wfc.hsd exists, it can still override shell presence in get_skf_tensors().
+        if n_shells_declared is not None:
+            if not 1 <= n_shells_declared <= MAX_SHELLS:
+                raise ValueError(
+                    f"{path}: declared shell count {n_shells_declared} is outside the "
+                    f"supported range 1..{MAX_SHELLS}"
+                )
+            has_s, has_p, has_d, has_f = (i < n_shells_declared for i in range(4))
+        else:
+            has_s = Es != 0.0 or fs != 0.0
+            has_p = Ep != 0.0 or fp != 0.0
+            has_d = Ed != 0.0 or fd != 0.0
+            has_f = Ef != 0.0 or ff != 0.0
         _validate_nested_shells(elemA, has_s, has_p, has_d, has_f, path)
 
         shell_presence = (has_s, has_p, has_d, has_f)
