@@ -109,6 +109,7 @@ def coulomb_matrix_vectorized(
     verbose: bool = False,
     h_damp_exp: Optional[float] = None,
     h5_params: Optional[Dict] = None,
+    library_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the Ewald-summed Coulomb matrix and its Cartesian derivatives.
 
@@ -146,6 +147,15 @@ def coulomb_matrix_vectorized(
         Ewald splitting parameter α.
     verbose:
         If True, prints progress from the k-space summation.
+    library_output : bool, default True
+        Whether to emit this function's status output.  Threaded from the
+        ``VERBOSE_LIBRARY_OUTPUT`` key via
+        :func:`dftorch._tools.library_output_enabled` (decision D-02).
+        **The default is True on purpose.**  This function receives no
+        parameter dictionary, so a call site that forgets to thread the
+        flag keeps printing -- which is today's behaviour.  A default of
+        ``False`` would silently go quiet at every missed call site, the
+        exact regression D-02's noisy default exists to prevent.
 
     Returns
     -------
@@ -160,7 +170,8 @@ def coulomb_matrix_vectorized(
       but removes the unconditional banner print.
     """
 
-    print("coulomb_matrix_vectorized")
+    if library_output:
+        print("coulomb_matrix_vectorized")
     if verbose:
         print("  Do Coulomb Real")
     start_time1 = time.perf_counter()
@@ -191,7 +202,8 @@ def coulomb_matrix_vectorized(
     ##################
 
     dq_J = torch.zeros(Nr_atoms, dtype=dR.dtype, device=dR.device)
-    print("  Coulomb_Real t {:.1f} s".format(time.perf_counter() - start_time1))
+    if library_output:
+        print("  Coulomb_Real t {:.1f} s".format(time.perf_counter() - start_time1))
 
     ## Second, k-space
     start_time1 = time.perf_counter()
@@ -201,9 +213,19 @@ def coulomb_matrix_vectorized(
         if verbose:
             print("  Doing Coulomb k")
         CC_k, dCC_dR_k = ewald_k_space_vectorized(
-            RX, RY, RZ, cell, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
+            RX,
+            RY,
+            RZ,
+            cell,
+            dq_J,
+            Nr_atoms,
+            Coulomb_acc,
+            CALPHA,
+            verbose,
+            library_output=library_output,
         )
-        print("  Coulomb_k t {:.1f} s\n".format(time.perf_counter() - start_time1))
+        if library_output:
+            print("  Coulomb_k t {:.1f} s\n".format(time.perf_counter() - start_time1))
 
     CC = CC_real + CC_k
     dCC_dxyz = dCC_dxyz_real + dCC_dR_k
@@ -491,6 +513,7 @@ def ewald_k_space_vectorized(
     CALPHA: float,
     verbose: bool,
     do_vec: bool = False,
+    library_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reciprocal-space (k-space) Ewald contribution and derivatives.
 
@@ -512,6 +535,15 @@ def ewald_k_space_vectorized(
         Print loop counters if True.
     do_vec:
         If True, run a fully-vectorized k-space path (memory heavy).
+    library_output : bool, default True
+        Whether to emit this function's status output.  Threaded from the
+        ``VERBOSE_LIBRARY_OUTPUT`` key via
+        :func:`dftorch._tools.library_output_enabled` (decision D-02).
+        **The default is True on purpose.**  This function receives no
+        parameter dictionary, so a call site that forgets to thread the
+        flag keeps printing -- which is today's behaviour.  A default of
+        ``False`` would silently go quiet at every missed call site, the
+        exact regression D-02's noisy default exists to prevent.
 
     Returns
     -------
@@ -554,7 +586,8 @@ def ewald_k_space_vectorized(
 
     if do_vec:
         # Create meshgrid of all combinations
-        print("  init L,M,N,K")
+        if library_output:
+            print("  init L,M,N,K")
         L_vals = torch.arange(0, LMAX + 1)
         M_vals = torch.arange(-MMAX, MMAX + 1)
         N_vals = torch.arange(-NMAX, NMAX + 1)
@@ -605,7 +638,8 @@ def ewald_k_space_vectorized(
         dC_dR[2] += (force_tmp * K_vectors[:, 2]).sum(-1)
     else:
         # if verbose: print('   LMAX:', LMAX)
-        print("   LMAX:", LMAX)
+        if library_output:
+            print("   LMAX:", LMAX)
         for L in range(0, LMAX + 1):
             if verbose:
                 print("  ", L)

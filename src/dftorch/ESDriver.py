@@ -32,6 +32,7 @@ from ._slater_koster_pair import (
     FSpinPolarizationUnsupportedError,
 )
 from ._stress import get_total_stress_analytical
+from ._tools import library_output_enabled
 from ._thirdorder import ThirdOrderBatch, create_thirdorder
 from ._tools import fractional_matrix_power_symm, normalize_coulomb_settings
 
@@ -393,6 +394,7 @@ class ESDriver(torch.nn.Module):
                 verbose=verbose,
                 h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                 h5_params=self.dftorch_params.get("H5_PARAMS", None),
+                library_output=library_output_enabled(self.dftorch_params),
             )
 
             # ── Shell-resolved (l-dependent) Coulomb matrix ─────────────
@@ -1636,6 +1638,7 @@ class ESDriverBatch(torch.nn.Module):
                 verbose=verbose,
                 h_damp_exp=self.dftorch_params.get("H_DAMP_EXP", None),
                 h5_params=self.dftorch_params.get("H5_PARAMS", None),
+                library_output=library_output_enabled(self.dftorch_params),
             )
 
             del (
@@ -1730,7 +1733,8 @@ class ESDriverBatch(torch.nn.Module):
                 structure.gbsa_list = _gbsa_list  # keep for rebuild in MD
 
                 toc = time.time()
-                print(f"GBSA initialization time: {toc - tic:.2f} seconds")
+                if library_output_enabled(self.dftorch_params):
+                    print(f"GBSA initialization time: {toc - tic:.2f} seconds")
 
             else:
                 structure.gbsa_batch = None
@@ -1911,14 +1915,16 @@ class ESDriverBatch(torch.nn.Module):
                     0, 2, 1
                 )  # (B, N, 3) → (B, 3, N)
                 toc = time.time()
-                print(f"GBSA SASA gradient calculation time: {toc - tic:.2f} seconds")
+                if library_output_enabled(self.dftorch_params):
+                    print(f"GBSA SASA gradient calculation time: {toc - tic:.2f} seconds")
 
                 tic = time.time()
                 f_born = structure.gbsa_batch.get_born_gradients(structure.q).permute(
                     0, 2, 1
                 )  # (B, N, 3) → (B, 3, N)
                 toc = time.time()
-                print(f"GBSA Born gradient calculation time: {toc - tic:.2f} seconds")
+                if library_output_enabled(self.dftorch_params):
+                    print(f"GBSA Born gradient calculation time: {toc - tic:.2f} seconds")
 
                 structure.f_gbsa = f_sasa + f_born  # (B, 3, N)
                 structure.f_tot = structure.f_tot + structure.f_gbsa

@@ -33,6 +33,7 @@ def coulomb_matrix_vectorized_batch(
     verbose: bool = False,
     h_damp_exp: Optional[float] = None,
     h5_params: Optional[Dict] = None,
+    library_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute the batched Coulomb matrix and its Cartesian derivatives.
 
@@ -69,6 +70,15 @@ def coulomb_matrix_vectorized_batch(
         Ewald splitting parameter alpha.
     verbose:
         If True, prints additional info in k-space routine.
+    library_output : bool, default True
+        Whether to emit this function's status output.  Threaded from the
+        ``VERBOSE_LIBRARY_OUTPUT`` key via
+        :func:`dftorch._tools.library_output_enabled` (decision D-02).
+        **The default is True on purpose.**  This function receives no
+        parameter dictionary, so a call site that forgets to thread the
+        flag keeps printing -- which is today's behaviour.  A default of
+        ``False`` would silently go quiet at every missed call site, the
+        exact regression D-02's noisy default exists to prevent.
 
     Returns
     -------
@@ -111,7 +121,16 @@ def coulomb_matrix_vectorized_batch(
     else:
         dq_J = torch.zeros(Nr_atoms, dtype=dR.dtype, device=dR.device)
         CC_k, dCC_dR_k = ewald_k_space_vectorized(
-            RX, RY, RZ, lattice_vecs, dq_J, Nr_atoms, Coulomb_acc, CALPHA, verbose
+            RX,
+            RY,
+            RZ,
+            lattice_vecs,
+            dq_J,
+            Nr_atoms,
+            Coulomb_acc,
+            CALPHA,
+            verbose,
+            library_output=library_output,
         )
 
     CC = CC_real + CC_k
@@ -392,6 +411,7 @@ def ewald_k_space_vectorized(
     CALPHA: float,
     verbose: bool,
     do_vec: bool = False,
+    library_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute k-space Ewald contribution (batched).
 
@@ -413,6 +433,15 @@ def ewald_k_space_vectorized(
         If True, prints progress.
     do_vec:
         Placeholder flag. Vectorized k-space path is not implemented for batch.
+    library_output : bool, default True
+        Whether to emit this function's status output.  Threaded from the
+        ``VERBOSE_LIBRARY_OUTPUT`` key via
+        :func:`dftorch._tools.library_output_enabled` (decision D-02).
+        **The default is True on purpose.**  This function receives no
+        parameter dictionary, so a call site that forgets to thread the
+        flag keeps printing -- which is today's behaviour.  A default of
+        ``False`` would silently go quiet at every missed call site, the
+        exact regression D-02's noisy default exists to prevent.
 
     Returns
     -------
@@ -460,7 +489,8 @@ def ewald_k_space_vectorized(
         return
     else:
         # if verbose: print('   LMAX:', LMAX)
-        print("   LMAX:", LMAX)
+        if library_output:
+            print("   LMAX:", LMAX)
         for L in range(0, torch.max(LMAX) + 1):
             if verbose:
                 print("  ", L)

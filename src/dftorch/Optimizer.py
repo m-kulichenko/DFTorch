@@ -22,6 +22,7 @@ from typing import Optional
 import torch
 
 from ._cell import wrap_positions
+from ._tools import library_output_enabled
 from ._io import write_pdb_frame, write_XYZ_trajectory
 from .ESDriver import ESDriver
 
@@ -326,6 +327,10 @@ class GeoOpt:
         lbfgs_memory : int
             Number of history pairs for LBFGS (default 20).
         """
+        # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+        # than a dict lookup per print. Defaults to True, so a caller who never
+        # sets the key sees exactly the output they saw before it existed.
+        _lib_out = library_output_enabled(dftorch_params)
         device = structure.RX.device
         dtype = structure.RX.dtype
         Nats = structure.Nats
@@ -370,7 +375,8 @@ class GeoOpt:
 
         for step in range(max_steps):
             t0 = time.perf_counter()
-            print(f"═══════════ GeoOpt step {step} ═══════════")
+            if _lib_out:
+                print(f"═══════════ GeoOpt step {step} ═══════════")
 
             # ── 1. SCF + Energy ──────────────────────────────────────────
             self.es_driver(structure, self.const, do_scf=True)
@@ -419,7 +425,8 @@ class GeoOpt:
             else:
                 cell_converged = True
 
-            print(info)
+            if _lib_out:
+                print(info)
 
             if step % dump_interval == 0:
                 write_XYZ_trajectory(
@@ -438,7 +445,8 @@ class GeoOpt:
                 )
 
             if fmax_val < fmax and cell_converged:
-                print(f"\n✓ Converged in {step + 1} steps.")
+                if _lib_out:
+                    print(f"\n✓ Converged in {step + 1} steps.")
                 converged = True
                 break
 
@@ -500,7 +508,8 @@ class GeoOpt:
                 )
 
             dt = time.perf_counter() - t0
-            print(f"  step time: {dt:.2f} s\n")
+            if _lib_out:
+                print(f"  step time: {dt:.2f} s\n")
 
         if not converged:
             print(

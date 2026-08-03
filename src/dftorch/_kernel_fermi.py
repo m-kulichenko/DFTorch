@@ -19,6 +19,7 @@ def _kernel_fermi(
     Q: torch.Tensor,
     e: torch.Tensor,
     gbsa: Any | None = None,
+    library_output: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the atomic charge-response kernel for SCF mixing.
 
@@ -52,6 +53,15 @@ def _kernel_fermi(
         Eigenvalues corresponding to ``Q``.
     gbsa : Any, optional
         Optional solvation object exposing ``get_shifts``.
+    library_output : bool, default True
+        Whether to emit this function's status output.  Threaded from the
+        ``VERBOSE_LIBRARY_OUTPUT`` key via
+        :func:`dftorch._tools.library_output_enabled` (decision D-02).
+        **The default is True on purpose.**  This function receives no
+        parameter dictionary, so a call site that forgets to thread the
+        flag keeps printing -- which is today's behaviour.  A default of
+        ``False`` would silently go quiet at every missed call site, the
+        exact regression D-02's noisy default exists to prevent.
 
     Returns
     -------
@@ -69,7 +79,8 @@ def _kernel_fermi(
     )  # Generate atom index for each orbital
 
     for J in range(0, Nr_atoms):
-        print("Building kernel row ", J + 1, " of ", Nr_atoms)
+        if library_output:
+            print("Building kernel row ", J + 1, " of ", Nr_atoms)
 
         dq_J[J] = 1
 

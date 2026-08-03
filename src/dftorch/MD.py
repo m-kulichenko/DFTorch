@@ -3,7 +3,11 @@ from typing import Any, Optional, Tuple
 
 import torch
 
-from dftorch._tools import calculate_dist_dips, normalize_coulomb_settings
+from dftorch._tools import (
+    calculate_dist_dips,
+    library_output_enabled,
+    normalize_coulomb_settings,
+)
 
 from ._cell import wrap_positions
 from ._energy import energy_shadow
@@ -483,11 +487,16 @@ class MDXL:
         if self.cuda_sync:
             torch.cuda.synchronize()
         start_time = time.perf_counter()
-        print(
-            "########## Step = {:} ##########".format(
-                md_step,
+        # D-02: one read of VERBOSE_LIBRARY_OUTPUT per step, rather than a
+        # dict lookup per print. Defaults to True, so a caller who never sets
+        # the key sees exactly the output they saw before it existed.
+        _lib_out = library_output_enabled(dftorch_params)
+        if _lib_out:
+            print(
+                "########## Step = {:} ##########".format(
+                    md_step,
+                )
             )
-        )
 
         self.EKIN = (
             0.5
@@ -655,7 +664,8 @@ class MDXL:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
+        if _lib_out:
+            print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic2_1 = time.perf_counter()
 
         # ── Coulomb potential ────────────────────────────────────────────
@@ -854,7 +864,8 @@ class MDXL:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
+        if _lib_out:
+            print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic3 = time.perf_counter()
 
         # ── Kernel update ────────────────────────────────────────────────
@@ -931,7 +942,8 @@ class MDXL:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("KER: {:.3f} s".format(time.perf_counter() - tic3))
+        if _lib_out:
+            print("KER: {:.3f} s".format(time.perf_counter() - tic3))
         tic4 = time.perf_counter()
 
         # ── Spin energy (OS only) ────────────────────────────────────────
@@ -1171,7 +1183,8 @@ class MDXL:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
+        if _lib_out:
+            print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
 
         if self.barostat_enabled:
             V = torch.abs(torch.det(structure.cell))
@@ -1180,32 +1193,35 @@ class MDXL:
             P_str = ""
 
         if self._os:
-            print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f},  NS = {:.4f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
-                    Energ,
-                    self.EPOT.item(),
-                    self.EKIN.item(),
-                    Temperature.item(),
-                    structure.net_spin_sr.sum().item(),
-                    ResErr.item(),
-                    P_str,
-                    time.perf_counter() - start_time,
+            if _lib_out:
+                print(
+                    "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f},  NS = {:.4f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
+                        Energ,
+                        self.EPOT.item(),
+                        self.EKIN.item(),
+                        Temperature.item(),
+                        structure.net_spin_sr.sum().item(),
+                        ResErr.item(),
+                        P_str,
+                        time.perf_counter() - start_time,
+                    )
                 )
-            )
         else:
-            print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
-                    Energ,
-                    self.EPOT.item(),
-                    self.EKIN.item(),
-                    Temperature.item(),
-                    ResErr.item(),
-                    P_str,
-                    time.perf_counter() - start_time,
+            if _lib_out:
+                print(
+                    "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.1f} s".format(
+                        Energ,
+                        self.EPOT.item(),
+                        self.EKIN.item(),
+                        Temperature.item(),
+                        ResErr.item(),
+                        P_str,
+                        time.perf_counter() - start_time,
+                    )
                 )
-            )
-        print(torch.cuda.memory_allocated() / 1e9, "GB\n")
-        print()
+        if _lib_out:
+            print(torch.cuda.memory_allocated() / 1e9, "GB\n")
+            print()
 
 
 # Backward-compatible alias — existing code that uses MDXLOS will keep working.
@@ -1572,11 +1588,16 @@ class MDXLBatch:
         if self.cuda_sync:
             torch.cuda.synchronize()
         start_time = time.perf_counter()
-        print(
-            "########## Step = {:} ##########".format(
-                md_step,
+        # D-02: one read of VERBOSE_LIBRARY_OUTPUT per step, rather than a
+        # dict lookup per print. Defaults to True, so a caller who never sets
+        # the key sees exactly the output they saw before it existed.
+        _lib_out = library_output_enabled(dftorch_params)
+        if _lib_out:
+            print(
+                "########## Step = {:} ##########".format(
+                    md_step,
+                )
             )
-        )
 
         self.EKIN = (
             0.5
@@ -1706,7 +1727,8 @@ class MDXLBatch:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
+        if _lib_out:
+            print("H0: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic2_1 = time.perf_counter()
 
         CoulPot = torch.matmul(structure.C, self.n.unsqueeze(-1)).squeeze(-1)
@@ -1793,7 +1815,8 @@ class MDXLBatch:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
+        if _lib_out:
+            print("H1: {:.3f} s".format(time.perf_counter() - tic2_1))
         tic3 = time.perf_counter()
 
         # Update Kernel
@@ -1847,7 +1870,8 @@ class MDXLBatch:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("KER: {:.3f} s".format(time.perf_counter() - tic3))
+        if _lib_out:
+            print("KER: {:.3f} s".format(time.perf_counter() - tic3))
         tic4 = time.perf_counter()
 
         (
@@ -2002,7 +2026,8 @@ class MDXLBatch:
 
         if self.cuda_sync:
             torch.cuda.synchronize()
-        print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
+        if _lib_out:
+            print("F AND E: {:.3f} s".format(time.perf_counter() - tic4))
 
         if self.barostat_enabled:
             V = torch.abs(torch.det(structure.cell))  # (B,)
@@ -2011,19 +2036,21 @@ class MDXLBatch:
             P_str = ""
             if self.barostat_enabled:
                 P_str = f", P = {self._P_inst_GPa[b].item():.4f} GPa, V = {V[b].item():.2f} Å³"
-            print(
-                "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.2f} s".format(
-                    Energ[b].item(),
-                    self.EPOT[b].item(),
-                    self.EKIN[b].item(),
-                    Temperature[b].item(),
-                    ResErr[b].item(),
-                    P_str,
-                    time.perf_counter() - start_time,
+            if _lib_out:
+                print(
+                    "ETOT = {:.8f}, EPOT = {:.8f}, EKIN = {:.8f}, T = {:.8f}, ResErr = {:.6f}{}, t = {:.2f} s".format(
+                        Energ[b].item(),
+                        self.EPOT[b].item(),
+                        self.EKIN[b].item(),
+                        Temperature[b].item(),
+                        ResErr[b].item(),
+                        P_str,
+                        time.perf_counter() - start_time,
+                    )
                 )
-            )
-        print(torch.cuda.memory_allocated() / 1e9, "GB\n")
-        print()
+        if _lib_out:
+            print(torch.cuda.memory_allocated() / 1e9, "GB\n")
+            print()
 
 
 def initialize_velocities(

@@ -15,7 +15,11 @@ from ._dm_fermi_x import (
 from ._spin import get_h_spin
 
 # from ._kernel_fermi import _kernel_fermi
-from ._tools import calculate_dist_dips, normalize_coulomb_settings
+from ._tools import (
+    calculate_dist_dips,
+    library_output_enabled,
+    normalize_coulomb_settings,
+)
 from ._xl_tools import (
     calc_q,
     calc_q_batch,
@@ -264,7 +268,12 @@ def SCFx(
         * 'PME': periodic Ewald via sedacs (real/reciprocal space split).
         * 'direct': direct Coulomb via supplied C.
     """
-    print("### Do _scf ###")
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
+    if _lib_out:
+        print("### Do _scf ###")
 
     device = H0.device
     atom_ids = torch.repeat_interleave(
@@ -327,7 +336,8 @@ def SCFx(
         # if 1:
 
         # Initial density matrix
-        print("  Initial dm_fermi")
+        if _lib_out:
+            print("  Initial dm_fermi")
 
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
@@ -342,7 +352,8 @@ def SCFx(
                 Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
             )
 
-            print("  Initial mu = {:.4f}".format(mu0.item()))
+            if _lib_out:
+                print("  Initial mu = {:.4f}".format(mu0.item()))
 
             D = Z @ Dorth @ Z.T
             DS = 2 * torch.diag(D @ S)
@@ -376,14 +387,16 @@ def SCFx(
         it = 0
         Ecoul = torch.tensor([0.0], device=device)
 
-        print("\nStarting cycle")
+        if _lib_out:
+            print("\nStarting cycle")
         while (
             (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
             or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
         ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
-            print("Iter {}".format(it))
+            if _lib_out:
+                print("Iter {}".format(it))
 
             if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
@@ -498,11 +511,12 @@ def SCFx(
             dEc = torch.abs(Ecoul_old - Ecoul)
 
             # print("Res = {:.9f}, dEb = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(ResNorm.item(), dEb.item(), torch.abs(Ecoul_old-Ecoul).item(), time.perf_counter()-start_time ))
-            print(
-                "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
-                    ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+            if _lib_out:
+                print(
+                    "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
+                        ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+                    )
                 )
-            )
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
@@ -583,7 +597,12 @@ def scf_x_os(
     Optional[torch.Tensor],  # dq_p1 (PME only)
 ]:
     """ """
-    print("### Do _scf ###")
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
+    if _lib_out:
+        print("### Do _scf ###")
 
     device = H0.device
     atom_ids = torch.repeat_interleave(
@@ -651,7 +670,8 @@ def scf_x_os(
     with _no_grad_ctx:
         # if 1:
         # Initial density matrix
-        print("  Initial dm_fermi")
+        if _lib_out:
+            print("  Initial dm_fermi")
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
             - RY[atom_ids] * Efield[1]
@@ -743,14 +763,16 @@ def scf_x_os(
         it = 0
         Ecoul = torch.tensor(0.0, device=device)
 
-        print("\nStarting cycle")
+        if _lib_out:
+            print("\nStarting cycle")
         while (
             (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
             or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
         ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
-            print("Iter {}".format(it))
+            if _lib_out:
+                print("Iter {}".format(it))
 
             if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
@@ -880,11 +902,12 @@ def scf_x_os(
             dEc = torch.abs(Ecoul_old - Ecoul)
 
             # print("Res = {:.9f}, dEb = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(ResNorm.item(), dEb.item(), torch.abs(Ecoul_old-Ecoul).item(), time.perf_counter()-start_time ))
-            print(
-                "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
-                    ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+            if _lib_out:
+                print(
+                    "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
+                        ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+                    )
                 )
-            )
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
@@ -991,6 +1014,11 @@ def SCFx_batch(
     Supports PME Ewald electrostatics via `sedacs` or a direct Coulomb matrix.
     """
 
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
+
     batch_size = RX.shape[0]
     device = H0.device
     counts = n_orbitals_per_atom  # shape (B, N)
@@ -1038,7 +1066,8 @@ def SCFx_batch(
             Dorth, Q, e, f, mu0 = _dm_solver(
                 H_ortho, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
             )
-            print("  Initial mu", mu0)
+            if _lib_out:
+                print("  Initial mu", mu0)
             D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
             DS = 2 * torch.diagonal(torch.matmul(D, S), dim1=-2, dim2=-1)
             q = -1.0 * Znuc
@@ -1052,7 +1081,8 @@ def SCFx_batch(
                 q = q_init.unsqueeze(0).expand(batch_size, -1).clone()
             else:
                 q = q_init.clone()
-            print("  Using q_init (skipping initial dm_fermi)")
+            if _lib_out:
+                print("  Using q_init (skipping initial dm_fermi)")
 
         KK = -dftorch_params["SCF_ALPHA"] * torch.eye(
             Nats, device=H0.device
@@ -1080,12 +1110,14 @@ def SCFx_batch(
         it = 0
         Ecoul = torch.zeros(batch_size, device=device) + 0.0  # float("inf")
 
-        print("\nStarting cycle")
+        if _lib_out:
+            print("\nStarting cycle")
         while (
             (ResNorm > scf_tol).any() or (dEc > scf_tol * 100).any()
         ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             it += 1
-            print("Iter {}".format(it))
+            if _lib_out:
+                print("Iter {}".format(it))
 
             CoulPot = torch.matmul(C, q.unsqueeze(-1)).squeeze(-1)
 
@@ -1177,7 +1209,8 @@ def SCFx_batch(
             dEc = torch.abs(Ecoul_old - Ecoul)
 
             for b, (rval, dval) in enumerate(zip(ResNorm.tolist(), dEc.tolist())):
-                print(f"Batch {b}: Res = {rval:.3e}, dEc = {dval:.3e}")
+                if _lib_out:
+                    print(f"Batch {b}: Res = {rval:.3e}, dEc = {dval:.3e}")
             # print(f"t = {elapsed:.2f} s")
 
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
@@ -1241,7 +1274,12 @@ def delta_scf_x_os(
     Optional[torch.Tensor],  # dq_p1 (PME only)
 ]:
     """ """
-    print("### Do Delta_scf ###")
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
+    if _lib_out:
+        print("### Do Delta_scf ###")
 
     device = H0.device
     atom_ids = torch.repeat_interleave(
@@ -1309,7 +1347,8 @@ def delta_scf_x_os(
     with _no_grad_ctx:
         # if 1:
         # Initial density matrix
-        print("  Initial dm_fermi")
+        if _lib_out:
+            print("  Initial dm_fermi")
         Hdipole = torch.diag(
             -RX[atom_ids] * Efield[0]
             - RY[atom_ids] * Efield[1]
@@ -1376,14 +1415,16 @@ def delta_scf_x_os(
         it = 0
         Ecoul = torch.tensor(0.0, device=device)
 
-        print("\nStarting cycle")
+        if _lib_out:
+            print("\nStarting cycle")
         while (
             (ResNorm > dftorch_params.get("SCF_TOL", 1e-6))
             or (dEc > dftorch_params.get("SCF_TOL", 1e-6) * 100)
         ) and it < dftorch_params.get("SCF_MAX_ITER", 100):
             start_time = time.perf_counter()
             it += 1
-            print("Iter {}".format(it))
+            if _lib_out:
+                print("Iter {}".format(it))
 
             if dftorch_params["COUL_METHOD"] == "PME":
                 # with torch.enable_grad():
@@ -1501,11 +1542,12 @@ def delta_scf_x_os(
             dEc = torch.abs(Ecoul_old - Ecoul)
 
             # print("Res = {:.9f}, dEb = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(ResNorm.item(), dEb.item(), torch.abs(Ecoul_old-Ecoul).item(), time.perf_counter()-start_time ))
-            print(
-                "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
-                    ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+            if _lib_out:
+                print(
+                    "Res = {:.9f}, dEc = {:.9f}, t = {:.1f} s\n".format(
+                        ResNorm.item(), dEc.item(), time.perf_counter() - start_time
+                    )
                 )
-            )
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 

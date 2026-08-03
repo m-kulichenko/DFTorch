@@ -15,7 +15,7 @@ from ._fermi_prt import (
     fermi_prt_D1_only,
 )  # noqa: F401
 from ._spin import get_h_spin_diag
-from ._tools import _maybe_compile
+from ._tools import _maybe_compile, library_output_enabled
 
 
 def calc_q(
@@ -539,6 +539,10 @@ def kernel_update_lr(
     K0Res : (Nats,) torch.Tensor
         Preconditioned low-rank correction step in charge space.
     """
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
 
     Hubbard_U_gathered = Hubbard_U[atom_ids]
     if dU_dq is not None:
@@ -646,7 +650,8 @@ def kernel_update_lr(
 
         # Residual norm in the subspace
         Fel = torch.norm(F_small @ Y - K0Res)
-        print("  rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
+        if _lib_out:
+            print("  rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
         krylov_rank += 1
 
     # If no Krylov steps were taken, return preconditioned residual
@@ -735,6 +740,10 @@ def kernel_update_lr_os(
     K0Res : (Nats,) torch.Tensor
         Preconditioned low-rank correction step in charge space.
     """
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
     Nshells = n_shells_per_atom.sum().item()
 
     krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
@@ -913,7 +922,8 @@ def kernel_update_lr_os(
         Y = torch.linalg.solve(O, rhs)  # (rank,)
 
         Fel = torch.norm(F_flat @ Y - K0Res_flat)
-        print("  rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
+        if _lib_out:
+            print("  rank: {:}, Fel = {:.6f}".format(krylov_rank, Fel.item()))
         krylov_rank += 1
 
     if krylov_rank == 0:
@@ -981,6 +991,10 @@ def kernel_update_lr_batch(
     K0Res : (Nats,) torch.Tensor
         Preconditioned low-rank correction step in charge space.
     """
+    # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
+    # than a dict lookup per print. Defaults to True, so a caller who never
+    # sets the key sees exactly the output they saw before it existed.
+    _lib_out = library_output_enabled(dftorch_params)
     batch_size = q.shape[0]
     krylov_maxrank = dftorch_params.get("KRYLOV_MAXRANK", 20)
     vi = torch.zeros(batch_size, n_atoms, krylov_maxrank, device=S.device)
@@ -1110,7 +1124,8 @@ def kernel_update_lr_batch(
 
         fel_list = Fel_all.detach().cpu().tolist()
         for b, val in enumerate(fel_list):
-            print(f"  rank: {krylov_rank}, batch {b}, Fel = {val:.6f}")
+            if _lib_out:
+                print(f"  rank: {krylov_rank}, batch {b}, Fel = {val:.6f}")
         print(f"  Not converged: {active_mask.sum()}")
         krylov_rank += 1
 
