@@ -112,3 +112,39 @@ was edited in 05-03 because D-02 assigns their classification and gating to
 current tree and use 124, not 112, as its top-level starting count. It should
 also state explicitly whether `_legacy/`, `sedacs/`, and `ewald_pme/` are in its
 scope; including them raises the recursive baseline to 182.
+
+---
+
+## 4. `docs/LIBRARY-OUTPUT-INVENTORY.md` names a test that does not exist
+
+**Found during:** plan 05-06, Task 1 (2026-08-03), while matching the established
+phase inventory format.
+**Owner:** plan 05-05 (D-02 library-output inventory).
+**Status:** open; out of scope for 05-06, whose D-04 audit owns a different document.
+
+`docs/LIBRARY-OUTPUT-INVENTORY.md` states:
+
+> `tests/test_verbose_flag.py::test_inventory_covers_every_print` walks the tree,
+> counts the same occurrences, and asserts the two are equal, so a print added by a
+> later phase without a row here fails the suite rather than accumulating quietly.
+
+Neither the file nor the test exists:
+
+    ls tests/test_verbose_flag.py
+    ls: cannot access 'tests/test_verbose_flag.py': No such file or directory
+
+    grep -rn "test_inventory_covers_every_print" tests/
+    (no output)
+
+This matters beyond bookkeeping. `05-VALIDATION.md` identifies the completeness gate
+as the one documentation property in Phase 5 with a real automatable check, and
+D-04's inventory implements exactly that (`tests/test_orbital_count_guards.py::
+test_inventory_covers_every_site`, bidirectional). The print inventory claims the
+same protection and has none, so a print added by a later phase will not fail
+anything -- which is the failure mode the sentence promises is covered.
+
+**What should happen:** either write `tests/test_verbose_flag.py` with the
+completeness gate it describes -- `tests/test_orbital_count_guards.py` is a directly
+reusable shape, including the both-directions failure message -- or delete the claim
+from the document. Leaving a documented gate that does not exist is worse than
+having no gate, because a reader stops looking.
