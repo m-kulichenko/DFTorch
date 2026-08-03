@@ -484,9 +484,30 @@ def ewald_k_space_vectorized(
     )
 
     if do_vec:
-        # Create meshgrid of all combinations
-        print("vectorized k-space is not implemented for batched data")
-        return
+        # Announcing a missing capability and then returning is the
+        # printed-apology pattern decision D-04 exists to remove. The bare
+        # `return` handed back None from a function annotated
+        # `-> tuple[torch.Tensor, torch.Tensor]`, so the only in-package caller
+        # (ewald_real_space_vectorized_batch, which unpacks two values) failed
+        # with "cannot unpack non-iterable NoneType object" one frame away,
+        # with the explanation already scrolled off.
+        #
+        # This site is NOT an orbital-count site. Nothing here depends on
+        # n_orb, max_ang or the basis layout; it is a batched k-space Ewald gap
+        # (PHY-04, Phase 8.1). It is resolved here because plan 05-05 handed it
+        # over, and it is recorded as out of D-04's row set rather than forced
+        # into it -- see docs/ORBITAL-COUNT-INVENTORY.md.
+        #
+        # No new exception class: the four F*UnsupportedError classes are the f
+        # support policy and none of them covers a batched Ewald sum.
+        raise NotImplementedError(
+            "ewald_k_space_vectorized (batched): do_vec=True selects a "
+            "vectorized k-space sum that is not implemented for batched data, "
+            "and the loop below is the only working path. Call with "
+            "do_vec=False, which is the default and what every caller in this "
+            "package uses. Vectorizing the batched k-space sum is deferred to "
+            "requirement PHY-04."
+        )
     else:
         # if verbose: print('   LMAX:', LMAX)
         if library_output:

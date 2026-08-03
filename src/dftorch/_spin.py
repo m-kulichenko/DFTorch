@@ -2,7 +2,53 @@ from __future__ import annotations
 
 import torch
 
+from ._slater_koster_pair import (
+    F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE,
+    FSpinPolarizationUnsupportedError,
+)
 from ._tools import _maybe_compile
+
+#: The angular-momentum id of the f shell.  Kept as a literal rather than
+#: imported from ``Structure.SHELL_TYPE_IDS`` because ``Structure`` sits above
+#: this module in the import graph; ``Structure.SHELL_TYPE_IDS == (1, 2, 3, 4)``
+#: is the definition this mirrors.
+_F_SHELL_TYPE_ID: int = 4
+
+
+def _require_no_f_spin_shells(shell_types, context: str) -> None:
+    """Reject shell-resolved spin assembly for a system carrying an f shell.
+
+    Both spin builders below expand a shell-resolved potential to AOs through a
+    local ``n_orb_per_shell = torch.tensor([0, 1, 3, 5])``.  That table is the
+    per-shell AO count truncated one entry short of the f shell -- the correct
+    five-entry version already exists as ``Constants.shell_dim``
+    (``[0, 1, 3, 5, 7]``).  ``shell_types`` is ``4`` for an f shell, so an f
+    system indexes one past the end of the truncated copy.
+
+    Widening the local table to ``[0, 1, 3, 5, 7]`` would be a one-character
+    change and would be wrong: Phase 4 decision **D-12** defers spin-polarized f
+    entirely, and ``tests/f_orbital_data/`` ships no ``spinw.txt``, so the f
+    spin coupling constants this expansion would then multiply do not exist.
+    Sizing the block correctly and filling it from absent parameters is exactly
+    the well-shaped-and-wrong outcome decision D-04 exists to prevent.
+
+    f-free systems are untouched: this returns early unless an f shell is
+    actually present, following the ``ESDriver._require_closed_shell_f_system``
+    precedent.  It also tolerates a missing ``shell_types`` (the atom-resolved
+    spin path passes ``None``) so it can be called unconditionally as the
+    guarded function's first statement.
+    """
+    if shell_types is None:
+        return
+    if not bool((shell_types == _F_SHELL_TYPE_ID).any()):
+        return
+    raise FSpinPolarizationUnsupportedError(
+        f"{context}: this system carries an f shell (shell type "
+        f"{_F_SHELL_TYPE_ID}, an atom with n_orb == 16), and the shell-resolved "
+        "spin potential is expanded through a per-shell orbital-count table "
+        "that stops at d.\n"
+        f"{F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE}"
+    )
 
 
 def _get_shell_spin_potential(
@@ -129,7 +175,14 @@ def get_h_spin(
     -------
     H_spin : torch.Tensor, shape (n_orb, n_orb)
         Full spin-Hamiltonian matrix in AO basis.
+
+    Raises
+    ------
+    FSpinPolarizationUnsupportedError
+        If any shell is an f shell.  ``n_orb_per_shell`` below stops at d, so an
+        f shell would index past its end.  See :func:`_require_no_f_spin_shells`.
     """
+    _require_no_f_spin_shells(shell_types, "_spin.get_h_spin")
     n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
     n_orb_per_shell_global = n_orb_per_shell[shell_types]
     mu = _get_shell_spin_potential(TYPE, net_spin, w, n_shells_per_atom)
@@ -163,7 +216,16 @@ def get_h_spin_diag(
     -------
     mu : torch.Tensor, shape (n_orb,)
         Spin potential per AO in eV.
+
+    Raises
+    ------
+    FSpinPolarizationUnsupportedError
+        If any shell is an f shell.  This entry point is reached from
+        ``_xl_tools`` as well as from the driver, so it carries its own guard
+        rather than relying on ``ESDriver.forward``.  See
+        :func:`_require_no_f_spin_shells`.
     """
+    _require_no_f_spin_shells(shell_types, "_spin.get_h_spin_diag")
     n_orb_per_shell = torch.tensor([0, 1, 3, 5], device=net_spin.device)
     n_orb_per_shell_global = n_orb_per_shell[shell_types]
     mu = _get_shell_spin_potential(TYPE, net_spin, w, n_shells_per_atom)

@@ -29,24 +29,24 @@ Every match is performed on a copy of the file in which each newline-plus-indent
 run has been collapsed to a single space, so a comparison that a formatter has
 wrapped is still a single contiguous match.
 
-Measured on this tree (2026-08-03), flattening and not flattening return the
-same records, and that is stated here rather than hidden: the *comparison-level*
-patterns this module matches all happen to fit on one physical line today.  The
-flattening is kept for two concrete reasons rather than as decoration.
+Measured on live code (2026-08-03), applying the pair-level form
+``(a == x) & (b == y)`` -- the shape the plan-time research swept for -- to the
+real ``_h0ands.py``: **9** hits per physical line, the way a ``grep`` pipeline
+works, against **25** after flattening.  That is the undercount D-04's research
+fell into (it recorded 12 versus 22), and it lands in exactly the region the
+decision cares about, because the single-system 16-orbital masks at
+``_h0ands.py:283-303`` are among the wrapped ones.  It is also why the plan's
+acceptance criterion demands at least 20 sites in ``_h0ands.py``.
 
-1.  It makes the sweep invariant to formatting.  ``const.n_orb[TYPE[n_I]] == 16``
-    is 40 characters of a 79-character budget; any future rename, added
-    subscript or ``black`` reflow can split it across lines at any time, and a
-    line-oriented sweep would then silently stop counting it.
-    ``tests/test_orbital_count_guards.py::test_flattening_is_load_bearing``
-    proves this on a real reflowed snippet.
-2.  A *pair-level* sweep -- one that matches the whole
-    ``(a == x) & (b == y)`` mask expression rather than each half -- undercounts
-    ``_h0ands.py`` by roughly half without flattening, because the single-system
-    pair masks at ``_h0ands.py:248-303`` wrap after the ``& (``.  That is the
-    measurement recorded at plan time (22 flattened versus 12 line-oriented) and
-    it is why the plan's acceptance criterion demands at least 20 sites in
-    ``_h0ands.py``.
+An honest caveat, recorded rather than implied: this module's own patterns
+separate their parts with ``\\s*``, which already crosses newlines, so for
+*these* patterns matching the whole file is equivalent to flattening it -- 157
+records either way, 52 in ``_h0ands.py`` either way.  The flattening is kept
+because it makes the guarantee structural rather than dependent on every future
+pattern author remembering to use ``\\s*`` instead of a literal space, and
+because it is what makes a matched snippet single-line and therefore usable as
+an inventory key.  ``test_flattening_is_load_bearing`` measures both numbers on
+the live file and fails if the file is ever reformatted so that nothing wraps.
 
 Comments and string literals are blanked before matching
 --------------------------------------------------------
@@ -428,6 +428,24 @@ def count_prose_mentions(root: str | os.PathLike[str] = "src/dftorch") -> int:
             executable = len(pattern.findall(re.sub(r"\n[ \t]*", " ", code)))
             total += everything - executable
     return total
+
+
+def flatten_source(text: str) -> str:
+    """Collapse each newline-plus-indent run in ``text`` to a single space.
+
+    Exposed so a test can demonstrate that the flattening is load-bearing:
+    reflow a real comparison across lines, and the same pattern finds strictly
+    fewer matches without it.
+    """
+    return _flatten_with_offsets(text)[0]
+
+
+def pattern_for(family: str) -> re.Pattern[str]:
+    """Return the compiled pattern for one of :data:`FAMILIES`."""
+    for name, pattern in _PATTERNS:
+        if name == family:
+            return pattern
+    raise KeyError(f"unknown family {family!r}; known: {FAMILIES}")
 
 
 def count_by_file(sites: list[OrbitalCountSite]) -> dict[str, int]:

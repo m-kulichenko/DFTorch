@@ -5,9 +5,8 @@ count, a hardcoded shell count, or a hardcoded per-shell basis-layout table, wit
 disposition for each. Produced for phase 5 decision **D-04**, requirements **REG-04**
 and **CLN-03**.
 
-**Total: 156 sites.** 150 are dispositioned; **6 are open** and carry `needs-action`.
-Task 1 of plan 05-06 produced this record; Task 2 resolves every open row and this line
-becomes "none is left as `needs-action`".
+**Total: 157 sites.** Every one carries a disposition and **none is left as
+`needs-action`**.
 
 ## Why this is an audit with actions and not a document
 
@@ -59,7 +58,7 @@ later phases add code.
 
 ### Why the sweep flattens newlines first
 
-Measured on this tree, flattening and not flattening return the same 156 records, and
+Measured on this tree, flattening and not flattening return the same 157 records, and
 that is stated rather than hidden. The flattening is kept for two reasons that are not
 cosmetic.
 
@@ -78,7 +77,7 @@ cosmetic.
 **Comments and string literals.** A docstring that says `n_orb == 16` and an exception
 message that says `n_orb == 16` decide nothing. The sweep tokenises each file and blanks
 every comment and string token before matching, preserving byte offsets so line numbers
-stay exact. **20 prose mentions** are excluded on this tree
+stay exact. **27 prose mentions** are excluded on this tree
 (`orbital_count_sweep.count_prose_mentions`). Excluding them is what lets every row below
 carry an honest disposition instead of one that reads "this is a sentence".
 
@@ -100,7 +99,9 @@ Phase 4 shell-resolved Coulomb defect (`FShellResolvedCoulombUnsupportedError`) 
 `_coulomb_matrix.py:816-824`, which tests `max_ang` and never mentions `n_orb`. A sweep
 restricted to orbital-count names would have missed the exact defect this project already
 had to fix. `basis-layout-literal` is included because CLN-03 names the hardcoded shell
-offsets by hand, and because it is the family that found the two real gaps below.
+offsets by hand, and because it is the family that found the only two real gaps in this audit --
+the truncated `[0, 1, 3, 5]` tables in `_spin.py` and `_forces.py`, neither of which
+mentions `n_orb` anywhere.
 
 **Stated limitation.** `basis-layout-literal` matches an enumerated set of literal
 spellings (`orbital_count_sweep.BASIS_LAYOUT_SEQUENCES`). A future phase writing a new
@@ -117,7 +118,46 @@ appears.
 | `extended` | the site already handles 16 orbitals / the f shell. Evidence names the mask, branch or table entry that covers it. |
 | `guarded` | reaching this site with a 16-orbital atom raises a named exception. Evidence names the exception class and the raising line. |
 | `unreachable` | an f system cannot arrive here. Evidence states **how** that was established  --  an upstream guard and its line, or the import search that found no importer. Never asserted from reading alone. |
-| `needs-action` | none of the above. **Six rows below carry this**, all in the shell-resolved spin path; Task 2 resolves them. |
+| `needs-action` | none of the above. **No row below carries this.** |
+
+### What the audit actually found open
+
+Six of the 157 rows were `needs-action` when the sweep was first run, and all six were
+the same finding in two places. `_spin.get_h_spin`, `_spin.get_h_spin_diag` and
+`_forces.forces_spin` each declare a local
+`n_orb_per_shell = torch.tensor([0, 1, 3, 5])` -- the per-shell AO count table truncated
+one entry short of f -- while `Constants.shell_dim` holds the correct
+`[0, 1, 3, 5, 7]` a few modules away. The table is indexed by `shell_types`, which is
+`4` for an f shell, so an f system indexes one past its end. `forces_spin` additionally
+reconstructs 1/2/3-shell masks with no four-shell class, so a four-shell atom's spin
+potential would stay exactly zero inside a correctly shaped force.
+
+These were reachable by paths the existing guards do not cover:
+`ESDriver.forward`'s `_require_closed_shell_f_system` does not run for `MD.py:745`,
+`MD.py:794`, `MD.py:1103` or `_xl_tools.py:852`, each of which reaches `get_h_spin`,
+`get_h_spin_diag` or `forces_spin` directly.
+
+Both were **guarded, not widened**. Widening is a one-character edit in each case and
+would have been wrong twice over: Phase 4 decision D-12 defers spin-polarized f
+entirely, and `tests/f_orbital_data/` ships no `spinw.txt`, so the f spin coupling
+constants the widened table would then multiply do not exist. Sizing the block correctly
+and filling it from absent parameters is precisely the well-shaped-and-wrong outcome
+D-04 exists to prevent.
+
+Two new module-level guards were added, both following the
+`ESDriver._require_f_derivatives` template exactly:
+`_spin._require_no_f_spin_shells` (raising `FSpinPolarizationUnsupportedError`) and
+`_forces._require_no_f_spin_forces` (raising `FDerivativeUnsupportedError`). **No new
+exception class was defined**; both reuse the existing four. `forces_spin` takes the
+derivative class rather than the spin one because it fails for a reason independent of
+spin: it consumes `dS`, which is exactly zero in every f block.
+
+One sweep blind spot is worth stating. `_require_no_f_spin_shells` tests
+`shell_types == _F_SHELL_TYPE_ID`, a named constant rather than a literal, so the guard's
+own comparison is not itself a swept row -- unlike the other four guards, whose
+`counts == 16` tests are rows below. The two `_spin.py` rows are the truncated tables the
+guard protects, which is what the audit is for; the guard's reachability is proven by
+test rather than by a row.
 
 `extended` was applied conservatively. D-04's rule is that a site needing capability this
 phase does not have gets a refusal, not a widening  --  and if the reasoning is that a site
@@ -127,35 +167,19 @@ widened by editing one literal and was not.
 
 ## Summary
 
-| File | Sites | `extended` | `guarded` | `unreachable` | `needs-action` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `src/dftorch/_legacy/H0andS.py` | 54 | 0 | 0 | 54 | 0 |
-| `src/dftorch/_h0ands.py` | 52 | 32 | 20 | 0 | 0 |
-| `src/dftorch/_stress.py` | 20 | 0 | 2 | 18 | 0 |
-| `src/dftorch/_coulomb_matrix.py` | 17 | 0 | 1 | 16 | 0 |
-| `src/dftorch/_forces.py` | 4 | 0 | 0 | 0 | 4 |
-| `src/dftorch/Structure.py` | 3 | 3 | 0 | 0 | 0 |
-| `src/dftorch/ESDriver.py` | 2 | 0 | 2 | 0 | 0 |
-| `src/dftorch/_spin.py` | 2 | 0 | 0 | 0 | 2 |
-| `src/dftorch/Constants.py` | 1 | 1 | 0 | 0 | 0 |
-| `src/dftorch/_atomic_density_matrix.py` | 1 | 0 | 0 | 1 | 0 |
-| **total** | **156** | **36** | **25** | **89** | **6** |
-
-### The six open rows
-
-All six are the same finding, in two places. `_spin.get_h_spin` (`:133`),
-`_spin.get_h_spin_diag` (`:167`) and `_forces.forces_spin` (`:272`) each declare a local
-`n_orb_per_shell = torch.tensor([0, 1, 3, 5])`  --  the per-shell AO count table, truncated
-one entry short of the f shell  --  while `Constants.shell_dim` (`Constants.py:107`) holds
-the correct `[0, 1, 3, 5, 7]`. The table is indexed by `shell_types`, which is `4` for an
-f shell, so an f atom indexes one past the end. `forces_spin` additionally reconstructs
-1/2/3-shell masks at `:279`, `:287` and `:295` with no four-shell class, so a
-four-shell atom's spin potential would stay exactly zero inside a correctly shaped force.
-
-These are reachable by paths the existing guards do not cover: `ESDriver.forward`'s
-`_require_closed_shell_f_system` does not run for `MD.py:745`, `MD.py:794`,
-`MD.py:1103` or `_xl_tools.py:852`, which reach `get_h_spin`, `get_h_spin_diag` and
-`forces_spin` directly.
+| File | Sites | `extended` | `guarded` | `unreachable` |
+| --- | ---: | ---: | ---: | ---: |
+| `src/dftorch/_legacy/H0andS.py` | 54 | 0 | 0 | 54 |
+| `src/dftorch/_h0ands.py` | 52 | 32 | 20 | 0 |
+| `src/dftorch/_stress.py` | 20 | 0 | 2 | 18 |
+| `src/dftorch/_coulomb_matrix.py` | 17 | 0 | 1 | 16 |
+| `src/dftorch/_forces.py` | 5 | 0 | 5 | 0 |
+| `src/dftorch/Structure.py` | 3 | 3 | 0 | 0 |
+| `src/dftorch/ESDriver.py` | 2 | 0 | 2 | 0 |
+| `src/dftorch/_spin.py` | 2 | 0 | 2 | 0 |
+| `src/dftorch/Constants.py` | 1 | 1 | 0 | 0 |
+| `src/dftorch/_atomic_density_matrix.py` | 1 | 0 | 0 | 1 |
+| **total** | **157** | **36** | **32** | **89** |
 
 ### `src/dftorch/sedacs/`  --  checked, no sites
 
@@ -228,14 +252,15 @@ comparing an orbital count, and `F_ANGULAR_FORMULAS_AVAILABLE`, which is rebound
 | 824 | `max_ang_I == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
 | 824 | `max_ang_J == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
 
-### `src/dftorch/_forces.py` -- 4 sites
+### `src/dftorch/_forces.py` -- 5 sites
 
 | Line | Site | Family | Owner | What it decides | Disposition | Evidence | Test |
 | ---: | --- | --- | --- | --- | --- | --- | --- |
-| 272 | `[0, 1, 3, 5]` | basis-layout-literal | `forces_spin` | AO count per shell when expanding the shell-resolved spin potential to AOs | `needs-action` | Truncated at d: `shell_types` is 4 for an f shell, which indexes one past the end of this four-entry table, while `Constants.shell_dim` carries the f entry 7. Task 2 of this plan installs the refusal. | `-` |
-| 279 | `n_shells_per_atom == 1` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `needs-action` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries stay exactly zero inside a correctly shaped spin force. Task 2 of this plan installs the refusal. | `-` |
-| 287 | `n_shells_per_atom == 2` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `needs-action` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries stay exactly zero inside a correctly shaped spin force. Task 2 of this plan installs the refusal. | `-` |
-| 295 | `n_shells_per_atom == 3` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `needs-action` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries stay exactly zero inside a correctly shaped spin force. Task 2 of this plan installs the refusal. | `-` |
+| 48 | `counts == 16` | orbital-count | `_require_no_f_spin_forces` | whether the system holds an f atom and the spin force path must refuse | `guarded` | Raises `FDerivativeUnsupportedError` and is called as the first statement of `forces_spin`, so it covers the atom-resolved branch as well as the shell-resolved one. Separate from `ESDriver._require_f_derivatives` because `MD.py:1103` reaches `forces_spin` without passing through `ESDriver.calc_forces`. | `test_every_guarded_site_raises_for_f[forces_spin]` |
+| 336 | `[0, 1, 3, 5]` | basis-layout-literal | `forces_spin` | AO count per shell when expanding the shell-resolved spin potential to AOs | `guarded` | Truncated at d: `shell_types` is 4 for an f shell, which indexes one past the end of this four-entry table. `_require_no_f_spin_forces` is now the first statement of `forces_spin` and raises `FDerivativeUnsupportedError` before it is reached. | `test_every_guarded_site_raises_for_f[forces_spin]` |
+| 343 | `n_shells_per_atom == 1` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `guarded` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries would stay exactly zero inside a correctly shaped spin force. `_require_no_f_spin_forces` is the first statement of `forces_spin` and raises `FDerivativeUnsupportedError` before any of these masks is built. | `test_every_guarded_site_raises_for_f[forces_spin]` |
+| 351 | `n_shells_per_atom == 2` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `guarded` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries would stay exactly zero inside a correctly shaped spin force. `_require_no_f_spin_forces` is the first statement of `forces_spin` and raises `FDerivativeUnsupportedError` before any of these masks is built. | `test_every_guarded_site_raises_for_f[forces_spin]` |
+| 359 | `n_shells_per_atom == 3` | shell-count | `forces_spin` | which shell-resolved W sub-block each atom uses; 1, 2 and 3 shells only | `guarded` | A four-shell (f) atom matches none of these masks, so its `mu_sr` entries would stay exactly zero inside a correctly shaped spin force. `_require_no_f_spin_forces` is the first statement of `forces_spin` and raises `FDerivativeUnsupportedError` before any of these masks is built. | `test_every_guarded_site_raises_for_f[forces_spin]` |
 
 ### `src/dftorch/_h0ands.py` -- 52 sites
 
@@ -334,31 +359,31 @@ comparing an orbital count, and `F_ANGULAR_FORMULAS_AVAILABLE`, which is rebound
 | 441 | `norb_J == 4` | orbital-count | `H0_and_S_vectorized_batch (legacy)` | which of the nine 1/4/9 batched pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory, and no `__init__.py` to import through. | `test_legacy_h0ands_has_no_importer` |
 | 442 | `norb_I == 9` | orbital-count | `H0_and_S_vectorized_batch (legacy)` | which of the nine 1/4/9 batched pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory, and no `__init__.py` to import through. | `test_legacy_h0ands_has_no_importer` |
 | 442 | `norb_J == 9` | orbital-count | `H0_and_S_vectorized_batch (legacy)` | which of the nine 1/4/9 batched pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory, and no `__init__.py` to import through. | `test_legacy_h0ands_has_no_importer` |
-| 765 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 766 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 768 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 769 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 771 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 772 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 774 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 775 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 778 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 779 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 781 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 782 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 784 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 785 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 787 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 788 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 790 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
-| 791 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above, and this function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 765 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 766 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 768 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 769 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 771 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 772 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 774 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 775 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 778 | `const.n_orb[TYPE[neighbor_I]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 779 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 781 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 782 | `const.n_orb[TYPE[neighbor_J]] == 1` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 784 | `const.n_orb[TYPE[neighbor_I]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 785 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 787 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 788 | `const.n_orb[TYPE[neighbor_J]] == 4` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 790 | `const.n_orb[TYPE[neighbor_I]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
+| 791 | `const.n_orb[TYPE[neighbor_J]] == 9` | orbital-count | `H0_and_S_vectorized_OLD_FOR_POLY (legacy)` | which of the nine 1/4/9 pair classes a neighbour pair belongs to; no 16-orbital class exists | `unreachable` | Same import search as above: no importer outside the directory and no `__init__.py` to import through. This function is additionally unreferenced inside its own module. | `test_legacy_h0ands_has_no_importer` |
 
 ### `src/dftorch/_spin.py` -- 2 sites
 
 | Line | Site | Family | Owner | What it decides | Disposition | Evidence | Test |
 | ---: | --- | --- | --- | --- | --- | --- | --- |
-| 133 | `[0, 1, 3, 5]` | basis-layout-literal | `get_h_spin` | AO count per shell when expanding the shell spin potential to the full AO basis | `needs-action` | Truncated at d while `Constants.shell_dim` carries the f entry. Reached from `_scf.py:811`, `_scf.py:1452`, `MD.py:745` and `MD.py:794`. Task 2 of this plan installs the refusal. | `-` |
-| 167 | `[0, 1, 3, 5]` | basis-layout-literal | `get_h_spin_diag` | AO count per shell when expanding the shell spin potential to the AO diagonal | `needs-action` | Same truncated table as `get_h_spin`, reached from `_xl_tools.py:852`, which the `ESDriver.forward` guard does not cover. Task 2 of this plan installs the refusal. | `-` |
+| 186 | `[0, 1, 3, 5]` | basis-layout-literal | `get_h_spin` | AO count per shell when expanding the shell spin potential to the full AO basis | `guarded` | Truncated at d while `Constants.shell_dim` carries the f entry. `_require_no_f_spin_shells` is now the first statement of `get_h_spin` and raises `FSpinPolarizationUnsupportedError` for any `shell_types` entry equal to 4. | `test_every_guarded_site_raises_for_f[get_h_spin]` |
+| 229 | `[0, 1, 3, 5]` | basis-layout-literal | `get_h_spin_diag` | AO count per shell when expanding the shell spin potential to the AO diagonal | `guarded` | Same truncated table as `get_h_spin`; `_require_no_f_spin_shells` is now the first statement of `get_h_spin_diag` too. This entry point is reached from `_xl_tools.py:852`, which the `ESDriver.forward` guard does not cover. | `test_every_guarded_site_raises_for_f[get_h_spin_diag]` |
 
 ### `src/dftorch/_stress.py` -- 20 sites
 
@@ -366,26 +391,52 @@ comparing an orbital count, and `F_ANGULAR_FORMULAS_AVAILABLE`, which is rebound
 | ---: | --- | --- | --- | --- | --- | --- | --- |
 | 197 | `nI == 16` | orbital-count | `_pair_grad_from_sk` | whether any pair contains a 16-orbital atom and the analytical stress must refuse | `guarded` | This test is the refusal: it raises `FDerivativeUnsupportedError` at `_stress.py:198` rather than returning an f-incomplete stress tensor. f stress is PHY-02, Phase 8. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
 | 197 | `nJ == 16` | orbital-count | `_pair_grad_from_sk` | whether any pair contains a 16-orbital atom and the analytical stress must refuse | `guarded` | This test is the refusal: it raises `FDerivativeUnsupportedError` at `_stress.py:198` rather than returning an f-incomplete stress tensor. f stress is PHY-02, Phase 8. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 205 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 205 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 206 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 206 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 207 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 207 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 208 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 208 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 209 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 209 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 210 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 210 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 211 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 211 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 212 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 212 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 213 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
-| 213 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is eight lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 205 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 205 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 206 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 206 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 207 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 207 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 208 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 208 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 209 | `nI == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 209 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 210 | `nI == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 210 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 211 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 211 | `nJ == 1` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 212 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 212 | `nJ == 4` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 213 | `nI == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
+| 213 | `nJ == 9` | orbital-count | `_pair_grad_from_sk` | which of the nine 1/4/9 pair classes a pair belongs to when reconstructing stress masks | `unreachable` | The refusal at `_stress.py:197-202` is a few lines earlier in the same straight-line function body with no branch between, so an f atom raises before these masks are built. | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
 
 ---
+
+## Out of D-04's row set, resolved anyway
+
+`_coulomb_matrix_batch.ewald_k_space_vectorized`'s `do_vec=True` branch was handed over
+by plan 05-05 as a printed apology: it printed "vectorized k-space is not implemented for
+batched data" and then `return`ed. The function is annotated
+`-> tuple[torch.Tensor, torch.Tensor]`, and its only in-package caller
+(`ewald_real_space_vectorized_batch`) unpacks two values, so the bare `return` surfaced
+as `cannot unpack non-iterable NoneType object` one frame away with the explanation
+already scrolled past. That is not a silently degraded result; it is a loud failure with
+the diagnosis detached from it.
+
+**The determination: this is not an orbital-count site.** Nothing in that branch depends
+on `n_orb`, `max_ang` or the basis layout. It is a batched k-space Ewald gap, requirement
+**PHY-04**, Phase 8.1. It is recorded here and classified out of D-04's row set rather
+than forced into it, and it carries no row above because the sweep finds nothing there.
+
+It was resolved anyway, because the printed-apology pattern is exactly what D-04 exists
+to remove: the branch now raises `NotImplementedError` naming the flag, the working
+alternative (`do_vec=False`, which is the default and what every caller uses) and the
+deferring requirement. **No new exception class was defined** -- the four
+`F*UnsupportedError` classes are the f support policy and none of them covers a batched
+Ewald sum, so the built-in is the honest choice. No caller in this package passes
+`do_vec=True`, so the change cannot alter any result the suite covers.
+
+Covered by `tests/test_orbital_count_guards.py::test_batched_kspace_site_has_a_disposition`.
 
 ## Related inventories
 

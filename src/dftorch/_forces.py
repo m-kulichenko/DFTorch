@@ -1,5 +1,60 @@
 import torch
 
+from ._slater_koster_pair import (
+    F_ANGULAR_DERIVATIVES_AVAILABLE,
+    F_DERIVATIVE_UNSUPPORTED_MESSAGE,
+    FDerivativeUnsupportedError,
+)
+
+
+def _require_no_f_spin_forces(const, TYPE, context: str) -> None:
+    """Reject the spin force path for a system containing an f atom.
+
+    Two independent defects meet in :func:`forces_spin` and either alone is
+    disqualifying.
+
+    1.  It consumes ``dS``, and Phase 3 supplies source-locked f angular
+        *values* only, so ``dS`` is exactly zero inside every f block.  A force
+        assembled from those zeros is well formed and wrong -- the reason
+        :class:`FDerivativeUnsupportedError` exists.
+    2.  Its shell-resolved branch expands the spin potential through a local
+        ``n_orb_per_shell = torch.tensor([0, 1, 3, 5])`` and reconstructs masks
+        for 1, 2 and 3 shells only.  A four-shell (f) atom matches none of them,
+        so its spin potential stays exactly zero inside a correctly shaped
+        force, and the truncated table would be indexed past its end.
+
+    Widening either is forbidden by decision D-04's rule: f derivatives are
+    PHY-01/DRV-01 (Phase 7-8) and spin-polarized f is deferred by Phase 4
+    decision D-12, so this phase has no way to validate an extension.
+
+    This guard exists separately from ``ESDriver._require_f_derivatives``
+    because ``forces_spin`` is also called from ``MD`` (``MD.py:1103``), which
+    never passes through ``ESDriver.calc_forces``.  It follows the
+    ``_require_f_derivatives`` structure exactly, including returning early for
+    a missing ``TYPE`` or ``n_orb`` and for an all-invalid ``TYPE``, so it can
+    be the guarded function's unconditional first statement.
+    """
+    if F_ANGULAR_DERIVATIVES_AVAILABLE:
+        return
+    if TYPE is None:
+        return
+    n_orb = getattr(const, "n_orb", None)
+    if n_orb is None:
+        return
+    valid = TYPE >= 0
+    if not bool(valid.any()):
+        return
+    counts = n_orb[TYPE.clamp(min=0)]
+    if bool((valid & (counts == 16)).any()):
+        raise FDerivativeUnsupportedError(
+            f"{context}: this system contains at least one atom with "
+            f"n_orb == 16 (an f-shell element). The spin force path both "
+            f"consumes dS, which is exactly zero in every f block, and "
+            f"expands the shell-resolved spin potential through a per-shell "
+            f"orbital-count table that stops at d.\n"
+            f"{F_DERIVATIVE_UNSUPPORTED_MESSAGE}"
+        )
+
 
 # @torch.compile  # Disabled: stale inductor cache produces incorrect Ftot
 def Forces(
@@ -235,7 +290,16 @@ def forces_spin(
     and the force is evaluated as
 
         F_A = -1/2 * sum_{mu,nu} DeltaD_{mu,nu} * dS_{mu,nu}/dR_A * (mu_mu + mu_nu)
+
+    Raises
+    ------
+    FDerivativeUnsupportedError
+        If any atom carries 16 orbitals (an f element).  See
+        :func:`_require_no_f_spin_forces`; the refusal covers both branches, so
+        it is the first statement rather than a check inside the shell-resolved
+        branch alone.
     """
+    _require_no_f_spin_forces(const, TYPE, "_forces.forces_spin")
     dtype = q_spin_atom.dtype
     device = q_spin_atom.device
 
