@@ -282,7 +282,9 @@ F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE: Final[str] = (
     "Workaround: run the system closed-shell by omitting UNRESTRICTED (or "
     "setting it False). That is a genuine approximation for an open-shell 4f "
     "ion and should be reported as such, but it is a defined calculation "
-    "rather than a wrong one."
+    "rather than a wrong one.\n"
+    "Provenance: deferred by phase 4 decision D-12 and tracked as requirement "
+    "SPN-01; see docs/F-SUPPORT-STATUS.md for the full f-orbital support matrix."
 )
 
 
