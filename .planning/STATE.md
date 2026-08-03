@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 05
-current_phase_name: regression-safety-and-support-policy-cleanup
-status: executing
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-07-31T19:46:21.427Z"
-last_activity: 2026-07-31
-last_activity_desc: Phase 05 execution started
+status: completed
+stopped_at: Completed 05-06-PLAN.md (D-04 orbital-count audit); next 05-07
+last_updated: "2026-08-03T21:58:33.333Z"
+last_activity: 2026-08-03
+last_activity_desc: Phase 05 marked complete
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 17
-  completed_plans: 11
+  completed_plans: 16
+current_phase_name: regression-safety-and-support-policy-cleanup
 ---
 
 # Project State
@@ -27,12 +27,12 @@ See: .planning/PROJECT.md (updated 2026-07-17)
 
 ## Current Position
 
-Phase: 05 (regression-safety-and-support-policy-cleanup) — EXECUTING
-Plan: 4 of 8
-Status: Ready to execute
-Last activity: 2026-07-31 — Phase 05 execution started
+Phase: 05 — COMPLETE
+Plan: 6 of 8
+Status: Phase 05 complete
+Last activity: 2026-08-03 — Phase 05 marked complete
 
-Progress: [███████░░░] 65%
+Progress: [████████░░] 82%
 
 ## Performance Metrics
 
@@ -74,6 +74,8 @@ Progress: [███████░░░] 65%
 | Phase 05 P02 | 35 min | 2 tasks | 2 files |
 | Phase 05 P01 | ~55 min | 2 tasks | 8 files |
 | Phase 05 P03 | 10 min | 2 tasks | 2 files |
+| Phase 05 P04 | 85 min | 3 tasks | 8 files |
+| Phase 05 P06 | 47 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -116,6 +118,15 @@ Recent decisions affecting current work:
 - [Phase 05]: Keep the SKF header oracle in a standard-library-only test module, separate from production imports. — A structurally separate parser plus an AST independence gate prevents the production parser from becoming its own oracle.
 - [Phase 05]: Use the current 28-function mechanical sweep as the script.py inventory authority. — The plan-time claim of 30 check/run functions was stale; the current file contains 16 check/run and 28 expanded check/run/expected/parse functions.
 - [Phase 05]: Do not alter inherited CH4 checksum drift or unrelated print sites in plan 05-03. — Those failures predate 05-03 and belong to the 05-01 regression gate and 05-05 output inventory.
+- [Phase ?]: Phase 5 (plan 05-04): REG-06 had been silently reverted. Commit 56091af deleted ESDriver's R_tensor/n_grid arguments as a side effect of an unrelated test-oracle commit, so H0_and_S_vectorized took its None fallback and the per-pair knot lookup was inert in every real calculation for eleven commits. All 13 of 05-01's tests stayed green because every one calls the callee directly. Restored, plus test_esdriver_supplies_the_per_pair_grid_arguments which watches the WIRING; mutation-confirmed. No numeric change.
+- [Phase ?]: Phase 5 D-01 (plan 05-04): the REG-05 guard compares grid STEP and never grid LENGTH, with a 1e-6 RELATIVE tolerance whose only job is surviving the BOHR_TO_ANGSTROM round trip; the hazard it separates is a factor of two. Same-step/different-length loads, protecting mio-1-1 (500/600/619 points) and 3ob-3-1 (650/850).
+- [Phase ?]: Phase 5 (plan 05-04): SKFRadialGridStepMismatchError subclasses ValueError, not NotImplementedError. The four F*UnsupportedError classes mark capability that could land later; a mixed-step directory is not coherent as a parameter set at all. Message is keyed by os.path.basename so no path can leak by construction (threat T-04-07 policy).
+- [Phase ?]: Phase 5 (plan 05-04): _ml_sk.build_pair_type_rcut's Bohr-vs-Angstrom docstring is corrected against measurement (CH4 C-H 1.0566812742799978 A / step 0.0105835442 A -> idx 98, R_orb[98]=1.0477708758 A). Both are Angstrom. The superseded claim is kept inside the new docstring and gated by test_rcut_values_unchanged_after_docstring_fix; AST-diff proves the change is prose-only.
+- [Phase 05]: Phase 5 D-04 (plan 05-06): the orbital-count sweep matches THREE families, not the plan's single n_orb identifier set. The Phase 4 shell-resolved Coulomb defect lives at _coulomb_matrix.py:816-824, which tests max_ang and never mentions n_orb, so an n_orb-only sweep would have been a knowingly built blind spot. Neither gap the audit found mentions n_orb anywhere.
+- [Phase 05]: Phase 5 D-04 (plan 05-06): the only real gaps in 157 sites are three truncated copies of the per-shell AO count table, [0, 1, 3, 5], in _spin.get_h_spin, _spin.get_h_spin_diag and _forces.forces_spin, while Constants.shell_dim holds the correct [0, 1, 3, 5, 7]. All GUARDED, not widened: D-12 defers spin-polarized f and tests/f_orbital_data ships no spinw.txt, so a correctly sized f block would be filled from parameters that do not exist. Reachable past ESDriver.forward via MD.py:745/794/1103 and _xl_tools.py:852.
+- [Phase 05]: Phase 5 (plan 05-06): the sweep must blank FSTRING_START/MIDDLE/END, not just STRING. On Python 3.12+ an f-string is no longer one STRING token, so the first run swept the guards' own error messages (ESDriver.py:63/103) and MISSED their real counts == 16 comparisons (:60/:95) -- the audit pointed at its own documentation instead of its own code.
+- [Phase 05]: Phase 5 (plan 05-06): the plan-time claim that newline flattening is what prevents undercounting is only half true and the measurement is recorded. Per-line vs flattened at pair level in _h0ands.py is 9 vs 25, so a grep pipeline does undercount; but whole-text matching with \s* separators already crosses newlines, giving 157 records either way. Flattening is kept as a structural guarantee, not as the thing that makes the sweep complete.
+- [Phase 05]: Phase 5 (plan 05-06): _coulomb_matrix_batch's do_vec printed apology is classified OUT of D-04's row set -- nothing in that branch reads n_orb, max_ang or the basis layout -- and resolved anyway with plain NotImplementedError. No new exception class; test_no_new_f_exception_class_was_defined pins the F* taxonomy at exactly four.
 
 ### Pending Todos
 
@@ -129,6 +140,7 @@ None yet.
 - f derivatives are not implemented. `ESDriver.calc_forces`, `ESDriverBatch.calc_forces` and analytical stress raise `FDerivativeUnsupportedError` for any system containing a 16-orbital atom, so Phase 4 must stay on energy/SCF validation or schedule the derivative work first.
 - Batched f H0/S routing is still unimplemented (`H0_and_S_vectorized_batch` raises); reference validation must use the single-system path.
 - `_bond_integral` exports a single `R_orb` (the longest grid) for all pair types while `tests/f_orbital_data` mixes radial grids. Likely to matter once real reference numbers are compared. See `deferred-items.md` item 3.
+- docs/LIBRARY-OUTPUT-INVENTORY.md (plan 05-05) claims a completeness gate at tests/test_verbose_flag.py::test_inventory_covers_every_print; neither the file nor the test exists, so a print added by a later phase fails nothing. Logged in deferred-items.md item 4 and WINDOWS.md; belongs to whoever revisits D-02.
 
 ## Deferred Items
 
@@ -140,6 +152,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-07-31T19:46:21.420Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-08-03T02:45:41.307Z
+Stopped at: Completed 05-06-PLAN.md (D-04 orbital-count audit); next 05-07
 Resume file: None

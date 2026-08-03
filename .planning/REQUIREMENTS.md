@@ -56,17 +56,17 @@ Requirements for the initial f-orbital support milestone. Each maps to roadmap p
 
 - [x] **REG-01**: Existing pytest import, IO, neighbor-list, SCF, and force smoke tests pass after each f-orbital phase.
 - [x] **REG-02**: Existing simple-format calculations in `experiments/1_tutorial.ipynb` remain scientifically unchanged within documented tolerances.
-- [ ] **REG-03**: f-orbital changes do not require public API changes for existing simple-format users.
-- [ ] **REG-04**: Unsupported f combinations fail with explicit errors rather than silently producing zero or malformed matrices.
-- [ ] **REG-05**: Loading an `SKFPATH` whose SKF files do not share one radial grid step fails with an explicit error naming the offending files, instead of silently evaluating some pairs against another pair's grid. (Guard for the shared-`R_orb` hazard: `_bond_integral.get_skf_tensors` exports one global `R_orb` — the longest grid seen — and `_h0ands` derives `idx`/`dx` from it for every pair type. Currently inert because all nine `tests/f_orbital_data` fixtures share a 0.04 Bohr step, but the f dataset is 0.04 while `mio-1-1`/`3ob-3-1`/`pbc-0-3`/`trans3d-0-1` are all 0.02, so any mixed load is wrong by a factor of two. Same-step/different-length is benign and must not be rejected.)
+- [x] **REG-03**: f-orbital changes do not require public API changes for existing simple-format users.
+- [x] **REG-04**: Unsupported f combinations fail with explicit errors rather than silently producing zero or malformed matrices.
+- [x] **REG-05**: Loading an `SKFPATH` whose SKF files do not share one radial grid step fails with an explicit error naming the offending files, instead of silently evaluating some pairs against another pair's grid. (Guard for the shared-`R_orb` hazard: `_bond_integral.get_skf_tensors` exports one global `R_orb` — the longest grid seen — and `_h0ands` derives `idx`/`dx` from it for every pair type. Currently inert because all nine `tests/f_orbital_data` fixtures share a 0.04 Bohr step, but the f dataset is 0.04 while `mio-1-1`/`3ob-3-1`/`pbc-0-3`/`trans3d-0-1` are all 0.02, so any mixed load is wrong by a factor of two. Same-step/different-length is benign and must not be rejected.)
 - [x] **REG-06**: Slater-Koster radial lookup uses each pair's own grid, so an `SKFPATH` mixing radial grid steps produces correct interpolation rather than only a refusal. (The real fix behind REG-05's guard; changes the `coeffs_tensor` / `R_orb` interface that the ML-SK and stress paths also consume.)
 
 ### Prototype Cleanup and Support Policy
 
-- [ ] **CLN-01**: Temporary prototype branches are documented where they are introduced.
-- [ ] **CLN-02**: Channel lookup and AO ordering are centralized enough for human troubleshooting.
-- [ ] **CLN-03**: Remaining hard-coded `1/4/9` orbital assumptions are audited and either extended to `16` or guarded.
-- [ ] **CLN-04**: Batch, force, stress, MD, SEDACS, and ML-SK f-orbital support status is explicitly documented as supported, deferred, or unsupported.
+- [x] **CLN-01**: Temporary prototype branches are documented where they are introduced.
+- [x] **CLN-02**: Channel lookup and AO ordering are centralized enough for human troubleshooting.
+- [x] **CLN-03**: Remaining hard-coded `1/4/9` orbital assumptions are audited and either extended to `16` or guarded.
+- [x] **CLN-04**: Batch, force, stress, MD, SEDACS, and ML-SK f-orbital support status is explicitly documented as supported, deferred, or unsupported.
 - [x] **CLN-05**: Cleanup preserves the working prototype and simple-format regression tests.
 
 ### Self-Consistency and f Coulomb Blocks
@@ -151,14 +151,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SIM-05 | Phase 4 | Complete |
 | REG-01 | Phase 5 | Complete |
 | REG-02 | Phase 5 | Complete |
-| REG-03 | Phase 5 | Pending |
-| REG-04 | Phase 5 | Pending |
-| REG-05 | Phase 5 | Pending |
+| REG-03 | Phase 5 | Complete |
+| REG-04 | Phase 5 | Complete |
+| REG-05 | Phase 5 | Complete |
 | REG-06 | Phase 5 | Complete |
-| CLN-01 | Phase 5 | Pending |
-| CLN-02 | Phase 5 | Pending |
-| CLN-03 | Phase 5 | Pending |
-| CLN-04 | Phase 5 | Pending |
+| CLN-01 | Phase 5 | Complete |
+| CLN-02 | Phase 5 | Complete |
+| CLN-03 | Phase 5 | Complete |
+| CLN-04 | Phase 5 | Complete |
 | CLN-05 | Phase 5 | Complete |
 | SCC-01 | Phase 6 | Pending |
 | SCC-02 | Phase 6 | Pending |

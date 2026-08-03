@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 2: Constants and Structure Basis Metadata** - Constants and Structure expose consistent spdf shell, orbital, onsite, Hubbard, and density metadata. (completed 2026-07-27)
 - [x] **Phase 3: H0/S Routing and f Angular Blocks** - H0/S assembly routes 16-orbital atom pairs and writes tested f-containing Slater-Koster blocks. (completed 2026-07-28)
 - [x] **Phase 4: SCF and Reference Simulation Validation** - f-containing single-system simulations reach the supported single-shot energy path and the Eu-N binding minimum is validated against a documented loose-band reference. (completed 2026-07-29)
-- [ ] **Phase 5: Regression Safety and Support Policy Cleanup** - Existing simple-format behavior, unsupported f modes, and prototype cleanup are locked behind tests and explicit policy.
+- [x] **Phase 5: Regression Safety and Support Policy Cleanup** - Existing simple-format behavior, unsupported f modes, and prototype cleanup are locked behind tests and explicit policy.
 - [ ] **Phase 6: Self-Consistent SCF for f Systems** - f systems converge a real self-consistent charge loop, unlocking the shell-resolved Coulomb f angular blocks.
 - [ ] **Phase 7: f Angular Derivatives** - dH0/dS become correct and non-zero in f blocks, retiring the blanket derivative refusal.
 - [ ] **Phase 8: f Forces and Stress** - Forces and stress for f systems are produced and validated against finite differences.
@@ -124,7 +124,7 @@ Plans:
   5. Batch, force, stress, MD, SEDACS, and ML-SK f-orbital status is explicitly documented as supported, deferred, or unsupported while preserving the validated prototype.
   6. An `SKFPATH` mixing radial grid steps either interpolates correctly per pair, or refuses loudly — never silently evaluates one pair's distances against another pair's grid.
 
-**Plans**: 3/8 plans executed
+**Plans**: 8/8 plans executed
 
 Plans:
 **Wave 1**
@@ -135,20 +135,20 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 05-04-PLAN.md — Refuse mixed-grid-step SKF paths, disposition every remaining grid consumer, pin the public import surface (REG-05, REG-03)
-- [ ] 05-05-PLAN.md — Classify every library print and gate the status ones behind a noisy-by-default flag; delete `ConstantsTest` (D-02)
+- [x] 05-04-PLAN.md — Refuse mixed-grid-step SKF paths, disposition every remaining grid consumer, pin the public import surface (REG-05, REG-03)
+- [x] 05-05-PLAN.md — Classify every library print and gate the status ones behind a noisy-by-default flag; delete `ConstantsTest` (D-02)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 05-06-PLAN.md — Sweep, inventory and disposition every hardcoded orbital-count site (D-04, CLN-03, REG-04)
+- [x] 05-06-PLAN.md — Sweep, inventory and disposition every hardcoded orbital-count site (D-04, CLN-03, REG-04)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 05-07-PLAN.md — Basis metadata map, prototype-branch record, f support status matrix, requirement ledger (CLN-01, CLN-02, CLN-04)
+- [x] 05-07-PLAN.md — Basis metadata map, prototype-branch record, f support status matrix, requirement ledger (CLN-01, CLN-02, CLN-04)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 05-08-PLAN.md — Human sign-off on the phase records and the unchanged-behaviour claim
+- [x] 05-08-PLAN.md — Human sign-off on the phase records and the unchanged-behaviour claim
 
 ### Phase 6: Self-Consistent SCF for f Systems
 
@@ -256,7 +256,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 8.1 -> 
 | 2. Constants and Structure Basis Metadata | 1/1 | Complete    | 2026-07-27 |
 | 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
 | 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
-| 5. Regression Safety and Support Policy Cleanup | 3/8 | In Progress|  |
+| 5. Regression Safety and Support Policy Cleanup | 8/8 | Complete    | 2026-08-03 |
 | 6. Self-Consistent SCF for f Systems | 0/TBD | Not started | - |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |
