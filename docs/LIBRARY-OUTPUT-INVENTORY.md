@@ -21,7 +21,12 @@ The authoritative occurrence count, re-runnable at any time:
 grep -rn "print(" src/dftorch --include="*.py" | wc -l
 ```
 
-At the time of writing this returns **182**, and this table has **182** rows. No line in
+At the time of writing this returned **182**; it now returns **181**, and this table has
+**181** rows. The difference is one row deliberately retired: `_coulomb_matrix_batch.py:459`
+printed "vectorized k-space is not implemented for batched data" and then *continued* --
+a printed apology masking an unimplemented path. Plan 05-06 (`1aade8c`) converted it into a
+raised exception naming requirement PHY-04, so it is no longer a print and no longer has a
+row. Any other drift between these two numbers is a missing row, not a retirement. No line in
 the package contains two `print(` occurrences, so the line count and the occurrence
 count coincide. `tests/test_verbose_flag.py::test_inventory_covers_every_print` walks
 the tree, counts the same occurrences, and asserts the two are equal, so a print added
@@ -205,7 +210,6 @@ per-step info line, the convergence confirmation and the step timing -- are `sta
 | `src/dftorch/_coulomb_matrix.py` | 607 | `# if verbose: print(' LMAX:', LMAX)` | `not-runtime` | R-COMMENT | - |
 | `src/dftorch/_coulomb_matrix.py` | 608 | `print(" LMAX:", LMAX)` | `status` | R-STATUS | *(task 2)* |
 | `src/dftorch/_coulomb_matrix.py` | 611 | `print(" ", L)` | `already-gated` | R-GATED-VERBOSE | - |
-| `src/dftorch/_coulomb_matrix_batch.py` | 459 | `print("vectorized k-space is not implemented for batched data")` | `warning` | R-UNIMPL | - |
 | `src/dftorch/_coulomb_matrix_batch.py` | 462 | `# if verbose: print(' LMAX:', LMAX)` | `not-runtime` | R-COMMENT | - |
 | `src/dftorch/_coulomb_matrix_batch.py` | 463 | `print(" LMAX:", LMAX)` | `status` | R-STATUS | *(task 2)* |
 | `src/dftorch/_coulomb_matrix_batch.py` | 466 | `print(" ", L)` | `already-gated` | R-GATED-VERBOSE | - |
