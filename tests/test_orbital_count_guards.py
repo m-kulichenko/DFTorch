@@ -585,11 +585,19 @@ def test_prose_mentions_are_excluded_and_counted():
     swept = {site.key for site in sweep_orbital_count_sites(PACKAGE_ROOT)}
     # ESDriver's guards write "n_orb == 16" into their own f-string messages.
     # Those lines must NOT be rows; the executable "counts == 16" lines must be.
+    #
+    # 60 and 95 are the two Phase 5 guards.  164 is Phase 6's
+    # _krylov_params_for_f_interim, whose docstring also spells out "n_orb == 16"
+    # and "16 orbitals" in prose -- so it is a third chance for the blanking to
+    # go wrong, and its executable comparison being the only line listed is the
+    # same property this test has always held.
     esdriver = {line for path, line, _ in swept if path == "dftorch/ESDriver.py"}
-    assert esdriver == {60, 95}, (
-        f"ESDriver.py sites are {sorted(esdriver)}; expected the two executable "
-        "guard comparisons at 60 and 95. Lines 63 and 103 are f-string message "
-        "text and appear when FSTRING_* tokens are not blanked."
+    assert esdriver == {60, 95, 164}, (
+        f"ESDriver.py sites are {sorted(esdriver)}; expected the three executable "
+        "comparisons at 60, 95 and 164. Lines 63 and 103 are f-string message "
+        "text, and the prose inside _krylov_params_for_f_interim's docstring is "
+        "comment text; all of them appear when FSTRING_*/COMMENT tokens are not "
+        "blanked."
     )
 
 

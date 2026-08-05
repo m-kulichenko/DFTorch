@@ -5,8 +5,14 @@ count, a hardcoded shell count, or a hardcoded per-shell basis-layout table, wit
 disposition for each. Produced for phase 5 decision **D-04**, requirements **REG-04**
 and **CLN-03**.
 
-**Total: 157 sites.** Every one carries a disposition and **none is left as
+**Total: 158 sites.** Every one carries a disposition and **none is left as
 `needs-action`**.
+
+The audit closed at 157 sites in phase 5. Phase 6 plan 06-01 added the 158th,
+`ESDriver._krylov_params_for_f_interim`, which is the first site in this table whose f
+branch selects a *numerical setting* rather than a matrix block or a refusal. It is
+listed the same way as every other: what it decides, what disposition it carries, and
+which test proves it.
 
 ## Why this is an audit with actions and not a document
 
@@ -175,11 +181,11 @@ widened by editing one literal and was not.
 | `src/dftorch/_coulomb_matrix.py` | 17 | 0 | 1 | 16 |
 | `src/dftorch/_forces.py` | 5 | 0 | 5 | 0 |
 | `src/dftorch/Structure.py` | 3 | 3 | 0 | 0 |
-| `src/dftorch/ESDriver.py` | 2 | 0 | 2 | 0 |
+| `src/dftorch/ESDriver.py` | 3 | 1 | 2 | 0 |
 | `src/dftorch/_spin.py` | 2 | 0 | 2 | 0 |
 | `src/dftorch/Constants.py` | 1 | 1 | 0 | 0 |
 | `src/dftorch/_atomic_density_matrix.py` | 1 | 0 | 0 | 1 |
-| **total** | **157** | **36** | **32** | **89** |
+| **total** | **158** | **37** | **32** | **89** |
 
 ### `src/dftorch/sedacs/`  --  checked, no sites
 
@@ -209,12 +215,13 @@ comparing an orbital count, and `F_ANGULAR_FORMULAS_AVAILABLE`, which is rebound
 | ---: | --- | --- | --- | --- | --- | --- | --- |
 | 107 | `[0, 1, 3, 5, 7]` | basis-layout-literal | `Constants.__init__` | AO count contributed by a shell of type id 0/1/2/3/4 (unused/s/p/d/f) | `extended` | Index 4 holds 7, so the table spans the f shell. This is the canonical copy; the truncated `[0, 1, 3, 5]` in `_spin.py` and `_forces.py` is the same table with that entry missing. | `test_canonical_shell_dim_table_spans_f` |
 
-### `src/dftorch/ESDriver.py` -- 2 sites
+### `src/dftorch/ESDriver.py` -- 3 sites
 
 | Line | Site | Family | Owner | What it decides | Disposition | Evidence | Test |
 | ---: | --- | --- | --- | --- | --- | --- | --- |
 | 60 | `counts == 16` | orbital-count | `_require_f_derivatives` | whether the system holds an f atom and every derivative-consuming path must refuse | `guarded` | Raises `FDerivativeUnsupportedError` at `ESDriver.py:61`; called as the first statement of `ESDriver.calc_forces` (:882) and `ESDriverBatch.calc_forces` (:1860). | `test_every_guarded_site_raises_for_f[ESDriver.calc_forces]` |
 | 95 | `counts == 16` | orbital-count | `_require_closed_shell_f_system` | whether an f system was asked for a spin-polarized (UNRESTRICTED) calculation | `guarded` | Raises `FSpinPolarizationUnsupportedError` at `ESDriver.py:101`; called as the first statement of `ESDriver.forward` (:210), so it fires for `do_scf=False` too. | `test_every_guarded_site_raises_for_f[ESDriver.forward-unrestricted]` |
+| 164 | `counts == 16` | orbital-count | `_krylov_params_for_f_interim` | whether the Krylov convergence accelerator must be switched off for this system, the f shell being what makes it diverge | `extended` | Added by phase 6 plan 06-01. Handles the 16-orbital case rather than refusing it: the branch below this comparison returns a shallow copy of the parameter dict with `KRYLOV_START` raised to `10**6`, above the `SCF_MAX_ITER` cap of 100, so the accelerator is never reached and the loop stays on Anderson/DIIS mixing. The f-free path returns the caller's dict unchanged, so no f-free number can move. Interim only -- the accelerator repair is deferred by the human ruling of 2026-08-04 in `06-RESEARCH.md`, and this function is the single place to delete when it lands. | `test_krylov_accelerator_is_disabled_for_the_f_system` |
 
 ### `src/dftorch/Structure.py` -- 3 sites
 

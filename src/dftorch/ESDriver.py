@@ -105,6 +105,71 @@ def _require_closed_shell_f_system(
     )
 
 
+def _krylov_params_for_f_interim(structure, const, dftorch_params) -> dict:
+    """Switch the Krylov convergence accelerator off, for f systems only.
+
+    What this is about, in plain words
+    ----------------------------------
+    The charge loop has a speed-up routine (``kernel_update_lr``, the "Krylov
+    accelerator") that engages after ``KRYLOV_START`` passes. On systems
+    containing an f-shell element it does not merely fail to help: it drives the
+    charges away from the answer. Measured over the Eu-N diatomic across 21
+    separations, the loop settled at 12 of them with the accelerator on and at
+    all 21 with it off, and at the 12 that worked either way the two runs agreed
+    on the total energy to better than one millionth of an eV. It was never
+    finding a different answer -- it was failing to find the answer the plain
+    mixer finds reliably.
+
+    Repairing the accelerator is **deferred by a recorded human ruling of
+    2026-08-04** (``06-RESEARCH.md``, "Scope rulings"). Until that repair lands,
+    this switches it off by setting ``KRYLOV_START`` to ``10**6`` -- far above
+    the iteration cap ``SCF_MAX_ITER`` of 100, so the accelerator branch is
+    simply never reached and the loop stays on Anderson/DIIS mixing throughout.
+    **This function is the single place to delete when the repair lands.**
+
+    Three narrowing rules, in the order they are applied
+    ---------------------------------------------------
+    1. If the caller already set ``KRYLOV_START``, their value stands. The
+       interim exists so an ordinary caller gets a converging f calculation
+       without knowing a magic key; it must not become a ceiling on a caller who
+       does know the key and chose a value on purpose.
+    2. If no atom has ``const.n_orb[TYPE] == 16`` -- 16 orbitals being what marks
+       an f-shell element here (1 s + 3 p + 5 d + 7 f) -- nothing changes. By
+       construction this branch cannot move a single f-free number.
+    3. Otherwise a **shallow copy** of the parameter dict is returned with the
+       key set. A copy, never a mutation, so that reusing one driver object
+       across an f molecule and then an f-free one cannot leak the setting from
+       the first into the second (threat T-06-02).
+
+    Either way it records which path was taken on
+    ``structure.krylov_disabled_for_f``, so a caller can tell how a given result
+    was produced. It returns without opinion when the structure carries no
+    ``TYPE`` or the constants carry no ``n_orb``, following
+    :func:`_require_closed_shell_f_system`, so it is safe to call
+    unconditionally.
+    """
+    if "KRYLOV_START" in dftorch_params:
+        structure.krylov_disabled_for_f = False
+        return dftorch_params
+    type_ids = getattr(structure, "TYPE", None)
+    n_orb = getattr(const, "n_orb", None)
+    if type_ids is None or n_orb is None:
+        structure.krylov_disabled_for_f = False
+        return dftorch_params
+    valid = type_ids >= 0
+    if not bool(valid.any()):
+        structure.krylov_disabled_for_f = False
+        return dftorch_params
+    counts = n_orb[type_ids.clamp(min=0)]
+    if not bool((valid & (counts == 16)).any()):
+        structure.krylov_disabled_for_f = False
+        return dftorch_params
+    structure.krylov_disabled_for_f = True
+    interim_params = dict(dftorch_params)
+    interim_params["KRYLOV_START"] = 10**6
+    return interim_params
+
+
 def _select_coulomb_hubbard(structure, const) -> tuple[torch.Tensor, bool]:
     """Choose the Hubbard U data the Coulomb path should use.
 
@@ -217,6 +282,20 @@ class ESDriver(torch.nn.Module):
         self.dftorch_params["SCF_ALPHA"] = self.dftorch_params.get("SCF_ALPHA", 0.1) #mixing to avoid scf flip flop
         normalize_coulomb_settings(
             self.dftorch_params, structure.cell, context="ESDriver"
+        )
+
+        # Interim: the Krylov accelerator diverges on f systems and its repair
+        # is deferred (see _krylov_params_for_f_interim).  This is a *copy* of
+        # the driver's parameter dict, handed to SCFx and to nothing else, so
+        # every other read of self.dftorch_params below is untouched and no
+        # f-free calculation can see the setting.
+        #
+        # Taken AFTER the three lines above on purpose, not before them: they
+        # write COULOMB_CUTOFF, SCF_ALPHA and the normalized Coulomb settings
+        # into the driver's own dict, and SCFx indexes SCF_ALPHA directly. A
+        # copy taken any earlier would be missing them and raise KeyError.
+        scf_params = _krylov_params_for_f_interim(
+            structure, const, self.dftorch_params
         )
 
         # Build the neighborlist
@@ -675,8 +754,9 @@ class ESDriver(torch.nn.Module):
                     structure.f_coul,
                     structure.dq_p1,
                     structure.stress_coulomb,
+                    structure.scf_iter_count,
                 ) = SCFx(
-                    self.dftorch_params,
+                    scf_params,
                     structure.RX,
                     structure.RY,
                     structure.RZ,

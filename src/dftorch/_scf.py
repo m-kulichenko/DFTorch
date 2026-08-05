@@ -185,12 +185,16 @@ def SCFx(
     torch.Tensor,  # Hdipole
     torch.Tensor,  # KK (preconditioner / mixing kernel)
     torch.Tensor,  # D
+    torch.Tensor,  # Q (eigenvectors of the orthogonalized Hamiltonian)
+    torch.Tensor,  # e (eigenvalues of the orthogonalized Hamiltonian)
     torch.Tensor,  # q
     torch.Tensor,  # f
     torch.Tensor,  # mu0
     Optional[torch.Tensor],  # Ecoul (PME only)
     Optional[torch.Tensor],  # forces1 (PME only)
     Optional[torch.Tensor],  # dq_p1 (PME only)
+    Optional[torch.Tensor],  # stress_coul (PME only)
+    int,  # scf_iter_count: pass count on success, -1 if the loop gave up
 ]:
     """
     Self-consistent field (_scf) cycle with finite electronic temperature and
@@ -257,6 +261,17 @@ def SCFx(
         Electrostatic forces from PME (if requested) else None.
     dq_p1 : torch.Tensor or None
         Charge-response-related PME output (if requested) else None.
+    scf_iter_count : int
+        How the loop ended, as a number rather than as printed text. On success
+        it is the number of passes taken to reach tolerance, always ``>= 1``.
+        On failure it is the literal ``-1``, meaning the loop exhausted
+        ``SCF_MAX_ITER`` with at least one of its two tolerance conditions
+        still unmet. The shape follows scipy's iterative solvers, which return
+        a positive count on success and a sentinel on failure. It is never a
+        boolean: a caller that only wants "did it work" can test
+        ``scf_iter_count != -1``, but the count itself is not thrown away.
+        A ``-1`` still comes back alongside the last iterate; the loop warns
+        and returns, it never raises (Phase 4 decision D-13).
 
     Notes
     -----
@@ -520,6 +535,17 @@ def SCFx(
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
+        # How the loop ended, as a number a caller can read rather than as
+        # printed text.  The two clauses below are the negation of the
+        # while-condition's own tolerance tests above -- mirrored from it, not
+        # retyped with fresh thresholds -- so a loop that merely ran out of
+        # passes can never present itself as converged (threat T-06-03).  The
+        # printed warning above stays: D-13 requires non-convergence to warn as
+        # well as to report.
+        _scf_tol = dftorch_params.get("SCF_TOL", 1e-6)
+        _converged = bool(ResNorm <= _scf_tol) and bool(dEc <= _scf_tol * 100)
+        scf_iter_count = int(it) if _converged else -1
+
         # f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.T))
 
     D = Z @ Dorth @ Z.T
@@ -551,7 +577,23 @@ def SCFx(
     else:
         Ecoul, forces1, dq_p1, stress_coul = None, None, None, None
 
-    return H, Hcoul, Hdipole, KK, D, Q, e, q, f, mu0, Ecoul, forces1, dq_p1, stress_coul
+    return (
+        H,
+        Hcoul,
+        Hdipole,
+        KK,
+        D,
+        Q,
+        e,
+        q,
+        f,
+        mu0,
+        Ecoul,
+        forces1,
+        dq_p1,
+        stress_coul,
+        scf_iter_count,
+    )
 
 
 def scf_x_os(
