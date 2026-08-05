@@ -631,14 +631,28 @@ def scf_x_os(
     torch.Tensor,  # Hdipole
     torch.Tensor,  # KK (preconditioner / mixing kernel)
     torch.Tensor,  # D
-    torch.Tensor,  # q
+    torch.Tensor,  # Q (eigenvectors of the orthogonalized Hamiltonian)
+    torch.Tensor,  # e (eigenvalues of the orthogonalized Hamiltonian)
+    torch.Tensor,  # q_spin_atom
+    torch.Tensor,  # q_tot_atom
+    torch.Tensor,  # q_spin_sr (shell-resolved)
+    torch.Tensor,  # net_spin_sr (shell-resolved)
     torch.Tensor,  # f
     torch.Tensor,  # mu0
     Optional[torch.Tensor],  # Ecoul (PME only)
     Optional[torch.Tensor],  # forces1 (PME only)
     Optional[torch.Tensor],  # dq_p1 (PME only)
+    Optional[torch.Tensor],  # stress_coul (PME only)
+    int,  # scf_iter_count: pass count on success, -1 if the loop gave up
 ]:
-    """ """
+    """Open-shell (spin-polarized) self-consistent charge loop.
+
+    The last returned value, ``scf_iter_count``, is how the loop ended stated as
+    a number rather than as printed text: the number of passes taken on success,
+    always ``>= 1``, or the literal ``-1`` when the loop exhausted
+    ``SCF_MAX_ITER`` with a tolerance still unmet. A ``-1`` still comes back
+    alongside the last iterate; the loop warns and returns, it never raises.
+    """
     # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
     # than a dict lookup per print. Defaults to True, so a caller who never
     # sets the key sees exactly the output they saw before it existed.
@@ -953,6 +967,14 @@ def scf_x_os(
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
+        # How the loop ended, as a number a caller can read rather than as
+        # printed text.  The two clauses are the negation of this loop's own
+        # while-condition tolerance tests, read from it rather than copied from
+        # a sibling loop.  See ``SCFx`` for the full reasoning.
+        _scf_tol = dftorch_params.get("SCF_TOL", 1e-6)
+        _converged = bool(ResNorm <= _scf_tol) and bool(dEc <= _scf_tol * 100)
+        scf_iter_count = int(it) if _converged else -1
+
         f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -1013,6 +1035,7 @@ def scf_x_os(
         forces1,
         dq_p1,
         stress_coul,
+        scf_iter_count,
     )
 
 
@@ -1049,11 +1072,19 @@ def SCFx_batch(
     Optional[torch.Tensor],  # Ecoul (PME only)
     Optional[torch.Tensor],  # forces1 (PME only)
     Optional[torch.Tensor],  # dq_p1 (PME only)
+    int,  # scf_iter_count: pass count on success, -1 if the loop gave up
 ]:
     """
     Self-consistent field (_scf) cycle with finite electronic temperature and
     Fermi–Dirac occupations, using a preconditioned low-rank Krylov charge mixer.
     Supports PME Ewald electrostatics via `sedacs` or a direct Coulomb matrix.
+
+    Batched over many structures at once.  The last returned value,
+    ``scf_iter_count``, describes **the batch as a whole and never one structure
+    within it**: the loop's stopping test is taken across every member, so the
+    count is the number of passes after which the last remaining member met
+    tolerance, and ``-1`` means the cap ran out with at least one member still
+    unconverged -- it does not say which.
     """
 
     # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
@@ -1258,6 +1289,16 @@ def SCFx_batch(
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
+        # How the loop ended, for the batch as a whole.  This loop's
+        # while-condition tests ``.any()`` across the batch, so it stops on
+        # tolerance only when *every* member has met it -- the count that comes
+        # back therefore describes the batch, never one structure within it, and
+        # ``-1`` means the cap ran out with at least one member still moving.
+        _converged = bool((ResNorm <= scf_tol).all()) and bool(
+            (dEc <= scf_tol * 100).all()
+        )
+        scf_iter_count = int(it) if _converged else -1
+
         f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2)))
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -1269,7 +1310,22 @@ def SCFx_batch(
 
     Ecoul, forces1, dq_p1 = None, None, None
 
-    return H, Hcoul, Hdipole, KK, D, Q, e, q, f, mu0, Ecoul, forces1, dq_p1
+    return (
+        H,
+        Hcoul,
+        Hdipole,
+        KK,
+        D,
+        Q,
+        e,
+        q,
+        f,
+        mu0,
+        Ecoul,
+        forces1,
+        dq_p1,
+        scf_iter_count,
+    )
 
 
 def delta_scf_x_os(
@@ -1308,14 +1364,26 @@ def delta_scf_x_os(
     torch.Tensor,  # Hdipole
     torch.Tensor,  # KK (preconditioner / mixing kernel)
     torch.Tensor,  # D
-    torch.Tensor,  # q
+    torch.Tensor,  # Q (eigenvectors of the orthogonalized Hamiltonian)
+    torch.Tensor,  # q_spin_atom
+    torch.Tensor,  # q_tot_atom
+    torch.Tensor,  # q_spin_sr (shell-resolved)
+    torch.Tensor,  # net_spin_sr (shell-resolved)
     torch.Tensor,  # f
     torch.Tensor,  # mu0
     Optional[torch.Tensor],  # Ecoul (PME only)
     Optional[torch.Tensor],  # forces1 (PME only)
     Optional[torch.Tensor],  # dq_p1 (PME only)
+    int,  # scf_iter_count: pass count on success, -1 if the loop gave up
 ]:
-    """ """
+    """Delta-SCF loop for an excited state, on top of a converged ground state.
+
+    The last returned value, ``scf_iter_count``, is how the loop ended stated as
+    a number rather than as printed text: the number of passes taken on success,
+    always ``>= 1``, or the literal ``-1`` when the loop exhausted
+    ``SCF_MAX_ITER`` with a tolerance still unmet. A ``-1`` still comes back
+    alongside the last iterate; the loop warns and returns, it never raises.
+    """
     # D-02: one read of VERBOSE_LIBRARY_OUTPUT for the whole call, rather
     # than a dict lookup per print. Defaults to True, so a caller who never
     # sets the key sees exactly the output they saw before it existed.
@@ -1593,6 +1661,14 @@ def delta_scf_x_os(
             if it == dftorch_params.get("SCF_MAX_ITER", 100):
                 print("Did not converge")
 
+        # How the loop ended, as a number a caller can read rather than as
+        # printed text.  The two clauses are the negation of this loop's own
+        # while-condition tolerance tests, read from it rather than copied from
+        # a sibling loop.  See ``SCFx`` for the full reasoning.
+        _scf_tol = dftorch_params.get("SCF_TOL", 1e-6)
+        _converged = bool(ResNorm <= _scf_tol) and bool(dEc <= _scf_tol * 100)
+        scf_iter_count = int(it) if _converged else -1
+
         # f = torch.linalg.eigvalsh(0.5 * (Dorth + Dorth.transpose(-1, -2))) # supersedes non-aufbau contraint if calculated, at least in appearance
 
     D = torch.matmul(Z, torch.matmul(Dorth, Z.transpose(-1, -2)))
@@ -1648,4 +1724,5 @@ def delta_scf_x_os(
         Ecoul,
         forces1,
         dq_p1,
+        scf_iter_count,
     )

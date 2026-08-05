@@ -411,3 +411,43 @@ def test_caller_supplied_krylov_start_is_never_overridden(tmp_path):
         )
 
     run_with_float64(check)
+
+
+# --- Task 2: all four charge loops report the same way ----------------------
+
+
+def test_all_four_charge_loops_report_a_convergence_result():
+    """The wiring, not the callee: every loop's own return must carry the count.
+
+    Why source inspection rather than four end-to-end runs.  Phase 5 recorded a
+    case (REG-06) where a correct change was silently reverted and stayed inert
+    for eleven commits, because every test called the callee directly and
+    nothing watched the connection.  Three of these four loops -- the open-shell,
+    batched and delta-SCF paths -- have no f coverage and no cheap fixture here,
+    so a test that only exercised SCFx would leave exactly that blind spot: the
+    other three returns could lose the element and nothing would notice.
+
+    This reads each function's own source and asserts its return mentions the
+    name.  It cannot prove the value is correct -- the loop-specific tests do
+    that for SCFx -- but it can prove the element has not silently vanished from
+    a return, which is the failure mode that costs eleven commits to find.
+    """
+    import inspect
+
+    from dftorch._scf import SCFx, SCFx_batch, delta_scf_x_os, scf_x_os
+
+    for loop in (SCFx, scf_x_os, SCFx_batch, delta_scf_x_os):
+        source = inspect.getsource(loop)
+        head, separator, tail = source.rpartition("\n    return ")
+        assert separator, (
+            f"{loop.__name__} has no module-level return statement to inspect; "
+            "the source-inspection watch below cannot mean anything"
+        )
+        assert "scf_iter_count" in tail, (
+            f"{loop.__name__}'s return statement does not mention "
+            "scf_iter_count, so this loop reports how it ended only by printing "
+            f"text. Its return reads:\n{tail}"
+        )
+        assert "scf_iter_count = " in head, (
+            f"{loop.__name__} returns scf_iter_count without ever computing it"
+        )

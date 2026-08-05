@@ -611,6 +611,7 @@ class ESDriver(torch.nn.Module):
                     structure.f_coul,
                     structure.dq_p1,
                     structure.stress_coulomb,
+                    structure.scf_iter_count,
                 ) = scf_x_os(
                     structure.el_per_shell,
                     structure.shell_types,
@@ -683,6 +684,7 @@ class ESDriver(torch.nn.Module):
                         structure.e_coul_tmp,
                         structure.f_coul,
                         structure.dq_p1,
+                        structure.scf_iter_count,
                     ) = delta_scf_x_os(
                         structure.el_per_shell,
                         structure.shell_types,
@@ -1834,6 +1836,11 @@ class ESDriverBatch(torch.nn.Module):
                 structure.e_coul_tmp,
                 structure.f_coul,
                 structure.dq_p1,
+                # Describes the batch as a whole, never one structure in it:
+                # SCFx_batch stops on tolerance only when every member has met
+                # it, and -1 means the cap ran out with at least one member
+                # still moving -- without saying which.
+                structure.scf_iter_count,
             ) = SCFx_batch(
                 self.dftorch_params,
                 structure.RX,
