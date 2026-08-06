@@ -48,10 +48,14 @@ Running it
 
 It prints a 21-row table and writes ``figures/eu_n_scf_binding_curve.png``.
 
-**It needs matplotlib in the interpreter that runs it.**  The project virtual
-environment deliberately has none - see ``experiments/diatomic_scans/README.md``,
-which records that standing decision - so this script checks for matplotlib
-before spending any time on physics and says what to do if it is missing.
+**It needs matplotlib in the interpreter that runs it.**  matplotlib is a
+*development-time* dependency of this project, carried in the ``dev`` extra of
+``pyproject.toml`` beside pytest and ruff, and deliberately NOT a runtime
+dependency: figures like this one are how the physics gets verified during
+development, but nobody installing dftorch to compute with it needs a plotting
+library.  ``uv run`` supplies it.  A bare interpreter may not, so this script
+checks for matplotlib before spending any time on physics and says what to do
+if it is missing.
 
 ASCII only, in the source and in every string emitted, per the Phase 4 rule that
 a failure be diagnosable from a cp1252 console.  Write "A" for Angstrom and "->"
@@ -734,12 +738,16 @@ def main():
             "\n"
             f"  interpreter: {sys.executable}\n"
             "\n"
-            "The project virtual environment deliberately has no matplotlib;\n"
-            "experiments/diatomic_scans/README.md records that decision. Either\n"
-            "run this script with an interpreter that has matplotlib and can\n"
-            "import dftorch, or add matplotlib to the project environment - the\n"
-            "latter reverses a recorded decision and is a choice for a human to\n"
-            "make, not for this script to make on their behalf.",
+            "matplotlib is a development-time dependency of this project, in\n"
+            "the 'dev' extra of pyproject.toml. It is deliberately not a runtime\n"
+            "dependency: the library computes the numbers, it does not draw.\n"
+            "\n"
+            "Run this through the project environment, which supplies it:\n"
+            "\n"
+            "  uv run python experiments/eu_n_scf_binding_curve.py\n"
+            "\n"
+            "If that is what you just did, the dev extra is not installed. Run\n"
+            "'uv sync --extra dev' and try again.",
             file=sys.stderr,
         )
         return 2
