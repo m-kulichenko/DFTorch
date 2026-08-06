@@ -22,6 +22,7 @@ Requires-Dist: pytest>=7.4; extra == "dev"
 Requires-Dist: ruff; extra == "dev"
 Requires-Dist: mypy; extra == "dev"
 Requires-Dist: pre-commit; extra == "dev"
+Requires-Dist: matplotlib>=3.11.1; extra == "dev"
 Provides-Extra: sedacs
 Requires-Dist: mpi4py; extra == "sedacs"
 Requires-Dist: numba; extra == "sedacs"

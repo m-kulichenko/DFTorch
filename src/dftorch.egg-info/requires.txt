@@ -9,6 +9,7 @@ pytest>=7.4
 ruff
 mypy
 pre-commit
+matplotlib>=3.11.1
 
 [sedacs]
 mpi4py
