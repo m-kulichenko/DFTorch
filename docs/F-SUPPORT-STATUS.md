@@ -75,16 +75,34 @@ single-system f path. Nothing schedules PHY-05 or PHY-06.
 The f-unsupported exception taxonomy lives in one module,
 `src/dftorch/_slater_koster_pair.py`, deliberately, so that it can be reviewed as a single
 support policy (see the class docstring of `FShellResolvedCoulombUnsupportedError`).
+**Stale claim, recorded not fixed.** The preceding paragraph used to end by asserting that
 `tests/test_support_documentation.py::test_every_named_exception_appears_in_support_matrix`
-enumerates the classes from the module at test time -- not from a list written here -- so a
-class added later without a row in this document fails the suite.
+enumerates the classes from the module at test time, so a class added later without a row
+here fails the suite. **No test of that name exists in the repository.**
+`tests/test_support_documentation.py` defines four tests and none of them is it, so this
+document has no completeness gate. Noticed while retiring the Coulomb refusal in phase 6
+plan 06-02 and left for whoever owns the documentation gates: it is the same class of stale
+claim already logged in `.planning/STATE.md` against `docs/LIBRARY-OUTPUT-INVENTORY.md`.
+What does hold today is
+`tests/test_orbital_count_guards.py::test_no_new_f_exception_class_was_defined`, which pins
+the taxonomy at exactly these four names -- so a *fifth* class fails the suite, even though
+a fourth-class row going missing from this table would not.
 
 | Exception class | Defined at | What it guards | Raised at | Requirement that removes it |
 |---|---|---|---|---|
 | `FAngularFormulaSourceError` | `_slater_koster_pair.py:173` | reaching an f-containing SK pair class where the source-locked angular formulas are not wired in. Today that is the **batched** H0/S path only | `_h0ands.py:637`; the generic form `_require_f_formula_source` (`_slater_koster_pair.py:209`, called at `:960`) is inert on the single-system path because `F_ANGULAR_FORMULAS_AVAILABLE` is set `True` at `:785` | PHY-04 (batch), Phase 8.1 |
 | `FDerivativeUnsupportedError` | `_slater_koster_pair.py:234` | any path that consumes f `dH0`/`dS`, which are exactly zero in every f block. Zero is a legal-looking derivative, so the consumer must refuse rather than integrate it | `ESDriver.py:61` (forces, both drivers), `_stress.py:198` (stress), `_forces.py:49` (the spin force path) | DRV-01 then DRV-02, Phase 7 |
 | `FSpinPolarizationUnsupportedError` | `_slater_koster_pair.py:259` | a spin-polarized (open-shell) request for an f system. Eu 4f7 is genuinely open-shell, so a closed-shell number would differ in physics, not accuracy | `ESDriver.py:101` (`_require_closed_shell_f_system`, first statement of `ESDriver.forward`, so it fires for `do_scf=False` too), `_spin.py:45` (the shell-resolved spin builders reached directly from MD) | SPN-01, v2 |
-| `FShellResolvedCoulombUnsupportedError` | `_slater_koster_pair.py:289` | the shell-resolved Coulomb matrix, whose pair masks test `max_ang` against 1, 2 and 3 only, so an f element's non-s rows and columns would come back exactly zero in a finite, correctly shaped matrix | `_coulomb_matrix.py:715` | SCC-02, Phase 6 (itself blocked on SCC-01) |
+| `FShellResolvedCoulombUnsupportedError` | `_slater_koster_pair.py:291` | **RETIRED.** It guarded the shell-resolved Coulomb matrix, whose pair masks tested `max_ang` against 1, 2 and 3 only, so an f element's non-s rows and columns came back exactly zero in a finite, correctly shaped matrix | nowhere -- no production module raises it, watched by `tests/test_shell_resolved_coulomb_f.py::test_the_retired_refusal_is_no_longer_raised_by_production_code` | **retired by SCC-02, Phase 6** |
+
+**On the retired row.** `ewald_real_space_vectorized_sr` now builds all sixteen ordered
+shell-pair blocks, the seven involving f included, so the reason to refuse is gone. The
+class name is deliberately **kept** rather than deleted: plan 05-06 pinned this taxonomy at
+exactly four names (`test_no_new_f_exception_class_was_defined`) so the support policy reads
+as one list, and dropping a name would shrink it to three and lose the record of what used
+to be unsupported. Its docstring and message constant now record the retirement, what
+retired it, and what would justify raising it again -- an element whose orbital groups are
+not a contiguous run starting at s, or a shell-resolved path with an incomplete block set.
 
 Two further refusals exist that are **not** part of this taxonomy, listed so the reader who
 meets one can find it:
@@ -99,17 +117,25 @@ meets one can find it:
 
 ## 3. What is supported today
 
-**Single-system, single-shot, closed-shell f energy on a uniform-grid `SKFPATH`.**
+**Single-system, closed-shell f energy on a uniform-grid `SKFPATH`, single-shot or
+self-consistent.**
 
 | Property | Value |
 |---|---|
-| Entry point | `ESDriver.forward(do_scf=False)` |
+| Entry point | `ESDriver.forward(do_scf=False)` **and `forward(do_scf=True)`** -- the self-consistent charge loop settles for the validated case as of phase 6 plan 06-01 (SCC-01) |
 | System | one structure at a time (not `StructureBatch`) |
 | Occupation | closed shell only |
-| Energy | band + repulsion, with `e_coul` exactly 0 (decision D-11) |
-| Coulomb | per-atom path; leave `MAGNETIC_HUBBARD_LDEP` unset (D-23) |
+| Energy | band + repulsion; `e_coul` is 0 on the single-shot path (decision D-11) |
+| Coulomb, per-atom | fully implemented for f |
+| Coulomb, shell-resolved | **now builds for an f system.** `MAGNETIC_HUBBARD_LDEP` set makes `ESDriver.forward` populate `structure.C_sr` and `structure.dCC_sr` with all sixteen shell-pair blocks (SCC-02). It is still built *alongside* the per-atom matrix and has no consumer: `energy()` and `SCFx` take `(Nats, Nats)` with per-atom charges, and threading shell-resolved charges is deferred (D-11) |
 | Parameters | an `SKFPATH` whose files share one radial grid step (REG-05); mixed *lengths* are fine, mixed *steps* refuse |
 | Validated case | the isolated **Eu-N diatomic**, `tests/f_orbital_data/` |
+
+**Convergence caveat, carried from plan 06-01.** The self-consistent loop settles for Eu-N
+because the Krylov accelerator is switched off for f systems by
+`ESDriver._krylov_params_for_f_interim`. The accelerator itself is not repaired, only
+stood down; `structure.krylov_disabled_for_f` says which path a result came from, and
+`structure.scf_iter_count` is the pass count, or `-1` if the loop gave up.
 
 H0/S assembly for f is real, not zero-filled: `tests/test_orbital_count_guards.py::
 test_f_pair_reaches_single_system_sk_assembly` measures the Eu f / N block of `H0` at

@@ -289,14 +289,35 @@ F_SPIN_POLARIZATION_UNSUPPORTED_MESSAGE: Final[str] = (
 
 
 class FShellResolvedCoulombUnsupportedError(NotImplementedError):
-    """Raised when a shell-resolved Coulomb matrix is requested for an f system.
+    """RETIRED by requirement SCC-02 in Phase 6. Nothing raises this any more.
 
-    ``_coulomb_matrix.ewald_real_space_vectorized_sr`` assembles its
-    ``(n_shells, n_shells)`` matrix from pair masks that test ``max_ang``
-    against 1, 2 and 3 only. An f element has ``max_ang == 4``, so every one of
-    its non-s shell rows and columns comes back exactly zero while the matrix
-    itself stays finite and correctly shaped — the Phase 3 silent-drop failure
-    mode reproduced in the electrostatics.
+    What it used to mean. ``_coulomb_matrix.ewald_real_space_vectorized_sr``
+    assembled its ``(n_shells, n_shells)`` matrix from pair masks that tested
+    ``max_ang`` against 1, 2 and 3 only. An f element has ``max_ang == 4``, so
+    every one of its non-s shell rows and columns came back exactly zero while
+    the matrix itself stayed finite and correctly shaped — the Phase 3
+    silent-drop failure mode reproduced in the electrostatics. Refusing was the
+    honest response, because zero is a legal-looking repulsion value and nothing
+    downstream could have noticed.
+
+    What changed. That function now builds **all sixteen** ordered shell-pair
+    blocks, the seven involving f included, selected by one uniform rule,
+    ``_coulomb_matrix._shell_pair_mask``. The reason to refuse is gone.
+
+    Why the name is kept rather than deleted. Phase 5 pinned the f exception
+    taxonomy at exactly four names
+    (``tests/test_orbital_count_guards.py::test_no_new_f_exception_class_was_defined``)
+    so the whole f support policy reads as one reviewable list. Deleting a name
+    would shrink that list to three and lose the record of what used to be
+    unsupported and why.
+    ``tests/test_shell_resolved_coulomb_f.py::test_the_retired_refusal_is_no_longer_raised_by_production_code``
+    keeps "retired" a checked fact rather than a claim.
+
+    What would justify raising it again. An element whose orbital groups are not
+    a contiguous run starting at s — the row and column offsets the builder uses
+    add a fixed 0/1/2/3 to the atom's first shell index, and would land on the
+    wrong row for such an element — or a new shell-resolved path whose block set
+    is not complete.
 
     This class lives in ``_slater_koster_pair`` rather than in
     ``_coulomb_matrix`` so that the whole f-unsupported exception taxonomy
@@ -307,21 +328,21 @@ class FShellResolvedCoulombUnsupportedError(NotImplementedError):
 
 
 F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE: Final[str] = (
-    "The shell-resolved Coulomb matrix implements shell pair blocks for s, p "
-    "and d only.\n"
-    "The seven f-containing blocks (s-f, f-s, p-f, f-p, d-f, f-d, f-f) are not "
-    "implemented, so an f-containing system would receive a matrix in which "
-    "every non-s shell row and column of the f atom is exactly zero. That is a "
-    "finite, correctly shaped, completely wrong matrix, which is why this path "
-    "refuses to run rather than returning it.\n"
-    "Workaround: leave MAGNETIC_HUBBARD_LDEP unset (or False) so the per-atom "
-    "Coulomb path is used. That path is fully implemented for f systems and is "
-    "what the single-shot energy consumes.\n"
-    "Implementing the missing blocks is blocked on shell-resolved charges being "
-    "threaded through the SCF loop: the shell-resolved matrix is "
-    "(n_shells, n_shells) while energy() and SCFx consume (Nats, Nats) together "
-    "with per-atom charges, so there is currently no consumer that could "
-    "validate f values even if they were written."
+    "RETIRED: the shell-resolved Coulomb matrix now implements all sixteen "
+    "shell pair blocks, f included, and nothing raises this any more.\n"
+    "It used to fire because only nine blocks existed: the seven f-containing "
+    "ones (s-f, f-s, p-f, f-p, d-f, f-d, f-f) were missing, so an f-containing "
+    "system received a matrix in which every non-s shell row and column of the "
+    "f atom was exactly zero - a finite, correctly shaped, completely wrong "
+    "matrix.\n"
+    "Requirement SCC-02 in Phase 6 built the seven missing blocks and replaced "
+    "the hand-enumerated pair masks with one uniform rule, so setting "
+    "MAGNETIC_HUBBARD_LDEP on an f system is now a supported calculation "
+    "rather than a refusal.\n"
+    "The name is kept so the f support taxonomy stays at exactly four entries "
+    "and the record of what was once unsupported survives. Raising it again "
+    "would be justified by an element whose shells are not a contiguous run "
+    "starting at s, or by a shell-resolved path with an incomplete block set."
 )
 
 

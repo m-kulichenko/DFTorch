@@ -371,15 +371,20 @@ def test_ldep_flag_does_not_change_construction(tmp_path):
 # ---------------------------------------------------------------------------
 #
 # ``ewald_real_space_vectorized_sr`` builds an (n_shells, n_shells) Coulomb
-# matrix from pair masks that test ``max_ang`` against 1, 2 and 3 only.  Eu has
-# ``max_ang == 4``, so before this plan an f system came back finite, correctly
-# shaped and almost entirely zero — the Phase 3 silent-drop failure mode
-# reproduced in the Coulomb path.  Measured pre-guard for Eu-N: a (6, 6) matrix
-# with row sums [0.473581, 0, 0, 0, 0.473581, 0], i.e. only the s-s block
-# populated.  The seven f angular blocks (s-f, f-s, p-f, f-p, d-f, f-d, f-f) are
-# *refused*, not approximated: the matrix is (n_shells, n_shells) while
-# ``energy()`` and ``SCFx`` consume (Nats, Nats) with per-atom charges, so
-# nothing in this phase could consume or validate f values even if they existed.
+# matrix.  It used to assemble it from pair masks that test ``max_ang`` against
+# 1, 2 and 3 only.  Eu has ``max_ang == 4``, so an f system came back finite,
+# correctly shaped and almost entirely zero — the Phase 3 silent-drop failure
+# mode reproduced in the Coulomb path.  Measured pre-guard for Eu-N: a (6, 6)
+# matrix with row sums [0.473581, 0, 0, 0, 0.473581, 0], i.e. only the s-s block
+# populated.  Phase 4 responded by *refusing* rather than approximating.
+#
+# Phase 6, requirement SCC-02, built the seven missing f angular blocks (s-f,
+# f-s, p-f, f-p, d-f, f-d, f-f), so all sixteen are now written and the refusal
+# is retired.  The three tests below that used to assert the refusal now assert
+# its positive counterpart; each keeps, in its own docstring, the record of what
+# it used to prove.  D-11 still defers the shell-resolved *charge* threading, so
+# ``structure.C_sr`` remains built-and-unconsumed: ``energy()`` and ``SCFx``
+# still take (Nats, Nats) with per-atom charges.
 
 
 def _build_ch4(tmp_path: Path, magnetic_hubbard_ldep: bool):
@@ -497,41 +502,84 @@ def test_shell_resolved_coulomb_builds_for_f_free_system(tmp_path):
     run_with_float64(check)
 
 
-def test_shell_resolved_coulomb_refuses_f_system(tmp_path):
-    """Eu-N must raise instead of returning a mostly-zero (6, 6) matrix.
+def test_shell_resolved_coulomb_builds_for_f_system(tmp_path):
+    """Eu-N now gets a matrix, and no row of it is empty.
 
-    Pre-guard this call returned row sums [0.473581, 0, 0, 0, 0.473581, 0]:
-    finite, correctly shaped, and wrong in every non-s entry.  Threat T-04-05.
+    **What this used to prove, and why that changed.**  Until Phase 6 this test
+    was ``test_shell_resolved_coulomb_refuses_f_system`` and asserted that the
+    call raised ``FShellResolvedCoulombUnsupportedError``.  The refusal existed
+    because the builder wrote nine of the sixteen shell-pair blocks and the
+    seven involving f were missing: pre-guard this exact call returned row sums
+    [0.473581, 0, 0, 0, 0.473581, 0] — finite, correctly shaped, and wrong in
+    every non-s entry (threat T-04-05).  Those numbers are kept here on purpose;
+    they are the evidence for why the guard existed.
+
+    Requirement SCC-02 in Phase 6 built the seven missing blocks, so the reason
+    to refuse is gone and the same call is now expected to return a fully
+    populated matrix.  The blocks themselves are validated in
+    ``tests/test_shell_resolved_coulomb_f.py``; what this test holds is that the
+    *Eu-N* fixture, the one whose failure was recorded above, is fixed.
     """
-    from dftorch._slater_koster_pair import FShellResolvedCoulombUnsupportedError
 
     def check():
         const, structure, _, _ = _build_eu_n(tmp_path, False)
-        with pytest.raises(FShellResolvedCoulombUnsupportedError):
-            _call_shell_resolved_coulomb(const, structure)
+        CC, dCC = _call_shell_resolved_coulomb(const, structure)
+
+        n_sh = int(structure.n_shells_per_atom.sum())
+        assert n_sh == 6, (
+            f"Eu-N must have 6 shells total (Eu: s+p+d+f, N: s+p), got {n_sh} "
+            f"from n_shells_per_atom={structure.n_shells_per_atom.tolist()}"
+        )
+        assert CC.shape == (n_sh, n_sh)
+        assert dCC.shape == (3, n_sh, n_sh)
+        assert torch.isfinite(CC).all()
+
+        row_sums = CC.sum(dim=1)
+        assert not bool((row_sums == 0.0).any()), (
+            "an all-zero row is the recorded pre-guard failure returning: "
+            f"row sums {row_sums.tolist()}, against the historical "
+            "[0.473581, 0, 0, 0, 0.473581, 0]"
+        )
 
     run_with_float64(check)
 
 
-def test_shell_resolved_coulomb_error_explains_the_gap(tmp_path):
-    """The refusal names where it came from, what triggered it, and the fix.
+def test_retired_refusal_message_records_its_own_retirement(tmp_path):
+    """The kept message says it is retired, by what, and what would revive it.
 
-    Also pins threat T-04-07: the message must not interpolate ``SKFPATH``,
-    ``FILENAME`` or any absolute path.
+    **What this used to prove, and why that changed.**  This was
+    ``test_shell_resolved_coulomb_error_explains_the_gap``, and it read the
+    message off a raised exception.  Nothing raises the exception any more, so
+    the message is read off the constant instead — converted rather than
+    deleted, because threat T-06-12 is that a rewritten message starts
+    interpolating a filesystem path, and that risk does not go away just because
+    the message is no longer raised.
+
+    Still pinned from Phase 4 (threat T-04-07): the message must not interpolate
+    ``SKFPATH``, ``FILENAME`` or any absolute path.
     """
-    from dftorch._slater_koster_pair import FShellResolvedCoulombUnsupportedError
+    from dftorch._slater_koster_pair import (
+        F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE,
+    )
 
     def check():
-        const, structure, _, _ = _build_eu_n(tmp_path, False)
-        with pytest.raises(FShellResolvedCoulombUnsupportedError) as excinfo:
-            _call_shell_resolved_coulomb(const, structure)
-
-        message = str(excinfo.value)
-        assert "_coulomb_matrix.ewald_real_space_vectorized_sr" in message
-        assert "n_orb == 16" in message
+        message = F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE
+        assert "RETIRED" in message, (
+            "the message must say outright that it is retired, not merely "
+            f"describe a gap that no longer exists: {message}"
+        )
+        assert "SCC-02" in message, (
+            "the message must name what retired it so a reader can find the "
+            f"work: {message}"
+        )
         for block in ("s-f", "f-s", "p-f", "f-p", "d-f", "f-d", "f-f"):
-            assert block in message
-        assert "MAGNETIC_HUBBARD_LDEP" in message
+            assert block in message, (
+                f"the message no longer names the {block} block, which is part "
+                "of the record of what used to be missing"
+            )
+        assert "contiguous run" in message, (
+            "the message must say what would justify raising it again"
+        )
         # T-04-07: no filesystem disclosure.
         assert str(_skf_dir()) not in message
         assert ".skf" not in message
@@ -610,9 +658,17 @@ def test_driver_leaves_c_sr_none_when_flag_unset(tmp_path):
     run_with_float64(check)
 
 
-def test_driver_refuses_f_system_when_flag_set(tmp_path):
-    """Asking for shell-resolved electrostatics on an f system fails loudly."""
-    from dftorch._slater_koster_pair import FShellResolvedCoulombUnsupportedError
+def test_driver_builds_c_sr_for_f_system_when_flag_set(tmp_path):
+    """The driver now populates ``C_sr`` and ``dCC_sr`` for an f system.
+
+    **What this used to prove, and why that changed.**  This was
+    ``test_driver_refuses_f_system_when_flag_set``: asking for shell-resolved
+    electrostatics on an f system raised.  SCC-02 built the seven missing
+    blocks, so the same request is now served.  ``structure.C`` stays
+    (Nats, Nats) — the shell-resolved matrix is additive, never a replacement,
+    and D-11 still defers the shell-resolved *charge* threading that would let
+    anything consume it.
+    """
 
     def check():
         const, structure, _, _ = _build_eu_n(tmp_path, True)
@@ -621,8 +677,19 @@ def test_driver_refuses_f_system_when_flag_set(tmp_path):
         params["SKFPATH"] = str(_skf_dir()) + os.sep
         params["MAGNETIC_HUBBARD_LDEP"] = True
 
-        with pytest.raises(FShellResolvedCoulombUnsupportedError):
-            _run_driver(params, const, structure)
+        _run_driver(params, const, structure)
+
+        n_sh = int(structure.n_shells_per_atom.sum())
+        assert n_sh == 6, (
+            f"expected 6 shells for Eu-N (Eu: s+p+d+f, N: s+p), got {n_sh} from "
+            f"n_shells_per_atom={structure.n_shells_per_atom.tolist()}"
+        )
+        assert structure.C_sr is not None
+        assert structure.C_sr.shape == (n_sh, n_sh)
+        assert torch.isfinite(structure.C_sr).all()
+        assert structure.dCC_sr is not None
+        assert structure.dCC_sr.shape == (3, n_sh, n_sh)
+        assert structure.C.shape == (2, 2)  # per-atom, unaffected by shell count
 
     run_with_float64(check)
 

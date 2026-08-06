@@ -312,18 +312,6 @@ def _case_esdriver_forward_unrestricted(tmp_path):
     )
 
 
-def _case_shell_resolved_coulomb(tmp_path):
-    from dftorch._coulomb_matrix import ewald_real_space_vectorized_sr
-    from dftorch._slater_koster_pair import FShellResolvedCoulombUnsupportedError
-
-    _, structure, _, _ = _build_eu_n(tmp_path)
-    return FShellResolvedCoulombUnsupportedError, lambda: (
-        ewald_real_space_vectorized_sr(
-            structure, None, None, structure.TYPE, None, None, None, 0.1
-        )
-    )
-
-
 def _case_h0_and_s_batch(tmp_path):
     from dftorch._slater_koster_pair import FAngularFormulaSourceError
 
@@ -369,10 +357,16 @@ def _case_get_h_spin_diag(tmp_path):
     )
 
 
+# ``ewald_real_space_vectorized_sr`` was a guard case until Phase 6.  Its
+# refusal (``FShellResolvedCoulombUnsupportedError``) is retired by requirement
+# SCC-02, which built the seven missing f shell-pair blocks, and the function
+# has no orbital-count or shell-count site left for the sweep to find.  The
+# exception class itself is deliberately kept -- the taxonomy stays at four
+# names (``test_no_new_f_exception_class_was_defined`` below) -- and
+# ``tests/test_shell_resolved_coulomb_f.py`` now owns that function's coverage.
 GUARD_CASES = {
     "ESDriver.calc_forces": _case_esdriver_calc_forces,
     "ESDriver.forward-unrestricted": _case_esdriver_forward_unrestricted,
-    "ewald_real_space_vectorized_sr": _case_shell_resolved_coulomb,
     "H0_and_S_vectorized_batch": _case_h0_and_s_batch,
     "_pair_grad_from_sk": _case_pair_grad_from_sk,
     "forces_spin": _case_forces_spin,
@@ -427,16 +421,6 @@ def _inert_case(case_id: str):
         assert params["UNRESTRICTED"] is True
         assert (
             _require_closed_shell_f_system(structure, const, params, "inert-check")
-            is None
-        )
-    elif case_id == "ewald_real_space_vectorized_sr":
-        from dftorch._coulomb_matrix import _require_no_f_shell_resolved_coulomb
-
-        _, structure, _, _ = _build_ch4()
-        assert (
-            _require_no_f_shell_resolved_coulomb(
-                structure, structure.TYPE, "inert-check"
-            )
             is None
         )
     elif case_id == "H0_and_S_vectorized_batch":

@@ -483,9 +483,10 @@ class ESDriver(torch.nn.Module):
             # (Nats, Nats) and is what energy() and SCFx consume together with
             # per-atom charges, whereas C_sr is (n_shells, n_shells) and has no
             # consumer until shell-resolved charges are threaded through the
-            # SCF loop (deferred by D-11).  For an f system this call raises
-            # FShellResolvedCoulombUnsupportedError rather than returning a
-            # matrix whose non-s shell rows are silently zero.
+            # SCF loop (deferred by D-11).  For an f system this call now builds
+            # all sixteen shell-pair blocks; it used to refuse, because only
+            # nine existed and the f atom's non-s rows came back silently zero.
+            # Requirement SCC-02 in Phase 6 retired that refusal.
             _, shell_resolved_hubbard = _select_coulomb_hubbard(structure, const)
             if shell_resolved_hubbard:
                 Ra_sr = torch.stack(

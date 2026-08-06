@@ -5,7 +5,7 @@ count, a hardcoded shell count, or a hardcoded per-shell basis-layout table, wit
 disposition for each. Produced for phase 5 decision **D-04**, requirements **REG-04**
 and **CLN-03**.
 
-**Total: 158 sites.** Every one carries a disposition and **none is left as
+**Total: 141 sites.** Every one carries a disposition and **none is left as
 `needs-action`**.
 
 The audit closed at 157 sites in phase 5. Phase 6 plan 06-01 added the 158th,
@@ -13,6 +13,13 @@ The audit closed at 157 sites in phase 5. Phase 6 plan 06-01 added the 158th,
 branch selects a *numerical setting* rather than a matrix block or a refusal. It is
 listed the same way as every other: what it decides, what disposition it carries, and
 which test proves it.
+
+Phase 6 plan 06-02 then **removed 17**, the whole of `_coulomb_matrix.py`. Requirement
+SCC-02 replaced that file's eight hand-enumerated `max_ang` pair masks with a single rule
+that compares `max_ang` against a parameter rather than a literal, and deleted the guard
+those masks sat behind. A site that no longer hardcodes a shell count is not a site. The
+section below keeps the account of what was there in prose, because a resolved site is
+still part of the audit's record even when it can no longer be a row.
 
 ## Why this is an audit with actions and not a document
 
@@ -64,7 +71,7 @@ later phases add code.
 
 ### Why the sweep flattens newlines first
 
-Measured on this tree, flattening and not flattening return the same 157 records, and
+Measured on this tree, flattening and not flattening return the same 141 records, and
 that is stated rather than hidden. The flattening is kept for two reasons that are not
 cosmetic.
 
@@ -83,7 +90,7 @@ cosmetic.
 **Comments and string literals.** A docstring that says `n_orb == 16` and an exception
 message that says `n_orb == 16` decide nothing. The sweep tokenises each file and blanks
 every comment and string token before matching, preserving byte offsets so line numbers
-stay exact. **27 prose mentions** are excluded on this tree
+stay exact. **24 prose mentions** are excluded on this tree
 (`orbital_count_sweep.count_prose_mentions`). Excluding them is what lets every row below
 carry an honest disposition instead of one that reads "this is a sentence".
 
@@ -101,10 +108,12 @@ while their real `counts == 16` tests went missing.
 | `basis-layout-literal` | a bracketed literal spelling one of the canonical per-shell dimension or AO-offset tables |  --  |
 
 `shell-count` is **not** in the plan's identifier list and is included deliberately. The
-Phase 4 shell-resolved Coulomb defect (`FShellResolvedCoulombUnsupportedError`) lives at
-`_coulomb_matrix.py:816-824`, which tests `max_ang` and never mentions `n_orb`. A sweep
-restricted to orbital-count names would have missed the exact defect this project already
-had to fix. `basis-layout-literal` is included because CLN-03 names the hardcoded shell
+Phase 4 shell-resolved Coulomb defect (`FShellResolvedCoulombUnsupportedError`) lived in
+the pair masks of `_coulomb_matrix.ewald_real_space_vectorized_sr`, which tested `max_ang`
+and never mentioned `n_orb`. A sweep restricted to orbital-count names would have missed
+the exact defect this project already had to fix. (Those masks are gone as of phase 6
+SCC-02, and with them the file's rows; the family stays because the reason it exists does
+not.) `basis-layout-literal` is included because CLN-03 names the hardcoded shell
 offsets by hand, and because it is the family that found the only two real gaps in this audit --
 the truncated `[0, 1, 3, 5]` tables in `_spin.py` and `_forces.py`, neither of which
 mentions `n_orb` anywhere.
@@ -178,14 +187,18 @@ widened by editing one literal and was not.
 | `src/dftorch/_legacy/H0andS.py` | 54 | 0 | 0 | 54 |
 | `src/dftorch/_h0ands.py` | 52 | 32 | 20 | 0 |
 | `src/dftorch/_stress.py` | 20 | 0 | 2 | 18 |
-| `src/dftorch/_coulomb_matrix.py` | 17 | 0 | 1 | 16 |
 | `src/dftorch/_forces.py` | 5 | 0 | 5 | 0 |
 | `src/dftorch/Structure.py` | 3 | 3 | 0 | 0 |
 | `src/dftorch/ESDriver.py` | 3 | 1 | 2 | 0 |
 | `src/dftorch/_spin.py` | 2 | 0 | 2 | 0 |
 | `src/dftorch/Constants.py` | 1 | 1 | 0 | 0 |
 | `src/dftorch/_atomic_density_matrix.py` | 1 | 0 | 0 | 1 |
-| **total** | **158** | **37** | **32** | **89** |
+| **total** | **141** | **37** | **31** | **73** |
+
+`src/dftorch/_coulomb_matrix.py` held 17 of these (1 `guarded`, 16 `unreachable`) until
+phase 6 requirement SCC-02 removed every one; it is now absent from this table rather than
+listed with a zero, because the sweep returns no record for it. The section below says
+what was there.
 
 ### `src/dftorch/sedacs/`  --  checked, no sites
 
@@ -237,27 +250,37 @@ comparing an orbital count, and `F_ANGULAR_FORMULAS_AVAILABLE`, which is rebound
 | ---: | --- | --- | --- | --- | --- | --- | --- |
 | 161 | `(4, 5, 6, 7, 8)` | basis-layout-literal | `atomic_density_matrix` | which local AO offsets receive the d occupation; there is no matching f run (9-15) | `unreachable` | Import search `grep -rn "_atomic_density_matrix\|atomic_density_matrix(" src tests` finds only `_legacy/H0andS.py:9` and `:899` (itself unreachable, below) plus a non-calling smoke import in `tests/test_import.py`. The live `D0` is built by `Structure._atomic_density_matrix_from_shells` (`Structure.py:160`, called at :443), which is driven by the shell tables rather than by fixed offsets. The legacy call also passes five positional arguments to a six-parameter signature, so it could not execute. | `test_atomic_density_matrix_has_no_production_importer` |
 
-### `src/dftorch/_coulomb_matrix.py` -- 17 sites
+### `src/dftorch/_coulomb_matrix.py`  --  0 sites (17 resolved by SCC-02)
 
-| Line | Site | Family | Owner | What it decides | Disposition | Evidence | Test |
-| ---: | --- | --- | --- | --- | --- | --- | --- |
-| 714 | `counts == 16` | orbital-count | `_require_no_f_shell_resolved_coulomb` | whether an f atom is present and shell-resolved Coulomb assembly must refuse | `guarded` | Raises `FShellResolvedCoulombUnsupportedError` at `_coulomb_matrix.py:715`; called as the first statement of `ewald_real_space_vectorized_sr` (:795). | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 816 | `max_ang_I == 1` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 816 | `max_ang_J == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 817 | `max_ang_I == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 817 | `max_ang_J == 1` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 818 | `max_ang_I == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 818 | `max_ang_J == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 820 | `max_ang_I == 1` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 820 | `max_ang_J == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 821 | `max_ang_I == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 821 | `max_ang_J == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 822 | `max_ang_I == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 822 | `max_ang_J == 1` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 823 | `max_ang_I == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 823 | `max_ang_J == 2` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 824 | `max_ang_I == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
-| 824 | `max_ang_J == 3` | shell-count | `ewald_real_space_vectorized_sr` | which shell-pair block a neighbour pair contributes to; covers max_ang 1/2/3 with no max_ang == 4 class | `unreachable` | The guard at `_coulomb_matrix.py:795` is the first statement of this same function and nothing branches between it and these masks, so an atom with `max_ang == 4` raises before line 816 runs. This is the Phase 4 defect's own site, kept visible on purpose. | `test_every_guarded_site_raises_for_f[ewald_real_space_vectorized_sr]` |
+This file carried 17 rows through phase 5 and carries none now. The rows are gone rather
+than re-dispositioned because
+`tests/test_orbital_count_guards.py::test_inventory_covers_every_site` matches sites and
+rows as multisets in **both** directions: a row with no matching site fails the suite just
+as a site with no row does. Keeping a resolved row would have turned a green audit red.
+What the rows recorded is kept here as prose instead, because the point of accounting for
+a site does not end when the site does.
+
+What was there:
+
+* one `guarded` row, `counts == 16` in `_require_no_f_shell_resolved_coulomb`, which
+  raised `FShellResolvedCoulombUnsupportedError` as the first statement of
+  `ewald_real_space_vectorized_sr`;
+* sixteen `unreachable` rows, the eight `max_ang_I` / `max_ang_J` pair masks that selected
+  which shell-pair block a neighbour pair contributed to. They tested `max_ang` against 1,
+  2 and 3 only  --  there was deliberately no `max_ang == 4` class  --  and they were marked
+  `unreachable` on the strength of the guard above firing before them.
+
+What replaced them. Requirement **SCC-02** in phase 6 built the seven missing f blocks
+(s-f, f-s, p-f, f-p, d-f, f-d, f-f) and replaced the eight hand-enumerated masks with one
+uniform rule, `_shell_pair_mask(max_ang_I, max_ang_J, shell_i, shell_j)`, returning
+`(max_ang_I > shell_i) & (max_ang_J > shell_j)`. That rule compares `max_ang` against a
+*parameter*, not against a literal 1/2/3/4, so it is correctly not a swept site: there is
+no hardcoded shell count left in the file to disposition. The refusal is retired and the
+exception class is kept, with a retirement note, so the f taxonomy stays at four names.
+
+Cover: `tests/test_shell_resolved_coulomb_f.py` (seven tests, including the derived
+identity against the per-atom builder and the watch that no production module raises the
+retired refusal).
 
 ### `src/dftorch/_forces.py` -- 5 sites
 

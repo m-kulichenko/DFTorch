@@ -50,6 +50,7 @@ Covers SCC-02.
 
 import math
 import os
+import re
 
 # Disable TorchDynamo/Inductor compilation in tests (keeps tests deterministic
 # and avoids requiring a C++ toolchain).  Mirrors tests/test_scf.py.
@@ -639,6 +640,61 @@ def test_a_pair_with_equal_shell_strengths_is_finite(tmp_path):
         row_sums = CC.sum(dim=1)
         assert not bool((row_sums == 0.0).any()), (
             f"an all-zero row would mean a silently dropped shell: {row_sums}"
+        )
+
+    run_with_float64(check)
+
+
+# ---------------------------------------------------------------------------
+# The retired refusal
+# ---------------------------------------------------------------------------
+
+
+def test_the_retired_refusal_is_no_longer_raised_by_production_code(tmp_path):
+    """No module under src/dftorch raises the shell-resolved refusal any more.
+
+    ``FShellResolvedCoulombUnsupportedError`` is kept as a name so the f
+    exception taxonomy stays at exactly four entries and reads as one reviewable
+    support policy (see
+    ``tests/test_orbital_count_guards.py::test_no_new_f_exception_class_was_defined``).
+    Keeping a name that nothing raises is only honest if "nothing raises it" is
+    a *checked* fact, so this scans the package for a raise naming it.
+
+    The test suite is excluded from the scan: a test may legitimately construct
+    the class to assert something about it.
+    """
+
+    def check():
+        import dftorch
+        from dftorch._slater_koster_pair import (
+            FShellResolvedCoulombUnsupportedError,
+        )
+
+        assert issubclass(FShellResolvedCoulombUnsupportedError, NotImplementedError), (
+            "the class must still be importable, only retired - not deleted"
+        )
+
+        package_root = Path(dftorch.__file__).resolve().parent
+        scanned = 0
+        offenders = []
+        for path in sorted(package_root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8", errors="replace")
+            scanned += 1
+            flat = " ".join(source.split())
+            raised = [
+                match.group(1)
+                for match in re.finditer(r"raise\s+([A-Za-z_][A-Za-z_0-9.]*)", flat)
+                if match.group(1).endswith("FShellResolvedCoulombUnsupportedError")
+            ]
+            if raised:
+                offenders.append(str(path.relative_to(package_root)))
+        assert scanned > 10, (
+            f"the scan only read {scanned} modules under {package_root}, which "
+            "is too few for the package; it is no longer checking anything"
+        )
+        assert not offenders, (
+            "FShellResolvedCoulombUnsupportedError is documented as retired but "
+            "is still raised in: " + ", ".join(sorted(set(offenders)))
         )
 
     run_with_float64(check)
