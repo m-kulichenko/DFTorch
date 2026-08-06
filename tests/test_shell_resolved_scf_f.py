@@ -12,7 +12,8 @@ for nitrogen, and one electron-repulsion strength each.  The finer answer is per
 project calls that *shell-resolved*; "shell" is just its word for one of those
 groups.
 
-Why it matters here is concrete.  ``Constants.py:232`` loads the per-atom
+Why it matters here is concrete.  ``Constants.py``'s
+``self.U = torch.nn.Parameter(US, ...)`` assignment loads the per-atom
 repulsion strength from the **s** column for every element.  For nitrogen that
 is harmless (its s, p and d values coincide).  For europium it is not: the s
 group costs about 5.7 eV per unit of charge and the f group about 13.6 eV, and
@@ -831,8 +832,11 @@ def test_europium_f_group_is_charged_at_the_f_rate(tmp_path):
 def test_the_per_atom_strength_still_comes_from_the_s_group(tmp_path):
     """The per-atom defect is pinned in place, deliberately, not repaired.
 
-    ``Constants.py:232`` reads ``self.U = torch.nn.Parameter(US, ...)``: the
+    ``Constants.py`` reads ``self.U = torch.nn.Parameter(US, ...)``: the
     per-atom repulsion strength is the s group's value for every element.
+    Decision D-6.10 calls this line ``Constants.py:232``, which is where it sat
+    before plan 06-04 recorded the defect in a comment above it; search for the
+    assignment rather than the number.
     Changing that line would move numbers in every existing calculation
     containing an f element.  It is not required by this phase's bar, and the
     human ruling of 2026-08-04 named the shell-resolved path as the remedy
@@ -851,8 +855,9 @@ def test_the_per_atom_strength_still_comes_from_the_s_group(tmp_path):
         table_s = const.U[eu].item()
         assert abs(per_atom - table_s) < 1e-12, (
             "the per-atom strength for atom {} (element type {}) is {:.9f} eV "
-            "but const.U for that element is {:.9f} eV; if Constants.py:232 "
-            "was changed on purpose, record it as a decision".format(
+            "but const.U for that element is {:.9f} eV; if the "
+            "self.U = Parameter(US, ...) assignment in Constants.py was "
+            "changed on purpose, record it as a decision".format(
                 eu_atom, eu, per_atom, table_s
             )
         )

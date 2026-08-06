@@ -317,9 +317,12 @@ code is worse than no document at all. Three things guard against that:
    every europium level, and that the Phase 4 pin is not the settled answer. Every assertion is
    an exact zero, a sign, an inequality or a ratio. **No energy or charge measured above appears
    in any assertion**; those numbers live here, as prose evidence, and nowhere else.
-3. **`src/dftorch/Constants.py`**, above the assignment at line 232, carries a recorded note on
-   the per-atom Hubbard strength defect that this document's third-number section describes,
-   so an editor of that line meets the record without having to find this file.
+3. **`src/dftorch/Constants.py:291`** - the assignment
+   `self.U = torch.nn.Parameter(US, ...)`, which charges every element its s group's
+   electron-repulsion strength - carries a recorded note on that defect immediately above it,
+   so an editor of that line meets the record without having to find this file. Decision D-6.10
+   refers to it as "Constants.py:232", which is where it sat before plan 06-04 inserted the note
+   above it; search for the assignment rather than the number.
 
 ---
 
@@ -331,4 +334,6 @@ code is worse than no document at all. Three things guard against that:
 - Phase 6 decision D-6.03 - the decision requiring this written verdict, including its warning
   that an explanation accounting only for electron repulsion is incomplete.
 - Phase 6 decision D-6.08 - no reference numbers frozen this phase.
-- Phase 6 decision D-6.10 - the per-atom Hubbard strength defect, recorded at `Constants.py:232`.
+- Phase 6 decision D-6.10 - the per-atom Hubbard strength defect. D-6.10 names it
+  `Constants.py:232`; the recorded note now sits above it and the assignment is at
+  `Constants.py:291`.

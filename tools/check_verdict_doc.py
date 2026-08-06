@@ -135,11 +135,13 @@ REQUIRED_CITATIONS = [
     ),
     (
         "src/dftorch/Constants.py",
-        232,
-        232,
+        291,
+        291,
         "self.U = torch.nn.Parameter(US",
         "the per-atom Hubbard strength assignment whose recorded defect note "
-        "this document cross-references",
+        "this document cross-references. Decision D-6.10 calls this "
+        "'Constants.py:232', which is where it sat before plan 06-04 inserted "
+        "the note above it; this citation is the current, verified location",
     ),
 ]
 

@@ -170,6 +170,38 @@ Plans:
 > reaches tolerance rather than the loop exhausting `MaxIt`. Per 6.3(a), closed-shell only —
 > spin stays deferred, and the converged number is recorded as not physically complete for
 > open-shell Eu 4f7.
+
+> **Scope note (2026-08-04), closing the conditional above.** Written by plan 06-04, which
+> owed this update.
+>
+> **The runaway charge loop was diagnosed.** The cause is the low-rank Krylov convergence
+> accelerator (`kernel_update_lr`, engaged once the pass count passes `KRYLOV_START`). It is
+> **not** the f orbitals and **not** the coarse per-atom charge description. Evidence: with the
+> accelerator disabled and nothing else changed, the Eu-N scan goes from 12 of 21 separations
+> converging to **21 of 21**, and at the 12 that converged either way the two runs agree on the
+> total energy to better than 1e-6 eV — the accelerator was failing to find the fixed point the
+> plain mixer finds reliably, not finding a different one. Corroborated on 16 unrelated mio-1-1
+> diatomics at 61 separations each: 61/61 converged in every system with the accelerator off.
+>
+> **A human ruling of the same date deferred repairing the accelerator to a later phase**, and
+> had Phase 6 disable it in the interim for f systems only. Plan 06-01 did that; f-free
+> calculations are untouched and a test drives methane through to prove it.
+>
+> **Decision D-6.06 made the shell-resolved work conditional on that diagnosis. The same ruling
+> resolved the condition in favour of doing the work.** The justification changed rather than
+> disappearing: the shell-resolved blocks were never on the divergence's code path, so they are
+> not a convergence fix — but europium is charged its s shell's electron-repulsion strength of
+> 5.71 eV while seven of its nine outer electrons live in the f shell at 13.61 eV, and that is
+> a measured 30 percent effect on the dissociation charge. **Success criteria 3 and 4, and
+> requirements SCC-02 and SCC-03, are therefore unconditional Phase 6 deliverables after all.**
+> Plans 06-02 and 06-03 built them. Nothing above this note is still conditional; do not
+> re-open it.
+>
+> **Correcting the 2026-08-02 note directly above.** "Phase 6 therefore starts from a working
+> f-free SCF baseline and does not need to open with a repair task" is accurate about the
+> **f-free** methane history it was written about, and misleading about this phase. The f loop
+> did need a repair task, and got one: plan 06-01 is that task.
+
 **Success Criteria** (what must be TRUE):
 
   1. A supported f-containing system runs a real self-consistent charge loop to convergence, not the Phase 4 single-shot path.
@@ -178,7 +210,7 @@ Plans:
   4. The shell-resolved f charge/Hubbard plumbing validated but unconsumed in Phase 4 (D-14) is consumed by the self-consistent path.
   5. The Phase 4 single-shot path and its pinned reference energy remain available and unbroken.
 
-**Plans**: 1/5 plans executed
+**Plans**: 3/5 plans executed
 Plans:
 **Wave 1**
 
@@ -186,11 +218,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 06-02-PLAN.md — Build the seven missing f angular blocks of the shell-resolved Coulomb matrix, widen the six existing masks that silently skipped f pairs, and retire the refusal across code and both support documents.
+- [x] 06-02-PLAN.md — Build the seven missing f angular blocks of the shell-resolved Coulomb matrix, widen the six existing masks that silently skipped f pairs, and retire the refusal across code and both support documents.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 06-03-PLAN.md — Consume shell-resolved charges inside the closed-shell SCF loop and its energy, so Eu's f electrons are charged at the f Hubbard U rather than the s one.
+- [x] 06-03-PLAN.md — Consume shell-resolved charges inside the closed-shell SCF loop and its energy, so Eu's f electrons are charged at the f Hubbard U rather than the s one.
 - [ ] 06-04-PLAN.md — Write the verdict on the 10.6 eV single-shot / self-consistent difference, record the Constants.py:232 s-shell Hubbard U defect in place, and close the D-6.06 roadmap tension.
 
 **Wave 4** *(blocked on Wave 3 completion)*
@@ -274,7 +306,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 8.1 -> 
 | 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
 | 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
 | 5. Regression Safety and Support Policy Cleanup | 8/8 | Complete    | 2026-08-03 |
-| 6. Self-Consistent SCF for f Systems | 1/5 | In Progress|  |
+| 6. Self-Consistent SCF for f Systems | 3/5 | In Progress|  |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |
 | 8.1. Batched f H0/S Routing | 0/TBD | Not started | - |

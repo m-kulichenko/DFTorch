@@ -229,6 +229,65 @@ class Constants(torch.nn.Module):
         self.n_f = torch.nn.Parameter(N_F, requires_grad=False)
         self.shell_present = torch.nn.Parameter(SHELL_PRESENT, requires_grad=False)
 
+        # --- RECORDED DEFECT: the per-atom Hubbard U is always the s value ---
+        #
+        # Read this before editing the next line. It is a known, measured
+        # defect that is deliberately NOT fixed here (decision D-6.10).
+        #
+        # What the line does. `self.U` is the one electron-repulsion strength
+        # each atom is charged at whenever the calculation tracks one charge
+        # per atom. It is taken from the s column, `US`, unconditionally, for
+        # every element. The p, d and f columns are loaded on the three lines
+        # below and, on that coarser path, are never consulted.
+        #
+        # Why that is usually harmless. In most of these parameter sets an
+        # element's s, p and d strengths are equal, so which column is read
+        # makes no difference. Nitrogen is the case in hand: its s, p and d
+        # strengths all read 13.33 eV, so for nitrogen this line is exact.
+        #
+        # Why it is wrong for europium. Europium's four strengths are NOT
+        # equal: s is 5.71 eV and f is 13.61 eV, a factor of 2.4 apart. Seven
+        # of europium's nine outer electrons live in the f group, so this line
+        # charges the large majority of them at less than half the strength
+        # their own shell says they should pay.
+        #
+        # How large the effect is, measured. Substituting the f value for
+        # europium and re-running the self-consistent Eu-N diatomic at 40 A --
+        # far enough apart that the two atoms should be independent -- moves
+        # the leftover charge transfer from 0.29 to 0.20 electrons, about
+        # 30 percent, and the reported energy from -1.96 to -1.73 eV. That is
+        # a real effect on a real observable, not a rounding-level concern.
+        # (Re-measured 2026-08-06; first measured 2026-08-04.)
+        #
+        # What this is NOT. It was tested as a candidate cause of the Phase 6
+        # runaway charge loop and DISPROVEN: with the substitution in place the
+        # loop still failed. The failure pattern changed, which is what makes
+        # it tempting to misread. The actual cause was the low-rank Krylov
+        # convergence accelerator. Do not present this line as that diagnosis.
+        #
+        # The remedy Phase 6 adopted. Not this line -- the shell-resolved path,
+        # selected by the `MAGNETIC_HUBBARD_LDEP` parameter key, which tracks
+        # one charge per orbital group and charges each group at its own
+        # strength. With that key set, europium's f electrons already pay the
+        # f rate and this line is not consulted for the repulsion energy.
+        #
+        # Why it is recorded rather than fixed. Changing this assignment moves
+        # numbers for every f element in every existing calculation, on the
+        # path that is still the default. That is a decision, not a tidy-up,
+        # and `tests/test_shell_resolved_scf_f.py`
+        # `::test_the_per_atom_strength_still_comes_from_the_s_group` exists to
+        # make any such edit visible rather than silent.
+        #
+        # A note on the name "Constants.py:232". Decision D-6.10 and several
+        # planning documents refer to this defect by that line number, which
+        # was where the assignment sat before this comment was inserted above
+        # it. The comment pushed it down. Search for the assignment itself
+        # rather than the number; `tools/check_verdict_doc.py` verifies the
+        # current line and fails if it moves again.
+        #
+        # Fuller account: `docs/SINGLE-SHOT-VS-SELF-CONSISTENT.md` and
+        # decision D-6.10.
+        # ---------------------------------------------------------------------
         self.U = torch.nn.Parameter(US, requires_grad=self.grad_param)
         self.Up = torch.nn.Parameter(UP, requires_grad=self.grad_param)
         self.Ud = torch.nn.Parameter(UD, requires_grad=self.grad_param)
