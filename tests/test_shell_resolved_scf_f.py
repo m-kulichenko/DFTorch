@@ -147,17 +147,41 @@ def _write_eu_n_xyz(path: Path, separation: float = EU_N_SEPARATION) -> None:
     )
 
 
-def _drive(params):
-    """Build ``(const, structure)`` from a parameter dict and run the SCF loop."""
+def _drive(params, prepare_const=None):
+    """Build ``(const, structure)`` from a parameter dict and run the SCF loop.
+
+    ``prepare_const`` runs on the freshly built ``Constants`` before the
+    ``Structure`` reads its tables, which is the only window in which an
+    in-memory parameter override can reach the shell-resolved data.
+    """
     from dftorch.Constants import Constants
     from dftorch.ESDriver import ESDriver
     from dftorch.Structure import Structure
 
     const = Constants(params).to("cpu")
+    if prepare_const is not None:
+        prepare_const(const)
     structure = Structure(params, const, device="cpu")
     driver = ESDriver(params, device="cpu")
     driver(structure, const, do_scf=True)
     return const, structure
+
+
+def _equal_shell_strengths(const) -> None:
+    """Give every orbital group of every element its own s-group strength.
+
+    Copied in spirit from ``tests/test_shell_resolved_coulomb_f.py``, where the
+    same override turns the shell-resolved Coulomb *matrix* into the per-atom
+    one.  Here it does the same job one level up, for the whole charge loop:
+    with one strength shared by all four groups the finer path is
+    mathematically the coarser path, so the two converged answers must agree.
+    The override is done in memory on a freshly built ``Constants``, never on a
+    file.
+    """
+    with torch.no_grad():
+        const.Up.copy_(const.U)
+        const.Ud.copy_(const.U)
+        const.Uf.copy_(const.U)
 
 
 def _eu_n_params(tmp_path: Path, shell_resolved: bool, **overrides):
@@ -171,19 +195,23 @@ def _eu_n_params(tmp_path: Path, shell_resolved: bool, **overrides):
     return params
 
 
-def _run_eu_n(tmp_path: Path, shell_resolved: bool = True, **overrides):
+def _run_eu_n(
+    tmp_path: Path, shell_resolved: bool = True, prepare_const=None, **overrides
+):
     """Drive the Eu-N diatomic through ``forward(do_scf=True)``."""
-    return _drive(_eu_n_params(tmp_path, shell_resolved, **overrides))
+    return _drive(
+        _eu_n_params(tmp_path, shell_resolved, **overrides), prepare_const
+    )
 
 
-def _run_ch4(shell_resolved: bool = True, **overrides):
+def _run_ch4(shell_resolved: bool = True, prepare_const=None, **overrides):
     """Drive the f-free methane control through ``forward(do_scf=True)``."""
     params = dict(CH4_PARAMS)
     params["FILENAME"] = str(_ch4_xyz())
     params["SKFPATH"] = str(_mio_skf_dir()) + os.sep
     params["MAGNETIC_HUBBARD_LDEP"] = shell_resolved
     params.update(overrides)
-    return _drive(params)
+    return _drive(params, prepare_const)
 
 
 def _shell_to_atom(structure) -> torch.Tensor:
@@ -503,6 +531,232 @@ def test_reference_occupations_and_nuclear_charges_agree(tmp_path):
                 el, z, el - z,
                 structure.el_per_shell.tolist(),
                 structure.Znuc.tolist(),
+            )
+        )
+
+    run_with_float64(check)
+
+
+# ---------------------------------------------------------------------------
+# The same-atom coupling between two orbital groups
+#
+# The shell-resolved Coulomb matrix is built from a neighbour list that never
+# pairs an atom with itself, so it carries nothing between two groups of one
+# atom - and that is the largest interaction either group feels.  The per-atom
+# path has the same hole and fills it with the 0.5 * sum(q**2 * U) term, which
+# only covers each charge against *itself*.  One charge per atom is all that
+# term needs; one charge per group is not.  These three tests pin the piece
+# that fills the rest of the hole.
+# ---------------------------------------------------------------------------
+
+
+def test_equal_group_strengths_reproduce_the_per_atom_answer(tmp_path):
+    """Give every group one shared strength and the two loops must agree.
+
+    This is a derived identity, not a recorded run.  With all four of an
+    element's groups carrying its s strength, the finer loop is *algebraically*
+    the coarser one: the level shift on every orbital of an atom collapses to
+    ``U * q_atom + (C q)_atom``, and the repulsion energy collapses to the
+    per-atom expression.  So the two converged charge vectors must match.
+
+    It validates the whole new path at once - the group-to-orbital gathers, the
+    row and column offsets, the same-atom coupling and the mixing - without
+    writing down a single number either loop produced.
+
+    Both loops are driven from the *same* Coulomb data on purpose.  The
+    per-atom matrix ``ESDriver`` builds and the shell-resolved one are not
+    interchangeable for a non-periodic molecule: ``coulomb_matrix_vectorized``
+    sets ``use_ewald = cell is not None`` and so uses a bare 1/R for a
+    molecule, while ``ewald_real_space_vectorized_sr`` always screens with
+    erfc.  Measured on this fixture that is a 0.11 percent difference in the
+    single off-site entry (4.79800 eV against 4.79252 eV) - a pre-existing
+    difference between two builders, nothing this plan introduced.  Comparing
+    two driver runs would therefore be testing that difference rather than this
+    plan's arithmetic, so the per-atom matrix here is the shell-resolved one
+    read back at atom resolution.
+    """
+
+    def check():
+        from dftorch._scf import SCFx
+
+        _, structure = _run_eu_n(
+            tmp_path,
+            shell_resolved=True,
+            prepare_const=_equal_shell_strengths,
+            SCF_TOL=1e-11,
+            SCF_MAX_ITER=400,
+        )
+
+        # Collapse the shell-resolved matrix to atoms. With one strength per
+        # element every group pair of a given atom pair carries the identical
+        # entry, so reading the first group of each atom is reading all of
+        # them - and the same-atom blocks are zero, which is the per-atom
+        # matrix's own convention.
+        start = structure.H_INDEX_START_U
+        C_collapsed = structure.C_sr[start][:, start].clone()
+        spread = (
+            structure.C_sr[
+                _shell_to_atom(structure) == 0
+            ][:, _shell_to_atom(structure) == 1]
+        )
+        assert (spread - spread.reshape(-1)[0]).abs().max().item() < 1e-12, (
+            "the override did not make every group pair of the Eu-N pair "
+            f"carry one entry: {spread.tolist()}"
+        )
+
+        common = dict(
+            RX=structure.RX,
+            RY=structure.RY,
+            RZ=structure.RZ,
+            cell=structure.cell,
+            Nats=structure.Nats,
+            Nocc=structure.Nocc,
+            n_orbitals_per_atom=structure.n_orbitals_per_atom,
+            Znuc=structure.Znuc,
+            TYPE=structure.TYPE,
+            Te=structure.Te,
+            dU_dq=None,
+            D0=structure.D0,
+            H0=structure.H0,
+            S=structure.S,
+            Z=structure.Z,
+            Efield=structure.e_field,
+            req_grad_xyz=structure.req_grad_xyz,
+        )
+        loop_params = _eu_n_params(tmp_path, True)
+        loop_params["SCF_ALPHA"] = 0.1
+        loop_params["SCF_TOL"] = 1e-11
+        loop_params["SCF_MAX_ITER"] = 400
+
+        per_atom = SCFx(
+            dict(loop_params),
+            Hubbard_U=structure.Hubbard_U,
+            C=C_collapsed,
+            **common,
+        )
+        per_group = SCFx(
+            dict(loop_params),
+            Hubbard_U=structure.Hubbard_U,
+            C=C_collapsed,
+            shell_types=structure.shell_types,
+            n_shells_per_atom=structure.n_shells_per_atom,
+            el_per_shell=structure.el_per_shell,
+            Hubbard_U_sr=structure.Hubbard_U_sr,
+            C_sr=structure.C_sr_scf,
+            **common,
+        )
+
+        assert per_atom[14] != DID_NOT_CONVERGE, (
+            "the per-atom control loop did not settle, so the comparison "
+            "below would be meaningless"
+        )
+        assert per_group[14] != DID_NOT_CONVERGE, (
+            "the equal-strength per-group loop did not settle, so the "
+            "comparison below would be meaningless"
+        )
+
+        gap = (per_group[7] - per_atom[7]).abs().max().item()
+        assert gap < 1e-8, (
+            "with one strength shared by every orbital group the two loops "
+            "must be the same calculation, but the converged charges differ "
+            "by {:.3e}.\n  per-atom  = {}\n  per-group = {}\n  q_sr = "
+            "{}".format(
+                gap,
+                per_atom[7].tolist(),
+                per_group[7].tolist(),
+                per_group[15].tolist(),
+            )
+        )
+
+    run_with_float64(check)
+
+
+def test_same_atom_group_coupling_lies_between_the_two_strengths(tmp_path):
+    """The same-atom block is bounded, self-consistent and stays on its atom.
+
+    Four properties, none of them a recorded number:
+
+    1. Two groups with the *same* strength couple at exactly that strength -
+       which is what makes the equal-strength identity above hold.
+    2. Two groups with different strengths couple at something strictly between
+       them.  Europium's s group (about 5.7 eV) against its f group (about
+       13.6 eV) is the case that matters.
+    3. The diagonal is zero: a group against itself is the ``U`` term's job,
+       and counting it here as well would double it.
+    4. Entries between *different* atoms are zero: this block is the same-atom
+       one, and the off-site blocks are the other matrix's job.
+    """
+
+    def check():
+        from dftorch._coulomb_matrix import onsite_shell_pair_coulomb
+
+        const, structure = _run_eu_n(tmp_path, shell_resolved=True)
+
+        strengths = structure.Hubbard_U_sr
+        same = onsite_shell_pair_coulomb(strengths, strengths)
+        gap = (same - strengths).abs().max().item()
+        assert gap < 1e-9, (
+            "two groups of equal strength must couple at exactly that "
+            "strength, but the largest disagreement is {:.3e}; strengths = {}, "
+            "coupling = {}".format(gap, strengths.tolist(), same.tolist())
+        )
+
+        eu = const.symbol_to_number["Eu"]
+        eu_atom = int((structure.TYPE == eu).nonzero()[0])
+        s_row = _shell_index(structure, eu_atom, 0)
+        f_row = _shell_index(structure, eu_atom, 3)
+        u_s = strengths[s_row].item()
+        u_f = strengths[f_row].item()
+        coupling = structure.C_sr_onsite[s_row, f_row].item()
+        assert u_s < coupling < u_f, (
+            "the s-f coupling on atom {} is {:.9f} eV, which is not strictly "
+            "between the s strength {:.9f} eV and the f strength {:.9f} "
+            "eV".format(eu_atom, coupling, u_s, u_f)
+        )
+        assert (
+            abs(structure.C_sr_onsite[f_row, s_row].item() - coupling) < 1e-12
+        ), "the same-atom block is not symmetric between the s and f groups"
+
+        diagonal = structure.C_sr_onsite.diagonal().abs().max().item()
+        assert diagonal < 1e-12, (
+            "the same-atom block has a non-zero diagonal (largest {:.3e}); a "
+            "group against itself is already carried by the Hubbard U "
+            "term".format(diagonal)
+        )
+
+        shell_to_atom = _shell_to_atom(structure)
+        across = shell_to_atom.unsqueeze(1) != shell_to_atom.unsqueeze(0)
+        leak = structure.C_sr_onsite[across].abs().max().item()
+        assert leak < 1e-12, (
+            "the same-atom block reaches a different atom (largest entry "
+            "{:.3e}); shell_to_atom = {}".format(leak, shell_to_atom.tolist())
+        )
+
+    run_with_float64(check)
+
+
+def test_the_reported_energy_is_the_one_the_loop_converged_to(tmp_path):
+    """``e_coul`` is built from the same charges and matrix the loop minimised.
+
+    The loop and ``energy()`` each compute an electron-repulsion energy.  If
+    one read the finer resolution and the other the coarser one, the reported
+    total would silently describe a different charge state than the converged
+    one and nothing else here would notice (threat T-06-16).
+    """
+
+    def check():
+        _, structure = _run_eu_n(tmp_path, shell_resolved=True)
+
+        q_sr = structure.q_sr
+        expected = 0.5 * q_sr @ (structure.C_sr_scf @ q_sr) + 0.5 * torch.sum(
+            q_sr**2 * structure.Hubbard_U_sr
+        )
+        gap = abs(expected.item() - structure.e_coul.item())
+        assert gap < 1e-10, (
+            "the reported Coulomb energy {:.12f} eV is not what the "
+            "per-group charges and the shell-resolved matrix give "
+            "({:.12f} eV); they differ by {:.3e}".format(
+                structure.e_coul.item(), expected.item(), gap
             )
         )
 

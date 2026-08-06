@@ -21,12 +21,15 @@ The authoritative occurrence count, re-runnable at any time:
 grep -rn "print(" src/dftorch --include="*.py" | wc -l
 ```
 
-At the time of writing this returned **182**; it now returns **181**, and this table has
-**181** rows. The difference is one row deliberately retired: `_coulomb_matrix_batch.py:459`
-printed "vectorized k-space is not implemented for batched data" and then *continued* --
-a printed apology masking an unimplemented path. Plan 05-06 (`1aade8c`) converted it into a
-raised exception naming requirement PHY-04, so it is no longer a print and no longer has a
-row. Any other drift between these two numbers is a missing row, not a retirement. No line in
+At the time of writing this returned **182**; it now returns **182** again, and this table
+has **182** rows. Two changes cancelled out. One row was deliberately retired:
+`_coulomb_matrix_batch.py:459` printed "vectorized k-space is not implemented for batched
+data" and then *continued* -- a printed apology masking an unimplemented path. Plan 05-06
+(`1aade8c`) converted it into a raised exception naming requirement PHY-04, so it is no
+longer a print and no longer has a row. One row was then added: phase 6 plan 06-03 gave
+`_scf.py` a notice that a per-atom initial charge guess cannot be honoured by the
+per-orbital-group charge loop and is being ignored. Any other drift between these two
+numbers is a missing row, not a retirement. No line in
 the package contains two `print(` occurrences, so the line count and the occurrence
 count coincide. `tests/test_verbose_flag.py::test_inventory_covers_every_print` walks
 the tree, counts the same occurrences, and asserts the two are equal, so a print added
@@ -50,6 +53,13 @@ The `Classification`, `Why` and `Gated by` columns are the judgement this docume
 exists to record. Line numbers are accurate as of the end of plan 05-05; re-run the
 snippet above if you need current ones.
 
+**The `Line` column has since drifted and is not gated.** Only the row *count* is
+checked by a test, so the numbers below have not been regenerated as the package grew.
+Measured 2026-08-05, eight files' numbers are stale: `ESDriver.py`, `MD.py`,
+`Optimizer.py`, `_coulomb_matrix.py`, `_coulomb_matrix_batch.py`, `_kernel_fermi.py`,
+`_scf.py` and `_xl_tools.py`. Match a row by its printed text, not by its line number.
+The one row carrying a current number is marked with a trailing `*`.
+
 **Counting caveat.** The gate is a *textual* substring count, so prose that writes the
 six characters `print(` inside a docstring or comment would add to the count and appear
 to break the test. This is deliberate: the textual rule also captures commented-out
@@ -72,10 +82,15 @@ Exactly one of four values per row.
 | Classification | Count |
 | --- | ---: |
 | `already-gated` | 28 |
-| `status` | 56 |
-| `warning` | 22 |
+| `status` | 57 |
+| `warning` | 21 |
 | `not-runtime` | 76 |
 | **total** | **182** |
+
+Recounted from the rows below on 2026-08-05. Two corrections since plan 05-05 wrote this
+block: `warning` fell from 22 to 21 when plan 05-06 retired the
+`_coulomb_matrix_batch.py` apology described above (that block was not updated at the
+time), and `status` rose from 56 to 57 with the `_scf.py` notice plan 06-03 added.
 
 ### Corrections to the plan-time counts
 
@@ -269,6 +284,7 @@ per-step info line, the convergence confirmation and the step timing -- are `sta
 | `src/dftorch/_patch_sk.py` | 194 | `print(f"\nWrote patched file ({len(lines)} lines)")` | `not-runtime` | R-SCRIPT | - |
 | `src/dftorch/_scf.py` | 267 | `print("### Do _scf ###")` | `status` | R-STATUS | *(task 2)* |
 | `src/dftorch/_scf.py` | 330 | `print(" Initial dm_fermi")` | `status` | R-STATUS | *(task 2)* |
+| `src/dftorch/_scf.py` | 539* | `print( " Ignoring the per-atom initial charges: this loop tracks " "charge per orbital group and starts from a reference " "diagonalization." )` | `status` | R-STATUS | `_lib_out` |
 | `src/dftorch/_scf.py` | 345 | `print(" Initial mu = {:.4f}".format(mu0.item()))` | `status` | R-STATUS | *(task 2)* |
 | `src/dftorch/_scf.py` | 379 | `print("\nStarting cycle")` | `status` | R-STATUS | *(task 2)* |
 | `src/dftorch/_scf.py` | 386 | `print("Iter {}".format(it))` | `status` | R-STATUS | *(task 2)* |

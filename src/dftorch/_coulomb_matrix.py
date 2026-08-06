@@ -764,6 +764,121 @@ def _coul_shell_pair_term(Ti, Tj, dR_pair):
     return t1, dt1
 
 
+def onsite_shell_pair_coulomb(Ui: torch.Tensor, Uj: torch.Tensor) -> torch.Tensor:
+    """Electron repulsion between two orbital groups sitting on the *same* atom.
+
+    What this is, in plain words
+    ---------------------------
+    Every block built by :func:`ewald_real_space_vectorized_sr` describes two
+    orbital groups on two *different* atoms, because the neighbour list it is
+    driven with never pairs an atom with itself.  The interaction between, say,
+    europium's s group and europium's own f group is therefore missing from that
+    matrix entirely - and it is not small: it is the dominant repulsion either
+    group feels.
+
+    The per-atom path has the same hole and fills it the same way, one line
+    later: ``Ecoul = 0.5 * q @ (C @ q) + 0.5 * sum(q**2 * Hubbard_U)``.  That
+    second term *is* the same-atom interaction, and ``Hubbard_U`` is the R -> 0
+    limit of the very function ``C``'s off-site entries are built from.  With
+    one charge per atom there is only one such number per atom, so a single
+    ``U`` suffices.  With one charge per orbital group there are as many as
+    sixteen per atom, and only the four diagonal ones are ``U_l``.
+
+    What this returns
+    -----------------
+    The same limit, for two groups whose strengths differ: the R -> 0 value of
+    ``1/R - S(R)`` where ``S`` is exactly the short-range form
+    :func:`_coul_shell_pair_term` uses off-site.  Nothing new is introduced -
+    this is the existing formula read at zero separation:
+
+    * with ``Ui == Uj`` it returns ``Ui`` (so a molecule whose groups all share
+      one strength reproduces the per-atom expression entry for entry);
+    * otherwise it returns a value strictly between the two, e.g. 7.78 eV for
+      europium's s group (5.71 eV) against its f group (13.61 eV).
+
+    Deriving it
+    -----------
+    With ``a`` and ``b`` the two damping exponents, ``S(R) = e^-aR (SB - SC/R)
+    + e^-bR (SE - SF/R)`` as written in :func:`coul_diff_elem_and_ang`.  The
+    two ``1/R`` pieces cancel against the ``1/R`` in ``gamma`` because
+    ``SC + SF == -1`` identically, leaving
+
+        gamma(0) = -(SB + SE) - (a * SC + b * SF).
+
+    For ``a == b`` that expression is 0/0; the limit is ``5a/16``, which is the
+    same limit :func:`coul_same_elem_and_ang` has, and which equals ``U`` after
+    the ``TFACT`` scaling.  Both branches were checked against the numerical
+    value of the codebase's own functions at R = 1e-5 A.
+
+    Parameters
+    ----------
+    Ui, Uj : torch.Tensor
+        Hubbard U of each group, in eV.  Broadcast against each other, so
+        passing a column and a row vector produces the full pair matrix.
+
+    Returns
+    -------
+    torch.Tensor
+        The same-atom repulsion for each pair, in eV, shaped by broadcasting.
+    """
+    RELPERM = 1.0
+    KECONST = 14.3996437701414 * RELPERM
+    TFACT = 16.0 / (5.0 * KECONST)
+
+    a, b = torch.broadcast_tensors(TFACT * Ui, TFACT * Uj)
+    # Dispatch on strength equality, exactly as _coul_shell_pair_term does: the
+    # different-strength form divides by (a**2 - b**2), which is zero whenever
+    # two of an element's groups happen to carry the same U -- the common case
+    # for a non-extended SKF file.
+    equal_strength = a == b
+    # Substitute a value that cannot collide with `a` so the arithmetic below
+    # stays finite everywhere; those entries are discarded by the where().
+    b_safe = torch.where(equal_strength, b + 1.0, b)
+
+    a2 = a * a
+    b2 = b_safe * b_safe
+    d = a2 - b2
+    SB = b2 * b2 * a / (2 * d * d)
+    SC = (b2**3 - 3 * b2 * b2 * a2) / (d**3)
+    SE = a2 * a2 * b_safe / (2 * d * d)
+    SF = (a2**3 - 3 * a2 * a2 * b2) / ((-d) ** 3)
+    different = -(SB + SE) - (a * SC + b_safe * SF)
+
+    same = 5.0 * a / 16.0
+    return KECONST * torch.where(equal_strength, same, different)
+
+
+def onsite_shell_coulomb_matrix(
+    Hubbard_U_sr: torch.Tensor, shell_to_atom: torch.Tensor
+) -> torch.Tensor:
+    """The same-atom, different-group block of the shell-resolved Coulomb matrix.
+
+    Zero everywhere except between two *different* orbital groups of one atom,
+    which is exactly the set of entries
+    :func:`ewald_real_space_vectorized_sr` cannot produce (its neighbour list
+    never pairs an atom with itself) and that the ``0.5 * sum(q**2 * U)`` term
+    does not cover either (that term is each group against *itself*).
+
+    Adding this to the off-site matrix gives a shell-resolved Coulomb operator
+    with the same convention as the per-atom ``C``: every interaction except
+    each charge against itself, which stays in the ``U`` term.
+
+    Leaving it out is not a simplification, it is a hole.  Measured on the Eu-N
+    diatomic, without it the charge loop never settles: europium's f level
+    responds to its own group's charge at 13.6 eV per electron with nothing on
+    the same atom to screen it, and the charges oscillate between integer
+    fillings.  With it the loop settles.
+    """
+    same_atom = shell_to_atom.unsqueeze(1) == shell_to_atom.unsqueeze(0)
+    different_group = ~torch.eye(
+        len(Hubbard_U_sr), dtype=torch.bool, device=Hubbard_U_sr.device
+    )
+    pair = onsite_shell_pair_coulomb(
+        Hubbard_U_sr.unsqueeze(1), Hubbard_U_sr.unsqueeze(0)
+    )
+    return pair * (same_atom & different_group)
+
+
 def ewald_real_space_vectorized_sr(
     structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA
 ):

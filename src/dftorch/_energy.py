@@ -32,6 +32,10 @@ def energy(
     Te: float,
     dU_dq: torch.Tensor | None = None,
     thirdorder: Any | None = None,
+    *,
+    C_sr: torch.Tensor | None = None,
+    q_sr: torch.Tensor | None = None,
+    U_sr: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -73,6 +77,23 @@ def energy(
         Electronic temperature in Kelvin.
     dU_dq : torch.Tensor, optional
         Derivative of the Hubbard U with respect to charge, shape (Nats,). If provided, adds the DFTB3 third-order correction to the Coulomb energy.
+    C_sr, q_sr, U_sr : torch.Tensor or None, keyword-only
+        The per-orbital-group ("shell-resolved") Coulomb matrix
+        (n_shells, n_shells), charges (n_shells,) and repulsion strengths
+        (n_shells,). Supply **all three** to compute the electron-repulsion
+        energy at the finer resolution — one number per s/p/d/f group of each
+        atom rather than one per atom — which is what the charge loop uses when
+        ``MAGNETIC_HUBBARD_LDEP`` is set. Only the repulsion term changes: the
+        band energy, the dipole term and the entropy keep reading the per-atom
+        quantities, which are still correct because they are the per-group ones
+        summed over each atom.
+
+        Supplying some but not all three raises ``ValueError`` naming the
+        missing ones. A half-supplied request must not fall through to the
+        per-atom arm: the loop and this function would then report a repulsion
+        energy for a different charge state than the one that was converged to,
+        and nothing downstream would notice. Not available for batched
+        calculations.
 
     Returns
     -------
@@ -98,6 +119,30 @@ def energy(
     kB = 8.61739e-5  # eV/K
 
     eps = _entropy_eps(f.dtype)
+
+    # --- Per-orbital-group ("shell-resolved") repulsion energy --------------
+    # All three arguments together mean yes; none of them means no. Anything in
+    # between is a mistake and says so, rather than quietly taking the per-atom
+    # arm below and reporting an energy for a charge state nobody converged to.
+    _sr_names = ("C_sr", "q_sr", "U_sr")
+    _sr_supplied = [
+        name
+        for name, value in zip(_sr_names, (C_sr, q_sr, U_sr))
+        if value is not None
+    ]
+    shell_resolved = len(_sr_supplied) == len(_sr_names)
+    if _sr_supplied and not shell_resolved:
+        _sr_missing = [name for name in _sr_names if name not in _sr_supplied]
+        raise ValueError(
+            "A shell-resolved Coulomb energy needs all of "
+            f"{', '.join(_sr_names)}. Supplied: {', '.join(_sr_supplied)}. "
+            f"Missing: {', '.join(_sr_missing)}."
+        )
+    if shell_resolved and Rx.dim() != 1:
+        raise ValueError(
+            "Batched calculations have no shell-resolved Coulomb energy; "
+            f"{', '.join(_sr_names)} must all be None."
+        )
 
     # Ensure D0 is diagonal for consistent subtraction
     # if D.ndim == 2:
@@ -128,7 +173,12 @@ def energy(
 
     # Coulomb energy
     if Rx.dim() == 1:  # non-batched
-        if C is None and dq_p1 is None:
+        if shell_resolved:
+            # The same expression as the per-atom full-matrix arm below, read
+            # one orbital group at a time. This is what the charge loop
+            # minimised, so it is what the reported total has to be built from.
+            Ecoul = 0.5 * q_sr @ (C_sr @ q_sr) + 0.5 * torch.sum(q_sr**2 * U_sr)
+        elif C is None and dq_p1 is None:
             Ecoul = 0  # structure.e_coul_tmp
         elif C is None and dq_p1 is not None:  # PME
             Ecoul = 0.5 * q @ dq_p1 + 0.5 * torch.sum(q**2 * U)

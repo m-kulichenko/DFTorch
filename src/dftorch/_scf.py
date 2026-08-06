@@ -155,6 +155,56 @@ class _AndersonMixer:
             return q_new
 
 
+#: The five pieces of per-orbital-group data ``SCFx`` needs to run at the finer
+#: resolution, named once so the all-or-nothing check and its error message
+#: cannot drift apart.
+_SHELL_RESOLVED_ARGUMENT_NAMES = (
+    "shell_types",
+    "n_shells_per_atom",
+    "el_per_shell",
+    "Hubbard_U_sr",
+    "C_sr",
+)
+
+
+def _shell_resolved_requested(supplied: Dict[str, Any]) -> bool:
+    """Return whether the caller asked for per-orbital-group charge, or raise.
+
+    All five arguments together mean yes; none of them means no. Any partial
+    combination is a mistake and raises ``ValueError`` naming exactly what is
+    missing. The alternative — falling through to the per-atom arm — is the
+    silent-fallback failure this whole design is arranged against: the caller
+    would hold a per-atom answer while believing it was the finer one.
+    """
+    present = [name for name in _SHELL_RESOLVED_ARGUMENT_NAMES if supplied[name] is not None]
+    if not present:
+        return False
+    if len(present) == len(_SHELL_RESOLVED_ARGUMENT_NAMES):
+        return True
+    missing = [name for name in _SHELL_RESOLVED_ARGUMENT_NAMES if supplied[name] is None]
+    raise ValueError(
+        "Per-orbital-group (shell-resolved) charge needs all of "
+        f"{', '.join(_SHELL_RESOLVED_ARGUMENT_NAMES)}. "
+        f"Supplied: {', '.join(present)}. Missing: {', '.join(missing)}. "
+        "Supply all five or none; a partial request is not served by the "
+        "per-atom path."
+    )
+
+
+def _sum_shells_over_atoms(
+    values: torch.Tensor, shell_to_atom: torch.Tensor, Nats: int
+) -> torch.Tensor:
+    """Add up a per-orbital-group quantity into one number per atom.
+
+    This is how ``q`` keeps being populated while the loop runs at the finer
+    resolution: the per-atom charges are a *view* of the per-group ones, summed,
+    never a separately computed second answer that could drift from them.
+    """
+    per_atom = torch.zeros(Nats, dtype=values.dtype, device=values.device)
+    per_atom.scatter_add_(0, shell_to_atom, values)
+    return per_atom
+
+
 def SCFx(
     dftorch_params: Dict[str, Any],
     RX,
@@ -179,6 +229,12 @@ def SCFx(
     q_init: Optional[torch.Tensor] = None,
     gbsa=None,
     thirdorder=None,
+    *,
+    shell_types: Optional[torch.Tensor] = None,
+    n_shells_per_atom: Optional[torch.Tensor] = None,
+    el_per_shell: Optional[torch.Tensor] = None,
+    Hubbard_U_sr: Optional[torch.Tensor] = None,
+    C_sr: Optional[torch.Tensor] = None,
 ) -> Tuple[
     torch.Tensor,  # H
     torch.Tensor,  # Hcoul
@@ -195,6 +251,7 @@ def SCFx(
     Optional[torch.Tensor],  # dq_p1 (PME only)
     Optional[torch.Tensor],  # stress_coul (PME only)
     int,  # scf_iter_count: pass count on success, -1 if the loop gave up
+    Optional[torch.Tensor],  # q_sr: per-orbital-group charges, None when off
 ]:
     """
     Self-consistent field (_scf) cycle with finite electronic temperature and
@@ -237,6 +294,40 @@ def SCFx(
     C : torch.Tensor
         Coulomb operator. If dftorch_params['COUL_METHOD'] == 'direct',
         used as C @ q to build electrostatic potential; ignored for PME.
+    shell_types, n_shells_per_atom, el_per_shell, Hubbard_U_sr, C_sr :
+        torch.Tensor or None, keyword-only
+        The five pieces of per-orbital-group ("shell-resolved") data. Supply
+        **all five** to run the loop at the finer resolution; leave all five
+        absent — the default — for exactly the per-atom behaviour this function
+        had before they existed. Supplying some but not all is a mistake and
+        raises ``ValueError`` naming the missing ones, rather than quietly
+        taking the per-atom arm.
+
+        What the finer resolution does, in plain words: instead of tracking one
+        charge number and one electron-repulsion strength per *atom*, the loop
+        tracks them separately for each atom's s, p, d and f groups. That
+        matters wherever an element's groups do not share one strength — for
+        europium the s group costs about 5.7 eV per unit of charge and the f
+        group about 13.6 eV, and seven of its nine outer electrons live in the
+        f group. Requirement SCC-03 in Phase 6.
+
+        - ``shell_types``: (n_shells,) the group's angular label, 1/2/3/4 for
+          s/p/d/f, in the layout ``Structure`` builds.
+        - ``n_shells_per_atom``: (Nats,) how many groups each atom contributes,
+          which is what maps groups back to atoms.
+        - ``el_per_shell``: (n_shells,) the reference occupation the per-group
+          tally subtracts, playing the role ``Znuc`` plays per atom.
+        - ``Hubbard_U_sr``: (n_shells,) each group's own repulsion strength.
+        - ``C_sr``: (n_shells, n_shells) the shell-resolved Coulomb matrix.
+
+        Three limits of the finer resolution, all of which raise rather than
+        fall back: PME electrostatics, the third-order DFTB3 correction and
+        GBSA solvation are per-atom constructions with no shell-resolved
+        counterpart. ``q_init`` is *ignored* at the finer resolution — a
+        per-atom starting guess cannot be split across an atom's groups without
+        inventing information — so the loop always starts from a reference
+        diagonalization there. That changes only where the loop starts, never
+        where it lands.
     Returns
     -------
     H : torch.Tensor
@@ -272,6 +363,12 @@ def SCFx(
         ``scf_iter_count != -1``, but the count itself is not thrown away.
         A ``-1`` still comes back alongside the last iterate; the loop warns
         and returns, it never raises (Phase 4 decision D-13).
+    q_sr : torch.Tensor or None
+        The converged charges one per orbital group, (n_shells,), when the loop
+        ran at the finer resolution; ``None`` when it did not. ``q`` above is
+        populated in **both** cases — at the finer resolution it is derived by
+        summing ``q_sr`` over each atom — so every existing caller keeps
+        reading the same attribute it always read.
 
     Notes
     -----
@@ -295,7 +392,79 @@ def SCFx(
         torch.arange(len(n_orbitals_per_atom), device=H0.device), n_orbitals_per_atom
     )  # Generate atom index for each orbital
 
-    Hubbard_U_gathered = Hubbard_U[atom_ids]
+    # --- Per-orbital-group ("shell-resolved") mode --------------------------
+    # All five arguments or none; a partial request raises rather than being
+    # served by the per-atom path.
+    shell_resolved = _shell_resolved_requested(
+        {
+            "shell_types": shell_types,
+            "n_shells_per_atom": n_shells_per_atom,
+            "el_per_shell": el_per_shell,
+            "Hubbard_U_sr": Hubbard_U_sr,
+            "C_sr": C_sr,
+        }
+    )
+    q_sr = None
+    shell_ids = None
+    shell_to_atom = None
+    if shell_resolved:
+        # Three constructions that have no per-orbital-group counterpart. Each
+        # is per-atom by construction, so serving the request would mean
+        # quietly mixing resolutions inside one energy. Refuse instead.
+        if dftorch_params["COUL_METHOD"] == "PME":
+            raise NotImplementedError(
+                "COUL_METHOD='PME' cannot serve a MAGNETIC_HUBBARD_LDEP "
+                "(per-orbital-group) charge loop: no shell-resolved "
+                "reciprocal-space Coulomb matrix exists. Use a real-space "
+                "COUL_METHOD, or unset MAGNETIC_HUBBARD_LDEP."
+            )
+        if dU_dq is not None or thirdorder is not None:
+            raise NotImplementedError(
+                "The third-order DFTB3 correction is per-atom only and cannot "
+                "be combined with a MAGNETIC_HUBBARD_LDEP "
+                "(per-orbital-group) charge loop."
+            )
+        if gbsa is not None:
+            raise NotImplementedError(
+                "GBSA solvation shifts are per-atom only and cannot be "
+                "combined with a MAGNETIC_HUBBARD_LDEP (per-orbital-group) "
+                "charge loop."
+            )
+        # Orbitals per group: 1, 3, 5, 7 for s, p, d, f. This is exactly
+        # ``const.shell_dim[shell_types]`` for the table [0, 1, 3, 5, 7] that
+        # Constants.py:106 defines, written as arithmetic so the loop does not
+        # need a sixth argument to carry a table it can derive.
+        orbitals_per_shell = 2 * shell_types - 1
+        # Both maps are built exactly as the open-shell routine builds them
+        # (it calls the first one ``atom_ids_sr``, despite the name).
+        shell_ids = torch.repeat_interleave(
+            torch.arange(len(shell_types), device=H0.device), orbitals_per_shell
+        )  # Generate orbital-group index for each orbital
+        shell_to_atom = torch.repeat_interleave(
+            torch.arange(len(n_shells_per_atom), device=H0.device), n_shells_per_atom
+        )  # Generate atom index for each orbital group
+        # The groups must tile each atom's orbitals exactly. If they do not,
+        # every gather below lands on the wrong orbital and the answer would
+        # still look plausible, so this is checked rather than assumed.
+        orbitals_from_shells = _sum_shells_over_atoms(
+            orbitals_per_shell, shell_to_atom, Nats
+        )
+        if not bool(
+            torch.equal(
+                orbitals_from_shells.to(n_orbitals_per_atom.dtype),
+                n_orbitals_per_atom,
+            )
+        ):
+            raise ValueError(
+                "The orbital groups do not tile the atoms' orbitals: groups "
+                f"give {orbitals_from_shells.tolist()} orbitals per atom but "
+                f"n_orbitals_per_atom is {n_orbitals_per_atom.tolist()}."
+            )
+
+    if shell_resolved:
+        Hubbard_U_gathered = Hubbard_U_sr[shell_ids]
+    else:
+        Hubbard_U_gathered = Hubbard_U[atom_ids]
     if dU_dq is not None:
         dU_dq_gathered = dU_dq[atom_ids]
     else:
@@ -362,7 +531,16 @@ def SCFx(
         Hdipole = 0.5 * Hdipole @ S + 0.5 * S @ Hdipole
         H0 = H0 + Hdipole
 
-        if q_init is None:
+        if q_init is None or shell_resolved:
+            if shell_resolved and q_init is not None and _lib_out:
+                # Not silent: a per-atom starting guess carries no information
+                # about how the charge is split across an atom's groups, so it
+                # cannot be honoured here. Only the starting point is affected.
+                print(
+                    "  Ignoring the per-atom initial charges: this loop tracks "
+                    "charge per orbital group and starts from a reference "
+                    "diagonalization."
+                )
             Dorth, Q, e, f, mu0 = dm_fermi_x(
                 Z.T @ H0 @ Z, Te, Nocc, mu_0=None, eps=1e-9, MaxIt=50
             )
@@ -372,10 +550,19 @@ def SCFx(
 
             D = Z @ Dorth @ Z.T
             DS = 2 * torch.diag(D @ S)
-            q = -1.0 * Znuc
-            q.scatter_add_(
-                0, atom_ids, DS
-            )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
+            if shell_resolved:
+                # The per-group tally subtracts each group's reference
+                # occupation where the per-atom one subtracts nuclear charge;
+                # the two totals agree, so the two resolutions describe one
+                # answer.  Same construction as the open-shell routine.
+                q_sr = -1.0 * el_per_shell.to(DS.dtype)
+                q_sr.scatter_add_(0, shell_ids, DS)
+                q = _sum_shells_over_atoms(q_sr, shell_to_atom, Nats)
+            else:
+                q = -1.0 * Znuc
+                q.scatter_add_(
+                    0, atom_ids, DS
+                )  # sums elements from DS into q based on number of AOs, e.g. x4 p orbs for carbon or x1 for hydrogen
         else:
             q = q_init.clone()
 
@@ -435,6 +622,8 @@ def SCFx(
                         h5_params=dftorch_params.get("H5_PARAMS", None),
                     )
 
+            elif shell_resolved:
+                CoulPot = C_sr @ q_sr
             else:
                 CoulPot = C @ q
 
@@ -448,12 +637,24 @@ def SCFx(
                 CoulPot = CoulPot + thirdorder.get_shifts(q)
 
             q_old = q.clone()
+            q_sr_old = q_sr.clone() if shell_resolved else None
 
-            q, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q(
+            # calc_q is orbital-level throughout except for its closing
+            # per-atom tally, so the finer resolution enters by handing it the
+            # same three orbital-length arrays gathered from *groups* instead
+            # of from atoms. calc_q itself is untouched.
+            if shell_resolved:
+                charge_gathered = q_sr[shell_ids]
+                potential_gathered = CoulPot[shell_ids]
+            else:
+                charge_gathered = q[atom_ids]
+                potential_gathered = CoulPot[atom_ids]
+
+            q_new, H, Hcoul, D, Dorth, Q, e, f, mu0 = calc_q(
                 H0,
                 Hubbard_U_gathered,
-                q[atom_ids],
-                CoulPot[atom_ids],
+                charge_gathered,
+                potential_gathered,
                 S,
                 Z,
                 Te,
@@ -462,11 +663,33 @@ def SCFx(
                 atom_ids,
                 dU_dq_gathered if thirdorder is None else None,
             )
-            Res = q - q_old
+            if shell_resolved:
+                # Ignore calc_q's per-atom tally and re-tally per group from
+                # the density matrix it returned, then derive the per-atom
+                # charges by summing the groups over each atom so ``q`` stays
+                # correct for every downstream consumer.
+                DS = 2 * (D * S.T).sum(dim=1)
+                q_sr = -1.0 * el_per_shell.to(DS.dtype)
+                q_sr.scatter_add_(0, shell_ids, DS)
+                q = _sum_shells_over_atoms(q_sr, shell_to_atom, Nats)
+                Res = q_sr - q_sr_old
+            else:
+                q = q_new
+                Res = q - q_old
             ResNorm = torch.norm(Res)
 
             # --- Charge mixing ---
-            use_krylov = it > dftorch_params.get("KRYLOV_START", 10)
+            # The Krylov accelerator preconditions with the *per-atom* Coulomb
+            # matrix and per-atom Hubbard U, so it has no counterpart at the
+            # finer resolution: running it there would be precisely the silent
+            # per-atom substitution this design refuses. The Anderson/DIIS
+            # mixer below handles a one-dimensional vector of any length and
+            # is what the finer resolution uses. This changes how the loop
+            # travels, never where it lands -- the fixed point is set by C_sr
+            # and Hubbard_U_sr either way.
+            use_krylov = (not shell_resolved) and it > dftorch_params.get(
+                "KRYLOV_START", 10
+            )
 
             if use_krylov:
                 K0Res = KK @ Res
@@ -504,15 +727,35 @@ def SCFx(
                 q = q_old - K0Res
             elif _mixer is not None:
                 # Anderson / DIIS mixing (pre-Krylov)
-                q = _mixer.mix(q_old, Res)
+                if shell_resolved:
+                    q_sr = _mixer.mix(q_sr_old, Res)
+                    q = _sum_shells_over_atoms(q_sr, shell_to_atom, Nats)
+                else:
+                    q = _mixer.mix(q_old, Res)
             else:
                 # Simple linear mixing fallback
-                K0Res = KK @ Res
-                q = q_old - K0Res
+                if shell_resolved:
+                    # KK is -SCF_ALPHA * I at the per-atom size and is handed
+                    # back to callers that expect that size, so the finer
+                    # resolution applies the same linear step directly rather
+                    # than resizing a matrix other code reads.
+                    q_sr = q_sr_old + dftorch_params["SCF_ALPHA"] * Res
+                    q = _sum_shells_over_atoms(q_sr, shell_to_atom, Nats)
+                else:
+                    K0Res = KK @ Res
+                    q = q_old - K0Res
 
             Ecoul_old = Ecoul
             if dftorch_params["COUL_METHOD"] == "PME":
                 Ecoul = ewald_e1 + 0.5 * torch.sum(q**2 * Hubbard_U)
+            elif shell_resolved:
+                # The same expression as the per-atom line below, read at the
+                # finer resolution throughout. It must match what calc_q was
+                # handed above, or the reported energy would describe a
+                # different charge state than the one the loop converged to.
+                Ecoul = 0.5 * q_sr @ (C_sr @ q_sr) + 0.5 * torch.sum(
+                    q_sr**2 * Hubbard_U_sr
+                )
             else:
                 Ecoul = 0.5 * q @ (C @ q) + 0.5 * torch.sum(q**2 * Hubbard_U)
 
@@ -550,8 +793,13 @@ def SCFx(
 
     D = Z @ Dorth @ Z.T
     DS = 2 * (D * S.T).sum(dim=1)
-    q = -1.0 * Znuc
-    q.scatter_add_(0, atom_ids, DS)
+    if shell_resolved:
+        q_sr = -1.0 * el_per_shell.to(DS.dtype)
+        q_sr.scatter_add_(0, shell_ids, DS)
+        q = _sum_shells_over_atoms(q_sr, shell_to_atom, Nats)
+    else:
+        q = -1.0 * Znuc
+        q.scatter_add_(0, atom_ids, DS)
 
     if dftorch_params["COUL_METHOD"] == "PME":
         ewald_e1, forces1, dq_p1, stress_coul = calculate_PME_ewald(
@@ -593,6 +841,7 @@ def SCFx(
         dq_p1,
         stress_coul,
         scf_iter_count,
+        q_sr,
     )
 
 

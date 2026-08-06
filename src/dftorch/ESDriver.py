@@ -10,6 +10,7 @@ from dftorch._spin import get_h_spin, get_spin_energy #For charge unbinding
 from ._coulomb_matrix import (
     coulomb_matrix_vectorized,
     ewald_real_space_vectorized_sr,
+    onsite_shell_coulomb_matrix,
 )
 from ._dftd3 import create_dftd3 #DFTB 3 correction
 from ._dm_fermi_x import dm_fermi_x #single diagonalization + Fermi occupations
@@ -252,13 +253,19 @@ class ESDriver(torch.nn.Module):
         When ``MAGNETIC_HUBBARD_LDEP`` is set, the non-PME branch additionally
         builds the shell-resolved Coulomb matrix into ``structure.C_sr`` /
         ``structure.dCC_sr`` alongside the per-atom ``structure.C``, which is
-        left untouched (decision D-23). Under ``COUL_METHOD="PME"`` the
-        shell-resolved matrix is **not** built and both attributes stay
-        ``None``: there is no real-space neighbor list at that point and no
-        shell-resolved reciprocal-space counterpart. ``C_sr`` has no consumer in
-        this phase — ``energy()`` and ``SCFx`` take ``(Nats, Nats)`` with
-        per-atom charges — and threading shell-resolved charges through the SCF
-        loop is deferred by D-11.
+        left untouched (decision D-23). Since requirement SCC-03 that matrix
+        has a consumer: the closed-shell charge loop tracks and feeds back one
+        charge per orbital group instead of one per atom, and reports them on
+        ``structure.q_sr``. ``structure.q`` is still populated — at the finer
+        resolution it is the per-group charges summed over each atom — so every
+        existing caller reads exactly the attribute it always read.
+
+        Two configurations cannot supply a shell-resolved matrix and therefore
+        **refuse** rather than falling back to the per-atom one:
+        ``COUL_METHOD="PME"``, which has no shell-resolved reciprocal-space
+        counterpart, and the third-order DFTB3 correction, which is per-atom
+        only. Both raise ``NotImplementedError`` naming the parameter keys
+        involved.
 
         Returns
         -------
@@ -400,6 +407,39 @@ class ESDriver(torch.nn.Module):
         # regardless of which Coulomb branch ran (D-23 / D-14).
         structure.C_sr = None
         structure.dCC_sr = None
+        structure.C_sr_onsite = None
+        structure.C_sr_scf = None
+        structure.q_sr = None
+
+        # Which resolution the electrostatics are asked for, decided once for
+        # the whole call. Read here rather than inside the real-space branch so
+        # the two refusals below can fire for the configurations that cannot
+        # supply a shell-resolved matrix at all.
+        _, shell_resolved_hubbard = _select_coulomb_hubbard(structure, const)
+        if shell_resolved_hubbard:
+            # Both messages name parameter keys only and interpolate no
+            # filesystem path (Phase 4 policy T-04-07). A plain
+            # NotImplementedError, not a fifth F* class: neither gap is about f
+            # orbitals — no shell-resolved reciprocal-space matrix exists for
+            # any element — and Phase 5 set this precedent for exactly that
+            # case.
+            if self.dftorch_params["COUL_METHOD"] == "PME":
+                raise NotImplementedError(
+                    "MAGNETIC_HUBBARD_LDEP asks for per-orbital-group "
+                    "(shell-resolved) electrostatics, but COUL_METHOD='PME' "
+                    "has no shell-resolved reciprocal-space Coulomb matrix to "
+                    "build one from. Answering with the per-atom matrix would "
+                    "hand back a coarser result under the finer result's name. "
+                    "Use a real-space COUL_METHOD, or unset "
+                    "MAGNETIC_HUBBARD_LDEP."
+                )
+            if structure.dU_dq is not None:
+                raise NotImplementedError(
+                    "MAGNETIC_HUBBARD_LDEP asks for per-orbital-group "
+                    "(shell-resolved) electrostatics, but the third-order "
+                    "DFTB3 correction is per-atom only. Disable DFTB3, or "
+                    "unset MAGNETIC_HUBBARD_LDEP."
+                )
 
         if self.dftorch_params["COUL_METHOD"] == "PME":
             if (
@@ -486,8 +526,9 @@ class ESDriver(torch.nn.Module):
             # SCF loop (deferred by D-11).  For an f system this call now builds
             # all sixteen shell-pair blocks; it used to refuse, because only
             # nine existed and the f atom's non-s rows came back silently zero.
-            # Requirement SCC-02 in Phase 6 retired that refusal.
-            _, shell_resolved_hubbard = _select_coulomb_hubbard(structure, const)
+            # Requirement SCC-02 in Phase 6 retired that refusal.  Since
+            # SCC-03 the matrix has a consumer: the charge loop reads it when
+            # this same flag is set.
             if shell_resolved_hubbard:
                 Ra_sr = torch.stack(
                     (
@@ -511,6 +552,33 @@ class ESDriver(torch.nn.Module):
                     CALPHA,
                 )
                 del Ra_sr, Rab_sr, dR_sr, dR_dxyz_sr
+
+                # The builder above is driven with a neighbour list that never
+                # pairs an atom with itself, so it carries no interaction
+                # between two orbital groups of one atom -- and that is the
+                # largest interaction either group feels.  The per-atom path
+                # has the same hole and fills it with the 0.5*sum(q**2 * U)
+                # term, which only covers each charge against *itself*; one
+                # charge per atom is all that term needs, one charge per group
+                # is not.  Kept as its own matrix rather than folded into C_sr
+                # so C_sr keeps exactly the meaning plan 06-02 gave it: the
+                # off-site blocks, mirroring the per-atom C.
+                structure.C_sr_onsite = onsite_shell_coulomb_matrix(
+                    structure.Hubbard_U_sr,
+                    torch.repeat_interleave(
+                        torch.arange(
+                            structure.Nats, device=structure.Hubbard_U_sr.device
+                        ),
+                        structure.n_shells_per_atom,
+                    ),
+                )
+                # The two together carry every interaction except each group's
+                # charge against itself, which is exactly the convention the
+                # per-atom `C` follows (its self term lives in `Hubbard_U`).
+                # Built once, here, and handed to both the charge loop and
+                # energy(), so the two cannot end up computing the repulsion
+                # energy at different resolutions (threat T-06-16).
+                structure.C_sr_scf = structure.C_sr + structure.C_sr_onsite
 
             # ── Full off-diagonal DFTB3 third-order matrices ────────────
             if (
@@ -742,6 +810,21 @@ class ESDriver(torch.nn.Module):
                     )
 
             else:  # closed-shell
+                # Per-orbital-group charge is opt-in and all-or-nothing: five
+                # arguments when the flag is set, none of them otherwise, so
+                # an unset flag reproduces the previous call exactly.
+                #
+                shell_resolved_scf_kwargs = (
+                    {
+                        "shell_types": structure.shell_types,
+                        "n_shells_per_atom": structure.n_shells_per_atom,
+                        "el_per_shell": structure.el_per_shell,
+                        "Hubbard_U_sr": structure.Hubbard_U_sr,
+                        "C_sr": structure.C_sr_scf,
+                    }
+                    if shell_resolved_hubbard
+                    else {}
+                )
                 (
                     structure.H,
                     structure.Hcoul,
@@ -758,6 +841,7 @@ class ESDriver(torch.nn.Module):
                     structure.dq_p1,
                     structure.stress_coulomb,
                     structure.scf_iter_count,
+                    structure.q_sr,
                 ) = SCFx(
                     scf_params,
                     structure.RX,
@@ -782,9 +866,22 @@ class ESDriver(torch.nn.Module):
                     structure.q,
                     gbsa=structure.gbsa,
                     thirdorder=structure.thirdorder,
+                    **shell_resolved_scf_kwargs,
                 )
                 structure.e_spin = 0.0
 
+            # energy() must read the electron-repulsion energy at the same
+            # resolution the loop used, or structure.e_tot would describe a
+            # different charge state than the one that was converged to.
+            shell_resolved_energy_kwargs = (
+                {
+                    "C_sr": structure.C_sr_scf,
+                    "q_sr": structure.q_sr,
+                    "U_sr": structure.Hubbard_U_sr,
+                }
+                if structure.q_sr is not None
+                else {}
+            )
             (
                 structure.e_elec_tot,
                 structure.e_band0,
@@ -808,6 +905,7 @@ class ESDriver(torch.nn.Module):
                 structure.Te,
                 structure.dU_dq,
                 thirdorder=structure.thirdorder,
+                **shell_resolved_energy_kwargs,
             )
 
             structure.e_tot = (
