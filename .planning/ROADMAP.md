@@ -178,7 +178,24 @@ Plans:
   4. The shell-resolved f charge/Hubbard plumbing validated but unconsumed in Phase 4 (D-14) is consumed by the self-consistent path.
   5. The Phase 4 single-shot path and its pinned reference energy remain available and unbroken.
 
-**Plans**: TBD
+**Plans**: 1/5 plans executed
+Plans:
+**Wave 1**
+
+- [x] 06-01-PLAN.md — Tracer: disable the Krylov accelerator for f systems, get Eu-N settling at 2.655 A, and return a real convergence result (iteration count, or -1) from all four SCF loops.
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 06-02-PLAN.md — Build the seven missing f angular blocks of the shell-resolved Coulomb matrix, widen the six existing masks that silently skipped f pairs, and retire the refusal across code and both support documents.
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 06-03-PLAN.md — Consume shell-resolved charges inside the closed-shell SCF loop and its energy, so Eu's f electrons are charged at the f Hubbard U rather than the s one.
+- [ ] 06-04-PLAN.md — Write the verdict on the 10.6 eV single-shot / self-consistent difference, record the Constants.py:232 s-shell Hubbard U defect in place, and close the D-6.06 roadmap tension.
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [ ] 06-05-PLAN.md — Recompute the Eu-N binding curves from live code and put the graph in front of a human. Blocking final gate.
 
 ### Phase 7: f Angular Derivatives
 
@@ -257,7 +274,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 8.1 -> 
 | 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
 | 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
 | 5. Regression Safety and Support Policy Cleanup | 8/8 | Complete    | 2026-08-03 |
-| 6. Self-Consistent SCF for f Systems | 0/TBD | Not started | - |
+| 6. Self-Consistent SCF for f Systems | 1/5 | In Progress|  |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |
 | 8.1. Batched f H0/S Routing | 0/TBD | Not started | - |

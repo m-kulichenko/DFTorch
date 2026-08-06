@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 05
-status: completed
-stopped_at: Completed 05-06-PLAN.md (D-04 orbital-count audit); next 05-07
-last_updated: "2026-08-03T21:58:33.333Z"
-last_activity: 2026-08-03
-last_activity_desc: Phase 05 marked complete
+current_phase: 06
+current_phase_name: self-consistent-scf-for-f-systems
+status: executing
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-08-06T02:06:11.692Z"
+last_activity: 2026-08-04
+last_activity_desc: Phase 06 execution started
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 4
-  total_plans: 17
-  completed_plans: 16
-current_phase_name: regression-safety-and-support-policy-cleanup
+  total_plans: 22
+  completed_plans: 17
 ---
 
 # Project State
@@ -23,16 +23,16 @@ current_phase_name: regression-safety-and-support-policy-cleanup
 See: .planning/PROJECT.md (updated 2026-07-17)
 
 **Core value:** DFTorch can run scientifically valid f-orbital DFTB simulations without changing numerical results for existing simple-format calculations.
-**Current focus:** Phase 05 — regression-safety-and-support-policy-cleanup
+**Current focus:** Phase 06 — self-consistent-scf-for-f-systems
 
 ## Current Position
 
-Phase: 05 — COMPLETE
-Plan: 6 of 8
-Status: Phase 05 complete
-Last activity: 2026-08-03 — Phase 05 marked complete
+Phase: 06 (self-consistent-scf-for-f-systems) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
+Last activity: 2026-08-04 — Phase 06 execution started
 
-Progress: [████████░░] 82%
+Progress: [████████░░] 77%
 
 ## Performance Metrics
 
@@ -76,6 +76,7 @@ Progress: [████████░░] 82%
 | Phase 05 P03 | 10 min | 2 tasks | 2 files |
 | Phase 05 P04 | 85 min | 3 tasks | 8 files |
 | Phase 05 P06 | 47 min | 2 tasks | 7 files |
+| Phase 06 P01 | 115 min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 05]: Phase 5 (plan 05-06): the sweep must blank FSTRING_START/MIDDLE/END, not just STRING. On Python 3.12+ an f-string is no longer one STRING token, so the first run swept the guards' own error messages (ESDriver.py:63/103) and MISSED their real counts == 16 comparisons (:60/:95) -- the audit pointed at its own documentation instead of its own code.
 - [Phase 05]: Phase 5 (plan 05-06): the plan-time claim that newline flattening is what prevents undercounting is only half true and the measurement is recorded. Per-line vs flattened at pair level in _h0ands.py is 9 vs 25, so a grep pipeline does undercount; but whole-text matching with \s* separators already crosses newlines, giving 157 records either way. Flattening is kept as a structural guarantee, not as the thing that makes the sweep complete.
 - [Phase 05]: Phase 5 (plan 05-06): _coulomb_matrix_batch's do_vec printed apology is classified OUT of D-04's row set -- nothing in that branch reads n_orb, max_ang or the basis layout -- and resolved anyway with plain NotImplementedError. No new exception class; test_no_new_f_exception_class_was_defined pins the F* taxonomy at exactly four.
+- [Phase ?]: Phase 6 (plan 06-01): the Eu-N charge-loop runaway was the Krylov accelerator (kernel_update_lr), NOT the f orbitals. Switched off for f systems only via _krylov_params_for_f_interim (ESDriver.py:108), which engages only when some atom has const.n_orb[TYPE] == 16 AND the caller has not set KRYLOV_START, and returns a shallow COPY so a reused driver cannot leak the setting into a later f-free molecule (threat T-06-02). The _scf.py default is untouched at all five executable sites (still 10). Repairing the accelerator is deferred by the recorded human ruling of 2026-08-04; this helper is the single place to delete when the repair lands.
+- [Phase ?]: Phase 6 D-6.04 (plan 06-01): all four charge loops (SCFx, scf_x_os, SCFx_batch, delta_scf_x_os) return scf_iter_count as the last tuple element -- int(it) when both of that loop's OWN tolerance clauses hold, the literal -1 otherwise -- after scipy's iterative solvers. A boolean was explicitly rejected: it discards the pass count. Each loop has exactly ONE production call site (ESDriver.py:615/688/760/1844, verified after the edits, not predicted), all four unpack into structure.scf_iter_count, and all four print('Did not converge') warnings survive per D-13. test_all_four_charge_loops_report_a_convergence_result watches the WIRING by source inspection, because three of the four have no cheap f fixture -- the REG-06 blind spot Phase 5 recorded.
+- [Phase ?]: Phase 6 (plan 06-01): non-convergence is forced in tests by lowering SCF_MAX_ITER to 2, never by re-enabling the accelerator bug, so the test cannot start passing for the wrong reason the day the accelerator is repaired. D-6.08 held: no energy, charge or binding-curve value is frozen -- checked mechanically, no assignment RHS in tests/test_scf_convergence_f.py carries a float literal with more than three decimal digits; the only literals are separations, tolerances, the 2.0 runaway bound (factor-of-three headroom, a detector not a reference) and the sentinel -1.
 
 ### Pending Todos
 
@@ -152,6 +156,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-03T02:45:41.307Z
-Stopped at: Completed 05-06-PLAN.md (D-04 orbital-count audit); next 05-07
+Last session: 2026-08-06T02:06:11.669Z
+Stopped at: Completed 06-01-PLAN.md
 Resume file: None
