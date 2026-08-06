@@ -148,9 +148,7 @@ def _elements_in(skf_dir: Path):
     element added to a fixture set is checked without anyone remembering to
     extend a list here.
     """
-    symbols = sorted(
-        {path.name.split("-")[0] for path in skf_dir.glob("*.skf")}
-    )
+    symbols = sorted({path.name.split("-")[0] for path in skf_dir.glob("*.skf")})
     return [s for s in symbols if (skf_dir / f"{s}-{s}.skf").exists()]
 
 
@@ -395,8 +393,7 @@ def test_all_seven_f_blocks_are_populated(tmp_path):
             col = _shell_index(structure, 1, shell_j)
             if float(CC[row, col]) == 0.0:
                 empty.append(
-                    f"{SHELL_NAMES[shell_i]}-{SHELL_NAMES[shell_j]} "
-                    f"(CC[{row}, {col}])"
+                    f"{SHELL_NAMES[shell_i]}-{SHELL_NAMES[shell_j]} (CC[{row}, {col}])"
                 )
         assert not empty, (
             "these f blocks came back exactly zero on an Eu-Eu pair, which means "
@@ -587,6 +584,58 @@ def test_f_free_matrix_still_has_no_empty_row(tmp_path):
         assert dCC.shape == (3, n_sh, n_sh)
         assert bool(torch.isfinite(CC).all())
 
+        row_sums = CC.sum(dim=1)
+        assert not bool((row_sums == 0.0).any()), (
+            f"an all-zero row would mean a silently dropped shell: {row_sums}"
+        )
+
+    run_with_float64(check)
+
+
+def test_a_pair_with_equal_shell_strengths_is_finite(tmp_path):
+    """A molecule of one element whose shell strengths are equal is not NaN.
+
+    Found while building the reduction identity above, and fixed here rather
+    than deferred (it is a divide-by-zero on a live path, not a new feature).
+
+    ``coul_diff_elem_and_ang`` divides by ``Ti**2 - Tj**2``.  The nine
+    pre-existing blocks chose between it and the equal-strength closed form by
+    testing whether the two atoms were the same *element*, and only the three
+    diagonal blocks did even that.  So the s-p block always took the
+    different-element branch - including for two atoms of the same element,
+    where s and p read the same element's two strength tables.  A
+    non-extended-format SKF file writes one Hubbard U per shell and they are
+    usually identical: ``tests/f_orbital_data/N-N.skf`` carries
+    Us = Up = Ud = 0.490 Ha, so an N2 molecule divided by zero and produced NaN
+    in a finite, correctly shaped matrix - the same class of defect as the empty
+    f blocks, arriving from the other direction.
+
+    ``_coul_shell_pair_term`` now dispatches on whether the two damping
+    exponents are equal rather than on element identity.  The equal-strength
+    form is the limit of the different-strength one, so this only ever replaces
+    a non-finite value with the value it was the limit of.
+    """
+
+    def check():
+        xyz_path = tmp_path / "n2.xyz"
+        _write_xyz(xyz_path, ["N", "N"], spacing=1.1)
+        const, structure = _build(xyz_path, _skf_dir())
+
+        n_atom = const.symbol_to_number["N"]
+        assert float(const.U[n_atom]) == float(const.Up[n_atom]), (
+            "this test only proves anything while N's s and p Hubbard U are "
+            f"equal; they are now {float(const.U[n_atom])} and "
+            f"{float(const.Up[n_atom])} eV. Re-point it at an element whose "
+            "shell strengths still coincide."
+        )
+
+        CC, dCC = _call_shell_resolved_coulomb(const, structure)
+        assert bool(torch.isfinite(CC).all()), (
+            f"N2 has equal s and p Hubbard U, and the matrix came back non-finite: {CC}"
+        )
+        assert bool(torch.isfinite(dCC).all()), (
+            "N2 matrix derivative came back non-finite"
+        )
         row_sums = CC.sum(dim=1)
         assert not bool((row_sums == 0.0).any()), (
             f"an all-zero row would mean a silently dropped shell: {row_sums}"

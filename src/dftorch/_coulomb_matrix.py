@@ -6,10 +6,6 @@ from typing import Dict, Optional  # <-- add Optional, Dict
 
 import torch
 
-from ._slater_koster_pair import (
-    F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE,
-    FShellResolvedCoulombUnsupportedError,
-)
 from ._tools import _maybe_compile
 
 # ── Van der Waals radii (Bondi / Mantina) in Angstrom ───────────────────
@@ -687,39 +683,87 @@ ewald_real_space_vectorized = _maybe_compile(ewald_real_space_vectorized)
 ewald_k_space_vectorized = _maybe_compile(ewald_k_space_vectorized)
 
 
-def _require_no_f_shell_resolved_coulomb(structure, TYPE, context: str) -> None:
-    """Reject shell-resolved Coulomb assembly for systems containing f orbitals.
+def _shell_pair_mask(max_ang_I, max_ang_J, shell_i: int, shell_j: int):
+    """Neighbour pairs where atom I carries shell ``shell_i`` and J carries ``shell_j``.
 
-    :func:`ewald_real_space_vectorized_sr` covers ``max_ang`` 1, 2 and 3 only.
-    An f element has ``max_ang == 4``, so its p, d and f shell rows and columns
-    would come back exactly zero inside an otherwise finite, correctly shaped
-    matrix. Zero is a legal-looking Coulomb entry, which is why this refuses
-    rather than returning an f-incomplete result. See
-    :class:`~._slater_koster_pair.FShellResolvedCoulombUnsupportedError`.
+    One uniform rule in place of the sixteen hand-enumerated named masks the
+    sixteen blocks would otherwise need.  In this codebase's encoding an atom's
+    ``max_ang`` is 1 for s-only, 2 for s+p, 3 for s+p+d and 4 for s+p+d+f, while
+    a shell is numbered 0 for s, 1 for p, 2 for d and 3 for f.  So "atom I
+    actually carries shell ``shell_i``" is exactly ``max_ang_I > shell_i``.
 
-    Modelled on ``ESDriver._require_f_derivatives``: it tolerates a structure
-    that carries no ``const`` / ``n_orb`` (returning without opinion) so it can
-    be called unconditionally as the guarded function's first statement.
+    This reproduces every one of the nine pre-existing blocks exactly, including
+    the unmasked s-s case (``max_ang > 0`` is true for every atom).  Worked
+    through, with H, X and Y the old names for ``max_ang`` 1, 2 and 3:
+
+    ==========  ==============================  ==========================
+    block       old mask                        this rule
+    ==========  ==============================  ==========================
+    s-s         no mask (all pairs)             always true - all pairs
+    s-p         HX + XX + HY + YY + XY + YX     J in {X, Y}   - same six
+    p-s         XH + XX + YH + YY + XY + YX     I in {X, Y}   - same six
+    p-p         XX + YY + XY + YX               both in {X, Y} - same four
+    s-d         HY + XY + YY                    J = Y         - same three
+    d-s         YH + YX + YY                    I = Y         - same three
+    p-d         XY + YY                         I in {X, Y}, J = Y - same two
+    d-p         YX + YY                         I = Y, J in {X, Y} - same two
+    d-d         YY                              I = J = Y     - same one
+    ==========  ==============================  ==========================
+
+    The old masks tested ``max_ang`` against 1, 2 and 3 only, so an f atom
+    (``max_ang == 4``) matched none of the six off-diagonal ones and fell
+    straight through - which is why an f system used to come back with every row
+    zero except the two s rows.  Requirement SCC-02 in Phase 6.
     """
-    const = getattr(structure, "const", None)
-    if const is None:
-        return
-    n_orb = getattr(const, "n_orb", None)
-    if n_orb is None or TYPE is None:
-        return
-    valid = TYPE >= 0
-    if not bool(valid.any()):
-        return
-    counts = n_orb[TYPE.clamp(min=0)]
-    if bool((valid & (counts == 16)).any()):
-        raise FShellResolvedCoulombUnsupportedError(
-            f"{context}: this system contains at least one atom with "
-            f"n_orb == 16 (an f-shell element).\n"
-            f"{F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE}"
+    return (max_ang_I > shell_i) & (max_ang_J > shell_j)
+
+
+def _coul_shell_pair_term(Ti, Tj, dR_pair):
+    """Short-range damping term for one shell pair, and its distance derivative.
+
+    Selects between the two closed forms by whether the two damping exponents
+    are **equal**, not by whether the two atoms are the same element.
+
+    Those two conditions coincide for the s-s, p-p, d-d and f-f blocks, where
+    both sides read the same strength table, so this reproduces the pre-existing
+    same-element branches exactly.  They do **not** coincide for a block that
+    reads two different tables: an atom paired with another atom of its own
+    element still contributes to the s-p block, and if that element's s and p
+    strengths happen to be equal - which is the common case, since a
+    non-extended SKF file writes one Hubbard U per shell and they are usually
+    identical - then ``coul_diff_elem_and_ang`` divides by ``Ti**2 - Tj**2``,
+    i.e. by zero.  ``tests/f_orbital_data/N-N.skf`` carries Us = Up = Ud = 0.490
+    Ha, so an N2 molecule was one such case.
+
+    ``coul_same_elem_and_ang`` is the limit of ``coul_diff_elem_and_ang`` as the
+    two exponents approach each other, so this only ever replaces a non-finite
+    value with the value it was the limit of.  No pair that produced a finite
+    number before produces a different one now.
+    """
+    t1 = torch.zeros_like(dR_pair)
+    dt1 = torch.zeros_like(dR_pair)
+
+    equal_strength = Ti == Tj
+    if bool(equal_strength.any()):
+        same_t1, same_dt1 = coul_same_elem_and_ang(
+            Ti[equal_strength], dR_pair[equal_strength]
         )
+        t1[equal_strength] = same_t1
+        dt1[equal_strength] = same_dt1
+
+    different_strength = ~equal_strength
+    if bool(different_strength.any()):
+        diff_t1, diff_dt1 = coul_diff_elem_and_ang(
+            Ti[different_strength],
+            Tj[different_strength],
+            dR_pair[different_strength],
+        )
+        t1[different_strength] = diff_t1
+        dt1[different_strength] = diff_dt1
+
+    return t1, dt1
 
 
-### not working shell-resolved ###
 def ewald_real_space_vectorized_sr(
     structure, dR, dR_dxyz, TYPE, nnType, neighbor_I, neighbor_J, CALPHA
 ):
@@ -763,39 +807,40 @@ def ewald_real_space_vectorized_sr(
     H_INDEX_START, H_INDEX_END : torch.Tensor
         Index mappings for block matrix ranges (not used directly).
     CALPHA : float
-        Ewald real-space damping parameter (α), typically precomputed externally.
+        Ewald real-space damping parameter, typically precomputed externally.
 
     Returns
     -------
-    CC_real : torch.Tensor of shape (Nr_atoms, Nr_atoms)
-        Real-space contribution to the Coulomb interaction matrix.
-    dCC_dxyz_real : torch.Tensor of shape (3, Nr_atoms, Nr_atoms)
+    CC_real : torch.Tensor of shape (n_shells, n_shells)
+        Real-space contribution to the shell-resolved Coulomb interaction matrix.
+    dCC_dxyz_real : torch.Tensor of shape (3, n_shells, n_shells)
         Derivatives of the real-space Coulomb interaction with respect to x, y, and z.
 
     Notes
     -----
+    - All **sixteen** ordered shell-pair blocks are built: s-s, s-p, s-d, s-f,
+      p-s, ... , f-f.  Requirement SCC-02 in Phase 6 added the seven involving
+      f; before it there were nine, and an f atom matched none of the six
+      off-diagonal masks and fell through them to zero.  The refusal that used
+      to guard this function (``FShellResolvedCoulombUnsupportedError``) is
+      retired; the class is kept, with a retirement note, so the f support
+      taxonomy stays reviewable as one list.
+    - Each block selects its pairs with :func:`_shell_pair_mask`, which encodes
+      "atom I carries shell l_i and atom J carries shell l_j" as
+      ``(max_ang_I > l_i) & (max_ang_J > l_j)``.  A block writes into row
+      ``H_INDEX_START_U[atom] + l_i`` and column ``H_INDEX_START_U[atom] + l_j``;
+      that fixed offset is only a valid address because every shipped element's
+      shells are a contiguous run starting at s, which
+      ``tests/test_shell_resolved_coulomb_f.py::test_orbital_groups_are_a_contiguous_run_from_s``
+      states out loud.
     - This function computes the pairwise Coulomb interactions between atoms and their neighbors
-      within a real-space cutoff derived from the Ewald α parameter.
-    - It includes analytical short-range corrections for both same-element and different-element
-      atomic pairs using atom-dependent Hubbard U parameters.
+      within a real-space cutoff derived from the Ewald alpha parameter.
+    - It includes analytical short-range corrections for both same-strength and
+      different-strength shell pairs using shell-dependent Hubbard U parameters.
     - Derivatives (dCC/dR) are calculated analytically using the chain rule applied to screened
       Coulomb functions and short-range exponential terms.
-    - Output matrices are assembled via scatter operations using index_put_ with accumulation.
-    - Only the upper triangle of the interaction matrix is filled; symmetry must be enforced externally if needed.
-
-    Raises
-    ------
-    FShellResolvedCoulombUnsupportedError
-        If any atom carries 16 orbitals (an f element). The pair masks below
-        cover ``max_ang`` 1, 2 and 3 only, so an f system would otherwise get a
-        matrix whose non-s shell rows and columns are silently zero.
+    - Output matrices are assembled via scatter operations with accumulation.
     """
-    # First statement on purpose: every caller, present and future, is covered
-    # rather than only the ESDriver call site.
-    _require_no_f_shell_resolved_coulomb(
-        structure, TYPE, "_coulomb_matrix.ewald_real_space_vectorized_sr"
-    )
-
     CALPHA2 = CALPHA**2
     RELPERM = 1.0
     KECONST = 14.3996437701414 * RELPERM
@@ -806,22 +851,6 @@ def ewald_real_space_vectorized_sr(
     max_ang_I = structure.const.max_ang[TYPE[neighbor_I]]
     max_ang_J = structure.const.max_ang[TYPE[neighbor_J]]
 
-    # H/X/Y below denote max_ang 1 (s only), 2 (s+p) and 3 (s+p+d).  These masks
-    # cover max_ang 1, 2 and 3 *only* — there is deliberately no Z (max_ang == 4,
-    # f) class.  An f atom is refused by _require_no_f_shell_resolved_coulomb
-    # above rather than falling through these masks to zero; do not re-derive
-    # that defect by "fixing" the fall-through here without implementing the
-    # seven f angular blocks.
-    # pair_mask_HH = (max_ang_I == 1) * (max_ang_J == 1)
-    pair_mask_HX = (max_ang_I == 1) * (max_ang_J == 2)
-    pair_mask_XH = (max_ang_I == 2) * (max_ang_J == 1)
-    pair_mask_XX = (max_ang_I == 2) * (max_ang_J == 2)
-
-    pair_mask_HY = (max_ang_I == 1) * (max_ang_J == 3)
-    pair_mask_XY = (max_ang_I == 2) * (max_ang_J == 3)
-    pair_mask_YH = (max_ang_I == 3) * (max_ang_J == 1)
-    pair_mask_YX = (max_ang_I == 3) * (max_ang_J == 2)
-    pair_mask_YY = (max_ang_I == 3) * (max_ang_J == 3)
     CC_real = torch.zeros((CDIM**2), device=dR.device, dtype=dR.dtype)
     dCC_dxyz_real = torch.zeros((3, CDIM**2), device=dR.device, dtype=dR.dtype)
 
@@ -830,212 +859,206 @@ def ewald_real_space_vectorized_sr(
     dR_mskd = dR[nn_mask]
     dR_dxyz_mskd = dR_dxyz[nn_mask].T
     CA = torch.erfc(CALPHA * dR_mskd) / dR_mskd
-    tmp1 = CA.clone()
-    dtmp1 = -(CA + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd**2) / SQRTPI) / dR_mskd
+
+    # The sixteen ordered shell-pair blocks, in the order s, p, d, f for the row
+    # shell and the same order for the column shell.  Every block has the same
+    # shape on purpose: a block that differed structurally from its neighbours
+    # is how the seven f blocks went missing in the first place.
 
     ### s-s ###
-    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I]]
-    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J]]
-    mask_same_elem = structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J]
-    if mask_same_elem.any():
-        dR_mskd_same = dR_mskd[mask_same_elem]
-        Ti_same_el = Ti[mask_same_elem]
-        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
-        tmp1[mask_same_elem] -= t1
-        dtmp1[mask_same_elem] -= dt1
-    if (~mask_same_elem).any():
-        dR_mskd_diff = dR_mskd[~mask_same_elem]
-        Ti_diff_el = Ti[~mask_same_elem]
-        Tj_diff_el = Tj[~mask_same_elem]
-        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
-        tmp1[~mask_same_elem] -= t1
-        dtmp1[~mask_same_elem] -= dt1
-    tmp1 *= KECONST
-    dtmp1 *= KECONST
-    idx_row = structure.H_INDEX_START_U[neighbor_I] * CDIM
-    idx_col = structure.H_INDEX_START_U[neighbor_J]
-    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
-    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd)
-
-    ### s-p ###
-    tmp_mask = (
-        pair_mask_HX
-        + pair_mask_XX
-        + pair_mask_HY
-        + pair_mask_YY
-        + pair_mask_XY
-        + pair_mask_YX
-    )
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 0, 0)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 0) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 0
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### s-p ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 0, 1)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
     Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
     Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
     tmp1 -= t1
-    tmp1 *= KECONST
     dtmp1 -= dt1
-    dtmp1 *= KECONST
-    idx_row = structure.H_INDEX_START_U[neighbor_I[tmp_mask]] * CDIM
-    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
-    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
-    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
-
-    ### p-s ###
-    tmp_mask = (
-        pair_mask_XH
-        + pair_mask_XX
-        + pair_mask_YH
-        + pair_mask_YY
-        + pair_mask_XY
-        + pair_mask_YX
-    )
-    tmp1 = CA[tmp_mask].clone()
-    dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
-    )
-    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
-    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
-    tmp1 -= t1
-    tmp1 *= KECONST
-    dtmp1 -= dt1
-    dtmp1 *= KECONST
-    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
-    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]
-    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
-    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
-
-    ### p-p ###
-    tmp_mask = pair_mask_XX + pair_mask_YY + pair_mask_XY + pair_mask_YX
-    tmp1 = CA[tmp_mask].clone()
-    dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
-    )
-    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
-    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
-    # mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
-    if mask_same_elem.any():
-        dR_mskd_same = dR_mskd[mask_same_elem & tmp_mask]
-        Ti_same_el = Ti[mask_same_elem[tmp_mask]]
-        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
-        tmp1[mask_same_elem[tmp_mask]] -= t1
-        dtmp1[mask_same_elem[tmp_mask]] -= dt1
-    if (~mask_same_elem).any():
-        dR_mskd_diff = dR_mskd[(~mask_same_elem) & tmp_mask]
-        Ti_diff_el = Ti[~mask_same_elem[tmp_mask]]
-        Tj_diff_el = Tj[~mask_same_elem[tmp_mask]]
-        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
-        tmp1[~mask_same_elem[tmp_mask]] -= t1
-        dtmp1[~mask_same_elem[tmp_mask]] -= dt1
     tmp1 *= KECONST
     dtmp1 *= KECONST
-    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 0) * CDIM
     idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
     CC_real.index_add_(0, (idx_row + idx_col), tmp1)
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
 
     ### s-d ###
-    tmp_mask = pair_mask_HY + pair_mask_XY + pair_mask_YY
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 0, 2)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
     Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
     Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
     tmp1 -= t1
-    tmp1 *= KECONST
     dtmp1 -= dt1
+    tmp1 *= KECONST
     dtmp1 *= KECONST
-    idx_row = structure.H_INDEX_START_U[neighbor_I[tmp_mask]] * CDIM
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 0) * CDIM
     idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
     CC_real.index_add_(0, (idx_row + idx_col), tmp1)
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
 
-    ### d-s ###
-    tmp_mask = pair_mask_YH + pair_mask_YX + pair_mask_YY
+    ### s-f ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 0, 3)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
-    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
-    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    Ti = TFACT * structure.const.U[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Uf[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
     tmp1 -= t1
-    tmp1 *= KECONST
     dtmp1 -= dt1
+    tmp1 *= KECONST
     dtmp1 *= KECONST
-    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2) * CDIM
-    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]]
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 0) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 3
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### p-s ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 1, 0)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 0
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### p-p ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 1, 1)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
     CC_real.index_add_(0, (idx_row + idx_col), tmp1)
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
 
     ### p-d ###
-    tmp_mask = pair_mask_XY + pair_mask_YY
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 1, 2)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
     Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
     Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
     tmp1 -= t1
-    tmp1 *= KECONST
     dtmp1 -= dt1
+    tmp1 *= KECONST
     dtmp1 *= KECONST
     idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
     idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
     CC_real.index_add_(0, (idx_row + idx_col), tmp1)
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
 
-    ### d-p ###
-    tmp_mask = pair_mask_YX + pair_mask_YY
+    ### p-f ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 1, 3)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Up[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Uf[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 1) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 3
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### d-s ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 2, 0)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 0
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### d-p ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 2, 1)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
     Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
     Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
-    dR_mskd_diff = dR_mskd[tmp_mask]
-    t1, dt1 = coul_diff_elem_and_ang(Ti, Tj, dR_mskd_diff)
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
     tmp1 -= t1
-    tmp1 *= KECONST
     dtmp1 -= dt1
+    tmp1 *= KECONST
     dtmp1 *= KECONST
     idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2) * CDIM
     idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
@@ -1043,37 +1066,125 @@ def ewald_real_space_vectorized_sr(
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
 
     ### d-d ###
-    tmp_mask = pair_mask_YY
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 2, 2)
+    dR_pair = dR_mskd[tmp_mask]
     tmp1 = CA[tmp_mask].clone()
     dtmp1 = (
-        -(
-            CA[tmp_mask]
-            + 2 * CALPHA * torch.exp(-CALPHA2 * dR_mskd[tmp_mask] ** 2) / SQRTPI
-        )
-        / dR_mskd[tmp_mask]
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
     )
     Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
     Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
-    # mask_same_elem = (structure.TYPE[neighbor_I] == structure.TYPE[neighbor_J])
-    if mask_same_elem.any():
-        dR_mskd_same = dR_mskd[mask_same_elem & tmp_mask]
-        Ti_same_el = Ti[mask_same_elem[tmp_mask]]
-        t1, dt1 = coul_same_elem_and_ang(Ti_same_el, dR_mskd_same)
-        tmp1[mask_same_elem[tmp_mask]] -= t1
-        dtmp1[mask_same_elem[tmp_mask]] -= dt1
-    if (~mask_same_elem).any():
-        dR_mskd_diff = dR_mskd[(~mask_same_elem) & tmp_mask]
-        Ti_diff_el = Ti[~mask_same_elem[tmp_mask]]
-        Tj_diff_el = Tj[~mask_same_elem[tmp_mask]]
-        t1, dt1 = coul_diff_elem_and_ang(Ti_diff_el, Tj_diff_el, dR_mskd_diff)
-        tmp1[~mask_same_elem[tmp_mask]] -= t1
-        dtmp1[~mask_same_elem[tmp_mask]] -= dt1
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
     tmp1 *= KECONST
     dtmp1 *= KECONST
     idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2) * CDIM
     idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
     CC_real.index_add_(0, (idx_row + idx_col), tmp1)
     dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### d-f ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 2, 3)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Ud[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Uf[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 2) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 3
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### f-s ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 3, 0)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Uf[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.U[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 3) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 0
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### f-p ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 3, 1)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Uf[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Up[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 3) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 1
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### f-d ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 3, 2)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Uf[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Ud[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 3) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 2
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
+    ### f-f ###
+    tmp_mask = _shell_pair_mask(max_ang_I, max_ang_J, 3, 3)
+    dR_pair = dR_mskd[tmp_mask]
+    tmp1 = CA[tmp_mask].clone()
+    dtmp1 = (
+        -(CA[tmp_mask] + 2 * CALPHA * torch.exp(-CALPHA2 * dR_pair**2) / SQRTPI)
+        / dR_pair
+    )
+    Ti = TFACT * structure.const.Uf[structure.TYPE[neighbor_I[tmp_mask]]]
+    Tj = TFACT * structure.const.Uf[structure.TYPE[neighbor_J[tmp_mask]]]
+    t1, dt1 = _coul_shell_pair_term(Ti, Tj, dR_pair)
+    tmp1 -= t1
+    dtmp1 -= dt1
+    tmp1 *= KECONST
+    dtmp1 *= KECONST
+    idx_row = (structure.H_INDEX_START_U[neighbor_I[tmp_mask]] + 3) * CDIM
+    idx_col = structure.H_INDEX_START_U[neighbor_J[tmp_mask]] + 3
+    CC_real.index_add_(0, (idx_row + idx_col), tmp1)
+    dCC_dxyz_real.index_add_(1, (idx_row + idx_col), dtmp1 * dR_dxyz_mskd[:, tmp_mask])
+
     CC_real = CC_real.reshape(CDIM, CDIM)
     dCC_dxyz_real = dCC_dxyz_real.reshape(3, CDIM, CDIM)
     return CC_real, dCC_dxyz_real
