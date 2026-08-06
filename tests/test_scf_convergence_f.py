@@ -451,3 +451,107 @@ def test_all_four_charge_loops_report_a_convergence_result():
         assert "scf_iter_count = " in head, (
             f"{loop.__name__} returns scf_iter_count without ever computing it"
         )
+
+
+# --- Task 3: giving up is reported honestly and never raises ----------------
+#
+# Non-convergence is forced by lowering the iteration cap to two passes, NOT by
+# relying on the accelerator bug.  Two passes cannot reach a tolerance of one
+# millionth, so the loop is guaranteed to exhaust its cap on any machine, at any
+# separation, whatever the accelerator does.  That keeps these tests independent
+# of the very behaviour this phase is changing -- a test that induced failure by
+# turning the accelerator back on would start passing for the wrong reason the
+# day the accelerator is repaired.
+CAP_TOO_LOW_TO_CONVERGE = 2
+
+
+def test_exhausting_the_iteration_cap_returns_minus_one(tmp_path):
+    """A loop that ran out of passes says so, and is not mistaken for settled.
+
+    The assertion is on the exact integer, never on truthiness.  A boolean
+    substituted for the count would still be falsy-or-truthy in the right
+    direction and would pass a ``if not converged`` style check while silently
+    throwing the pass count away; it fails here.
+    """
+
+    def check():
+        structure = _run_scf(tmp_path, SCF_MAX_ITER=CAP_TOO_LOW_TO_CONVERGE)
+
+        count = getattr(structure, "scf_iter_count", None)
+        assert count == DID_NOT_CONVERGE, (
+            f"with SCF_MAX_ITER = {CAP_TOO_LOW_TO_CONVERGE} the loop cannot "
+            f"reach tolerance, so scf_iter_count must be exactly "
+            f"{DID_NOT_CONVERGE}, but it is {count!r}"
+        )
+        assert isinstance(count, int) and not isinstance(count, bool), (
+            f"scf_iter_count must be a plain int, not {type(count).__name__}; "
+            "a boolean would report failure while discarding the pass count"
+        )
+
+    run_with_float64(check)
+
+
+def test_a_loop_that_gave_up_still_hands_back_its_last_answer(tmp_path):
+    """Warn, return the last iterate, never raise -- D-13's substance intact.
+
+    Reporting failure honestly must not become withholding the result.  A caller
+    that wants to inspect why a run failed needs the numbers it failed on, and a
+    caller written before ``scf_iter_count`` existed needs them too.
+    """
+
+    def check():
+        structure = _run_scf(tmp_path, SCF_MAX_ITER=CAP_TOO_LOW_TO_CONVERGE)
+
+        assert torch.isfinite(structure.e_tot), (
+            f"a loop that gave up (SCF_MAX_ITER = {CAP_TOO_LOW_TO_CONVERGE}) "
+            f"must still hand back its last energy, but e_tot = "
+            f"{structure.e_tot}"
+        )
+        assert structure.q.shape == (2,), (
+            f"a loop that gave up (SCF_MAX_ITER = {CAP_TOO_LOW_TO_CONVERGE}) "
+            f"must still hand back its last charges with one per atom, but q "
+            f"has shape {tuple(structure.q.shape)}"
+        )
+        assert torch.isfinite(structure.q).all(), (
+            f"a loop that gave up (SCF_MAX_ITER = {CAP_TOO_LOW_TO_CONVERGE}) "
+            f"must still hand back finite charges, but q = {structure.q.tolist()}"
+        )
+
+    run_with_float64(check)
+
+
+def test_a_loop_that_gave_up_raises_nothing(tmp_path):
+    """Non-convergence is a reported outcome, not an exception.
+
+    Driven in the test body rather than with ``pytest.raises``, so that if this
+    ever does raise, the failure carries the real traceback from the real call
+    instead of a bare "DID NOT RAISE".
+    """
+
+    def check():
+        structure = _run_scf(tmp_path, SCF_MAX_ITER=CAP_TOO_LOW_TO_CONVERGE)
+        assert structure is not None, (
+            f"the driver returned no structure at all with SCF_MAX_ITER = "
+            f"{CAP_TOO_LOW_TO_CONVERGE}"
+        )
+
+    run_with_float64(check)
+
+
+def test_a_caller_that_ignores_the_convergence_result_still_works(tmp_path):
+    """Adding a fifteenth return element did not make reading it mandatory.
+
+    This is the compatibility edge: every caller written before this phase
+    reads ``structure.e_tot`` and has never heard of ``scf_iter_count``.  The
+    test deliberately never touches the new attribute.
+    """
+
+    def check():
+        structure = _run_scf(tmp_path)
+
+        assert torch.isfinite(structure.e_tot), (
+            f"a caller that reads only e_tot must still get a usable number "
+            f"after a converged run, but e_tot = {structure.e_tot}"
+        )
+
+    run_with_float64(check)
