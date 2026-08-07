@@ -661,18 +661,10 @@ def render(result, echo=print):
         y=0.975,
     )
 
-    gave_up = _shade_gave_up(ax_energy, result, gold, with_label=True)
+    gave_up = _shade_gave_up(ax_energy, result, gold, with_label=False)
     _plot_panel(ax_energy, result, colours, "energies", gold)
     ax_energy.axvline(
-        COORDINATION_MEAN_ANGSTROM,
-        color=green,
-        ls="--",
-        lw=1.5,
-        alpha=0.9,
-        label=(
-            f"Eu-N coordination mean, {COORDINATION_MEAN_ANGSTROM} A "
-            "(context, not a pass mark)"
-        ),
+        COORDINATION_MEAN_ANGSTROM, color=green, ls="--", lw=1.5, alpha=0.9
     )
     limits = _judgeable_energy_limits(result)
     if limits is not None:
@@ -685,17 +677,29 @@ def render(result, echo=print):
         )
     ax_energy.set_ylabel("Total energy  $E_\\mathrm{tot}$  (eV)")
     ax_energy.set_title(energy_title)
-    # Pinned rather than "best": on the measured curves "best" puts the box over
-    # the top-left corner, which is exactly where the two settled curves climb
-    # out of their wells at short separation.
-    ax_energy.legend(loc="center right")
+    # NO legend on this panel, deliberately.  One legend serves both panels and
+    # it lives on the lower one.  Measured: this panel has no empty region large
+    # enough to hold a five-entry box.  "best" lands it top-left, over where the
+    # settled curves climb out of their wells at short separation; pinning it
+    # centre-right instead buried the per-atom curve from 2.40 to 2.80 A, which
+    # is the shoulder rising out of the well - precisely the shape this whole
+    # figure exists to let a human judge.  The panels share an x axis and the
+    # colours are identical, so the lower legend reads for both.
     finish(ax_energy)
 
-    _shade_gave_up(ax_charge, result, gold, with_label=False)
+    _shade_gave_up(ax_charge, result, gold, with_label=True)
     _plot_panel(ax_charge, result, colours, "charges_on_n", gold)
     ax_charge.axhline(0.0, color="#444444", lw=1.1)
     ax_charge.axvline(
-        COORDINATION_MEAN_ANGSTROM, color=green, ls="--", lw=1.5, alpha=0.9
+        COORDINATION_MEAN_ANGSTROM,
+        color=green,
+        ls="--",
+        lw=1.5,
+        alpha=0.9,
+        label=(
+            f"Eu-N coordination mean, {COORDINATION_MEAN_ANGSTROM} A "
+            "(context, not a pass mark)"
+        ),
     )
     ax_charge.set_xlabel("Eu-N separation  $r$  (A)")
     ax_charge.set_ylabel("Electrons moved onto nitrogen  $q_\\mathrm{N}$  (e)")
@@ -703,7 +707,11 @@ def render(result, echo=print):
         "Charge transfer: above zero means nitrogen gained electrons\n"
         "(full vertical range, so a runaway stays legible)"
     )
-    ax_charge.legend(loc="best")
+    # The one legend for the whole figure, pinned to the only region of either
+    # panel that is reliably empty on the measured curves: the bottom left of
+    # the charge panel, where nothing but the settled curves' flat 0.6 e line
+    # runs and that sits well above it.
+    ax_charge.legend(loc="lower left")
     finish(ax_charge)
 
     fig.tight_layout(rect=[0, 0, 1, 0.945])
