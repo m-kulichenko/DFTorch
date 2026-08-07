@@ -2,18 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 06
-current_phase_name: self-consistent-scf-for-f-systems
-status: executing
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-08-06T02:06:11.692Z"
-last_activity: 2026-08-04
-last_activity_desc: Phase 06 execution started
+current_phase: 7
+current_phase_name: f Angular Derivatives
+status: planning
+stopped_at: Completed 06-05-PLAN.md - human verdict recorded, phase 6 closed with known issues
+last_updated: "2026-08-07T21:15:09.665Z"
+last_activity: 2026-08-07
+last_activity_desc: Phase 06 complete, transitioned to Phase 7
 progress:
   total_phases: 6
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 22
-  completed_plans: 17
+  completed_plans: 21
 ---
 
 # Project State
@@ -27,18 +27,18 @@ See: .planning/PROJECT.md (updated 2026-07-17)
 
 ## Current Position
 
-Phase: 06 (self-consistent-scf-for-f-systems) — EXECUTING
-Plan: 2 of 5
-Status: Ready to execute
-Last activity: 2026-08-04 — Phase 06 execution started
+Phase: 7 — f Angular Derivatives
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-07 — Phase 06 complete, transitioned to Phase 7
 
-Progress: [████████░░] 77%
+Progress: [██████████] 95%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 3
+- Total plans completed: 8
 - Average duration: -
 - Total execution time: 0.0 hours
 
@@ -54,6 +54,7 @@ Progress: [████████░░] 77%
 | 01 | 1 | - | - |
 | 02 | 1 | - | - |
 | 03 | 1 | - | - |
+| 06 | 5 | - | - |
 
 **Recent Trend:**
 
@@ -77,6 +78,10 @@ Progress: [████████░░] 77%
 | Phase 05 P04 | 85 min | 3 tasks | 8 files |
 | Phase 05 P06 | 47 min | 2 tasks | 7 files |
 | Phase 06 P01 | 115 min | 3 tasks | 4 files |
+| Phase 06 P02 | ~95min | 2 tasks | 8 files |
+| Phase 06 P03 | ~150 min | 2 tasks | 8 files |
+| Phase 6 P4 | 80min | 3 tasks | 6 files |
+| Phase 06 P05 | 135min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -131,6 +136,19 @@ Recent decisions affecting current work:
 - [Phase ?]: Phase 6 (plan 06-01): the Eu-N charge-loop runaway was the Krylov accelerator (kernel_update_lr), NOT the f orbitals. Switched off for f systems only via _krylov_params_for_f_interim (ESDriver.py:108), which engages only when some atom has const.n_orb[TYPE] == 16 AND the caller has not set KRYLOV_START, and returns a shallow COPY so a reused driver cannot leak the setting into a later f-free molecule (threat T-06-02). The _scf.py default is untouched at all five executable sites (still 10). Repairing the accelerator is deferred by the recorded human ruling of 2026-08-04; this helper is the single place to delete when the repair lands.
 - [Phase ?]: Phase 6 D-6.04 (plan 06-01): all four charge loops (SCFx, scf_x_os, SCFx_batch, delta_scf_x_os) return scf_iter_count as the last tuple element -- int(it) when both of that loop's OWN tolerance clauses hold, the literal -1 otherwise -- after scipy's iterative solvers. A boolean was explicitly rejected: it discards the pass count. Each loop has exactly ONE production call site (ESDriver.py:615/688/760/1844, verified after the edits, not predicted), all four unpack into structure.scf_iter_count, and all four print('Did not converge') warnings survive per D-13. test_all_four_charge_loops_report_a_convergence_result watches the WIRING by source inspection, because three of the four have no cheap f fixture -- the REG-06 blind spot Phase 5 recorded.
 - [Phase ?]: Phase 6 (plan 06-01): non-convergence is forced in tests by lowering SCF_MAX_ITER to 2, never by re-enabling the accelerator bug, so the test cannot start passing for the wrong reason the day the accelerator is repaired. D-6.08 held: no energy, charge or binding-curve value is frozen -- checked mechanically, no assignment RHS in tests/test_scf_convergence_f.py carries a float literal with more than three decimal digits; the only literals are separations, tolerances, the 2.0 runaway bound (factor-of-three headroom, a detector not a reference) and the sentinel -1.
+- [Phase ?]: Phase 6 plan 06-02 (SCC-02): Shell-resolved Coulomb block selection is one uniform rule, (max_ang_I > l_i) & (max_ang_J > l_j), verified by hand against all nine pre-existing blocks and numerically by a reduction identity against the per-atom builder
+- [Phase ?]: Phase 6 plan 06-02 (SCC-02): The short-range Coulomb damping form is chosen by whether the two damping exponents are equal, not by whether the two atoms are the same element - the proxy was exact only for the four diagonal blocks and was a divide-by-zero for the other twelve (N2 produced NaN)
+- [Phase ?]: Phase 6 plan 06-02 (SCC-02): FShellResolvedCoulombUnsupportedError is retired but its name is kept with a retirement note, so the f exception taxonomy stays at exactly four reviewable entries; a test watches that no production module raises it
+- [Phase ?]: Phase 6 plan 06-02 (SCC-02): The 17 _coulomb_matrix.py rows in docs/ORBITAL-COUNT-INVENTORY.md were deleted rather than re-dispositioned, because test_inventory_covers_every_site matches rows and sites both ways; the account of what they recorded is kept as prose in the same section
+- [Phase ?]: Phase 6 plan 06-03 (SCC-03): the off-site shell-resolved Coulomb matrix alone is NOT a Coulomb operator. Its neighbour list never pairs an atom with itself, so the interaction between two orbital groups of ONE atom - the largest either group feels - was absent, and the per-atom 0.5*sum(q**2*U) term covers only each charge against itself. Supplied as onsite_shell_coulomb_matrix, kept separate from C_sr so C_sr keeps plan 06-02's meaning; structure.C_sr_scf = C_sr + C_sr_onsite is built once and handed to both the loop and energy(). Measured on Eu-N: without it scf_iter_count = -1 with charges oscillating to integer fillings (10.00 into d, -7.00 out of f); with it, settles in 80 passes. The closed form is the codebase's own _coul_shell_pair_term read at R -> 0, checked numerically to 6e-11 for five strength pairs.
+- [Phase ?]: Phase 6 plan 06-03 (SCC-03): shell-resolved mode is all-five-arguments-or-none on SCFx and all-three-or-none on energy(); any partial combination raises naming what is missing. Falling through to the per-atom arm would hand a caller a coarser answer under the finer answer's name. The Krylov accelerator is off at the finer resolution unconditionally (it preconditions with the per-atom matrix and per-atom U), and a per-atom q_init is ignored there with a printed notice, because splitting one number across an atom's four groups would be inventing information.
+- [Phase ?]: Phase 6 plan 06-03 (SCC-03): the correctness gate is a degenerate-parameter reduction, not a frozen number. With every orbital group carrying its element's s strength the finer loop IS the coarser loop, and the two converged charge vectors must agree - measured to better than 1e-8. D-6.08 audited mechanically with ast: every numeric literal in every assert is a tolerance, the input separation, the iteration cap, the -1 sentinel, a tuple index, the angular label 4, or the factor 2.0 in the plan's own inequality.
+- [Phase ?]: Phase 6 plan 06-04 (SCC-01, D-6.03): the 10.6 eV one-pass vs settled Eu-N difference is a difference of definition, not a defect: 84.2 percent sits in the band-structure term and only 16.0 percent in the electron-repulsion term the settled path adds. Re-measured 2026-08-06.
+- [Phase ?]: Phase 6 plan 06-04 (SCC-01): the verdict lives in docs/SINGLE-SHOT-VS-SELF-CONSISTENT.md, not in a phase summary, and ships with tools/check_verdict_doc.py which re-verifies its five source citations against the tree on every run.
+- [Phase ?]: Phase 6 plan 06-04 (D-6.10): Constants.py's self.U = Parameter(US, ...) assignment is documented, not fixed. Adding the record above it moved it off line 232, so the bare line number was retired as an identifier everywhere rather than replaced with a newer one.
+- [Phase ?]: Phase 6 plan 06-05 (SCC-01, D-6.02 human gate): the verdict is a QUALIFIED CLOSE, not an approval. Verbatim: "Okay, the red graph looks very bad, we have a random spike in the energy and terrible charge convergence at longer distances. Something is probably wrong." Then, after being shown what a revert would cost: "Let's mark phase 6 as complete with known issues. Write the summary doc. We'll change up what we do in future phases". The complaint is specific to the per-orbital-group (shell-resolved) curve, which settles at only 12 of 21 separations; the per-atom settled curve (21 of 21, single well, lowest at 2.00 A) was NOT objected to and is NOT thereby approved. This overrides D-6.02's rule that a looks-wrong verdict fails the phase gate - it is the user setting their own bar aside, recorded as a new user decision, and it is not yet written into 06-CONTEXT.md as a numbered decision.
+- [Phase ?]: Phase 6 plan 06-05: matplotlib is a development-time dependency in pyproject.toml's dev extra, deliberately not a runtime one: DFTorch produces the data the verification figures need, not the figures. Reverses the standing position in experiments/diatomic_scans/README.md that plotting runs in a separate interpreter through JSON.
+- [Phase ?]: Phase 6 plan 06-05: the Eu-N verification figure is regenerated from live code at review time and is NOT committed; the script is the artifact and the PNG is output. A committed PNG is a replay by another name (threat T-06-28), and the six existing Phase 4/5 figures are untracked on the same reasoning.
 
 ### Pending Todos
 
@@ -145,6 +163,7 @@ None yet.
 - Batched f H0/S routing is still unimplemented (`H0_and_S_vectorized_batch` raises); reference validation must use the single-system path.
 - `_bond_integral` exports a single `R_orb` (the longest grid) for all pair types while `tests/f_orbital_data` mixes radial grids. Likely to matter once real reference numbers are compared. See `deferred-items.md` item 3.
 - docs/LIBRARY-OUTPUT-INVENTORY.md (plan 05-05) claims a completeness gate at tests/test_verbose_flag.py::test_inventory_covers_every_print; neither the file nor the test exists, so a print added by a later phase fails nothing. Logged in deferred-items.md item 4 and WINDOWS.md; belongs to whoever revisits D-02.
+- docs/F-SUPPORT-STATUS.md claimed a completeness gate at tests/test_support_documentation.py::test_every_named_exception_appears_in_support_matrix, and no test of that name exists in the repository. Recorded (not fixed) by plan 06-02; same class as the stale docs/LIBRARY-OUTPUT-INVENTORY.md claim already logged here. Belongs to whoever owns the documentation gates.
 
 ## Deferred Items
 
@@ -156,6 +175,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T02:06:11.669Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-08-07T20:34:46.574Z
+Stopped at: Completed 06-05-PLAN.md - human verdict recorded, phase 6 closed with known issues
 Resume file: None

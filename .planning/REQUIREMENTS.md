@@ -74,8 +74,8 @@ Requirements for the initial f-orbital support milestone. Each maps to roadmap p
 Promoted into the roadmap 2026-07-29 (Phase 6).
 
 - [x] **SCC-01**: f-containing systems run a true self-consistent charge loop to convergence, not a single diagonalization. Non-convergence warns and returns the last iterate with a convergence flag (D-13), rather than raising.
-- [ ] **SCC-02**: The seven f angular blocks of the shell-resolved Coulomb matrix (s-f, f-s, p-f, f-p, d-f, f-d, f-f) are implemented and validated, replacing `FShellResolvedCoulombUnsupportedError`. Depends on SCC-01: the matrix is `(n_shells, n_shells)` while `energy()`/`SCFx` consume `(Nats, Nats)` per-atom charges, so nothing can validate these values until shell-resolved charges flow through SCF.
-- [ ] **SCC-03**: The shell-resolved f plumbing validated but unconsumed in Phase 4 (D-14) is actually consumed by the self-consistent path.
+- [x] **SCC-02**: The seven f angular blocks of the shell-resolved Coulomb matrix (s-f, f-s, p-f, f-p, d-f, f-d, f-f) are implemented and validated, replacing `FShellResolvedCoulombUnsupportedError`. Depends on SCC-01: the matrix is `(n_shells, n_shells)` while `energy()`/`SCFx` consume `(Nats, Nats)` per-atom charges, so nothing can validate these values until shell-resolved charges flow through SCF.
+- [x] **SCC-03**: The shell-resolved f plumbing validated but unconsumed in Phase 4 (D-14) is actually consumed by the self-consistent path.
 
 ### f Derivatives, Forces, Stress, and Dynamics
 
@@ -161,8 +161,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CLN-04 | Phase 5 | Complete |
 | CLN-05 | Phase 5 | Complete |
 | SCC-01 | Phase 6 | Complete |
-| SCC-02 | Phase 6 | Pending |
-| SCC-03 | Phase 6 | Pending |
+| SCC-02 | Phase 6 | Complete |
+| SCC-03 | Phase 6 | Complete |
 | DRV-01 | Phase 7 | Pending |
 | DRV-02 | Phase 7 | Pending |
 | PHY-01 | Phase 8 | Pending |

@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: H0/S Routing and f Angular Blocks** - H0/S assembly routes 16-orbital atom pairs and writes tested f-containing Slater-Koster blocks. (completed 2026-07-28)
 - [x] **Phase 4: SCF and Reference Simulation Validation** - f-containing single-system simulations reach the supported single-shot energy path and the Eu-N binding minimum is validated against a documented loose-band reference. (completed 2026-07-29)
 - [x] **Phase 5: Regression Safety and Support Policy Cleanup** - Existing simple-format behavior, unsupported f modes, and prototype cleanup are locked behind tests and explicit policy.
-- [ ] **Phase 6: Self-Consistent SCF for f Systems** - f systems converge a real self-consistent charge loop, unlocking the shell-resolved Coulomb f angular blocks.
+- [x] **Phase 6: Self-Consistent SCF for f Systems** - f systems converge a real self-consistent charge loop, unlocking the shell-resolved Coulomb f angular blocks. (completed 2026-08-07)
 - [ ] **Phase 7: f Angular Derivatives** - dH0/dS become correct and non-zero in f blocks, retiring the blanket derivative refusal.
 - [ ] **Phase 8: f Forces and Stress** - Forces and stress for f systems are produced and validated against finite differences.
 - [ ] **Phase 8.1: Batched f H0/S Routing** *(INSERTED 2026-08-02)* - Batched H0/S routes 16-orbital atoms instead of refusing, unblocking MD.
@@ -210,7 +210,7 @@ Plans:
   4. The shell-resolved f charge/Hubbard plumbing validated but unconsumed in Phase 4 (D-14) is consumed by the self-consistent path.
   5. The Phase 4 single-shot path and its pinned reference energy remain available and unbroken.
 
-**Plans**: 3/5 plans executed
+**Plans**: 5/5 plans executed
 Plans:
 **Wave 1**
 
@@ -223,11 +223,11 @@ Plans:
 **Wave 3** *(blocked on Wave 2 completion)*
 
 - [x] 06-03-PLAN.md — Consume shell-resolved charges inside the closed-shell SCF loop and its energy, so Eu's f electrons are charged at the f Hubbard U rather than the s one.
-- [ ] 06-04-PLAN.md — Write the verdict on the 10.6 eV single-shot / self-consistent difference, record the Constants.py:232 s-shell Hubbard U defect in place, and close the D-6.06 roadmap tension.
+- [x] 06-04-PLAN.md — Write the verdict on the 10.6 eV single-shot / self-consistent difference, record the Constants.py:232 s-shell Hubbard U defect in place, and close the D-6.06 roadmap tension.
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 06-05-PLAN.md — Recompute the Eu-N binding curves from live code and put the graph in front of a human. Blocking final gate.
+- [x] 06-05-PLAN.md — Recompute the Eu-N binding curves from live code and put the graph in front of a human. Blocking final gate.
 
 ### Phase 7: f Angular Derivatives
 
@@ -306,7 +306,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 8.1 -> 
 | 3. H0/S Routing and f Angular Blocks | 1/1 | Complete    | 2026-07-28 |
 | 4. SCF and Reference Simulation Validation | 5/5 | Complete    | 2026-07-29 |
 | 5. Regression Safety and Support Policy Cleanup | 8/8 | Complete    | 2026-08-03 |
-| 6. Self-Consistent SCF for f Systems | 3/5 | In Progress|  |
+| 6. Self-Consistent SCF for f Systems | 5/5 | Complete    | 2026-08-07 |
 | 7. f Angular Derivatives | 0/TBD | Not started | - |
 | 8. f Forces and Stress | 0/TBD | Not started | - |
 | 8.1. Batched f H0/S Routing | 0/TBD | Not started | - |
