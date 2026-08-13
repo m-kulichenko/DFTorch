@@ -183,6 +183,16 @@ Plans:
 > plain mixer finds reliably, not finding a different one. Corroborated on 16 unrelated mio-1-1
 > diatomics at 61 separations each: 61/61 converged in every system with the accelerator off.
 >
+> **Followed up 2026-08-11 — see `.planning/KRYLOV-INVESTIGATION.md`.** That record carries the
+> full mechanism and every measurement behind it, so the deferred phase does not have to
+> re-derive them. Two claims in the paragraph above are refined there rather than contradicted:
+> the accelerator's arithmetic is *correct* (its step equals the exact Newton step, and its
+> analytic Jacobian matches finite differences to every printed digit), and "not the f orbitals"
+> holds only in the sense that there is no f-orbital bug — the Eu 4f manifold pinned at the
+> Fermi level is what makes the charge map non-linear enough to defeat Newton, and the same
+> pathology appears in `experiments/m30_o60.xyz`, which has no f orbitals and fails with the
+> accelerator *off* as well. Reproduce with `experiments/diatomic_scans/krylov_probe.py`.
+>
 > **A human ruling of the same date deferred repairing the accelerator to a later phase**, and
 > had Phase 6 disable it in the interim for f systems only. Plan 06-01 did that; f-free
 > calculations are untouched and a test drives methane through to prove it.

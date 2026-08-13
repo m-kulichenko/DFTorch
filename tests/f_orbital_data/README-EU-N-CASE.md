@@ -98,7 +98,11 @@ Hartree (13.33 eV) on every shell present.
 
 The Eu f Hubbard U of 0.50 Hartree is the value that made the f dimension of the
 shell-resolved Hubbard/charge plumbing testable at all — it is a real number carried by the
-extended-format header, not a zero-fill. Both radial grids are `0.04 Å` step over 433 points.
+extended-format header, not a zero-fill. Both radial grids are `0.04` **Bohr** step over 433
+points, reaching about 9.2 Å. The unit is Bohr, not Ångström: the SKF grid line declares its
+step in Bohr and `read_skf_table` multiplies by `BOHR_TO_ANGSTROM` when building the grid
+(`src/dftorch/_bond_integral.py`). An earlier revision of this line said `0.04 Å`, which is
+wrong by a factor of 1.889 — do not "correct" the code to match it.
 
 ## Observable
 

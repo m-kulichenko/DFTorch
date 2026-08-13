@@ -976,8 +976,9 @@ class SKFRadialGridStepMismatchError(ValueError):
     later work makes it meaningful.
 
     Defined in this module rather than imported from ``_slater_koster_pair``
-    because that module already imports ``_CHANNELS`` from this one
-    (``_slater_koster_pair.py:8``), so the reverse import would be circular.
+    because that module already imports ``_CHANNELS`` from this one (its
+    ``from ._bond_integral import _CHANNELS as _BOND_INTEGRAL_CHANNELS``), so
+    the reverse import would be circular.
     """
 
 
