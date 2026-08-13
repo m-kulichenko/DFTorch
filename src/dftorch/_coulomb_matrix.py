@@ -937,9 +937,7 @@ def ewald_real_space_vectorized_sr(
       p-s, ... , f-f.  Requirement SCC-02 in Phase 6 added the seven involving
       f; before it there were nine, and an f atom matched none of the six
       off-diagonal masks and fell through them to zero.  The refusal that used
-      to guard this function (``FShellResolvedCoulombUnsupportedError``) is
-      retired; the class is kept, with a retirement note, so the f support
-      taxonomy stays reviewable as one list.
+      to guard this function is retired and its class has been deleted.
     - Each block selects its pairs with :func:`_shell_pair_mask`, which encodes
       "atom I carries shell l_i and atom J carries shell l_j" as
       ``(max_ang_I > l_i) & (max_ang_J > l_j)``.  A block writes into row

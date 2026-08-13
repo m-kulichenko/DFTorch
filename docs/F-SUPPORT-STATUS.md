@@ -41,7 +41,7 @@ while writing this document and it is *not* one of the six; see §4.
 
 | Capability | Status | What a user meets today | Requirement that lifts it | Owning phase | Evidence |
 |---|---|---|---|---|---|
-| **batch** | deferred | `FAngularFormulaSourceError` from `_h0ands.py:637`, raised before any block is assembled when any pair has `n_orb == 16` | PHY-04 | Phase 8.1 | `tests/test_orbital_count_guards.py::test_every_guarded_site_raises_for_f[H0_and_S_vectorized_batch]` |
+| **batch** | deferred | `NotImplementedError` from `_h0ands.py:636`, raised before any block is assembled when any pair has `n_orb == 16` | PHY-04 | Phase 8.1 | `tests/test_orbital_count_guards.py::test_every_guarded_site_raises_for_f[H0_and_S_vectorized_batch]` |
 | **force** | deferred | `FDerivativeUnsupportedError` from `ESDriver.py:61` (`_require_f_derivatives`, the first statement of both `ESDriver.calc_forces` and `ESDriverBatch.calc_forces`); the spin force path refuses separately at `_forces.py:49` | DRV-01, DRV-02, then PHY-01 | Phase 7 (formulas), Phase 8 (validation) | `test_every_guarded_site_raises_for_f[ESDriver.calc_forces]` and `[forces_spin]` |
 | **stress** | deferred | `FDerivativeUnsupportedError` from `_stress.py:198`, inside `_pair_grad_from_sk` | PHY-02 | Phase 8 | `test_every_guarded_site_raises_for_f[_pair_grad_from_sk]` |
 | **MD** | deferred | No f guard of its own. `MDXL.__init__` and `MDXLBatch.__init__` both require an `ESDriverBatch` (`MD.py:42`, `MD.py:1232`), so an f trajectory meets the **batch** refusal above first; the spin builders reached from `MD.py:745`, `:794` and `:1103` refuse separately | PHY-03, on top of PHY-04 and DRV-01 | Phase 9 | inherited: `[H0_and_S_vectorized_batch]`, `[get_h_spin]`, `[forces_spin]`. **No end-to-end f MD test exists**; the inheritance is established by reading the two `__init__` signatures |
@@ -74,7 +74,7 @@ single-system f path. Nothing schedules PHY-05 or PHY-06.
 
 The f-unsupported exception taxonomy lives in one module,
 `src/dftorch/_slater_koster_pair.py`, deliberately, so that it can be reviewed as a single
-support policy (see the class docstring of `FShellResolvedCoulombUnsupportedError`).
+support policy.
 **Stale claim, recorded not fixed.** The preceding paragraph used to end by asserting that
 `tests/test_support_documentation.py::test_every_named_exception_appears_in_support_matrix`
 enumerates the classes from the module at test time, so a class added later without a row
@@ -90,19 +90,20 @@ a fourth-class row going missing from this table would not.
 
 | Exception class | Defined at | What it guards | Raised at | Requirement that removes it |
 |---|---|---|---|---|
-| `FAngularFormulaSourceError` | `_slater_koster_pair.py:173` | reaching an f-containing SK pair class where the source-locked angular formulas are not wired in. Today that is the **batched** H0/S path only | `_h0ands.py:637`; the generic form `_require_f_formula_source` (`_slater_koster_pair.py:209`, called at `:960`) is inert on the single-system path because `F_ANGULAR_FORMULAS_AVAILABLE` is set `True` at `:785` | PHY-04 (batch), Phase 8.1 |
-| `FDerivativeUnsupportedError` | `_slater_koster_pair.py:234` | any path that consumes f `dH0`/`dS`, which are exactly zero in every f block. Zero is a legal-looking derivative, so the consumer must refuse rather than integrate it | `ESDriver.py:61` (forces, both drivers), `_stress.py:198` (stress), `_forces.py:49` (the spin force path) | DRV-01 then DRV-02, Phase 7 |
-| `FSpinPolarizationUnsupportedError` | `_slater_koster_pair.py:259` | a spin-polarized (open-shell) request for an f system. Eu 4f7 is genuinely open-shell, so a closed-shell number would differ in physics, not accuracy | `ESDriver.py:101` (`_require_closed_shell_f_system`, first statement of `ESDriver.forward`, so it fires for `do_scf=False` too), `_spin.py:45` (the shell-resolved spin builders reached directly from MD) | SPN-01, v2 |
-| `FShellResolvedCoulombUnsupportedError` | `_slater_koster_pair.py:291` | **RETIRED.** It guarded the shell-resolved Coulomb matrix, whose pair masks tested `max_ang` against 1, 2 and 3 only, so an f element's non-s rows and columns came back exactly zero in a finite, correctly shaped matrix | nowhere -- no production module raises it, watched by `tests/test_shell_resolved_coulomb_f.py::test_the_retired_refusal_is_no_longer_raised_by_production_code` | **retired by SCC-02, Phase 6** |
+| `FDerivativeUnsupportedError` | `_slater_koster_pair.py:297` | any path that consumes f `dH0`/`dS`, which are exactly zero in every f block. Zero is a legal-looking derivative, so the consumer must refuse rather than integrate it | `ESDriver.py:61` (forces, both drivers), `_stress.py:198` (stress), `_forces.py:49` (the spin force path) | DRV-01 then DRV-02, Phase 7 |
+| `FSpinPolarizationUnsupportedError` | `_slater_koster_pair.py:322` | a spin-polarized (open-shell) request for an f system. Eu 4f7 is genuinely open-shell, so a closed-shell number would differ in physics, not accuracy | `ESDriver.py:101` (`_require_closed_shell_f_system`, first statement of `ESDriver.forward`, so it fires for `do_scf=False` too), `_spin.py:45` (the shell-resolved spin builders reached directly from MD) | SPN-01, v2 |
 
-**On the retired row.** `ewald_real_space_vectorized_sr` now builds all sixteen ordered
-shell-pair blocks, the seven involving f included, so the reason to refuse is gone. The
-class name is deliberately **kept** rather than deleted: plan 05-06 pinned this taxonomy at
-exactly four names (`test_no_new_f_exception_class_was_defined`) so the support policy reads
-as one list, and dropping a name would shrink it to three and lose the record of what used
-to be unsupported. Its docstring and message constant now record the retirement, what
-retired it, and what would justify raising it again -- an element whose orbital groups are
-not a contiguous run starting at s, or a shell-resolved path with an incomplete block set.
+**On the two names this table used to carry.**
+`FShellResolvedCoulombUnsupportedError` guarded the shell-resolved Coulomb matrix, whose
+pair masks tested `max_ang` against 1, 2 and 3 only, so an f element's non-s rows and
+columns came back exactly zero in a finite, correctly shaped matrix. SCC-02 in Phase 6
+built the seven missing shell-pair blocks, and the class has since been deleted.
+`FAngularFormulaSourceError` marked f pair classes reaching Slater-Koster assembly before
+the angular formulas existed; the formulas are now implemented on the single-system path,
+and the one place still without them -- the batched H0/S route -- raises a plain
+`NotImplementedError` at `_h0ands.py:636` instead. Raising a shell-resolved refusal again
+would be justified by an element whose orbital groups are not a contiguous run starting at
+s, or by a shell-resolved path with an incomplete block set.
 
 Two further refusals exist that are **not** part of this taxonomy, listed so the reader who
 meets one can find it:

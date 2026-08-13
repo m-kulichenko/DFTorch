@@ -233,7 +233,7 @@ def H0_and_S_vectorized(
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
-        0,
+        "H",
     )
 
     H0 = H0.reshape(HDIM, HDIM)
@@ -271,7 +271,7 @@ def H0_and_S_vectorized(
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
-        1,
+        "S",
     )
 
     S = S.reshape(HDIM, HDIM) / 27.21138625
@@ -501,7 +501,7 @@ def H0_and_S_vectorized_batch(
         safe_J,
         valid_pairs,
         H_INDEX_START,
-        0,
+        "H",
     )
 
     H0 = H0.reshape(batch_size, HDIM, HDIM)
@@ -544,7 +544,7 @@ def H0_and_S_vectorized_batch(
         safe_J,
         valid_pairs,
         H_INDEX_START,
-        1,
+        "S",
     )
 
     S = S.reshape(batch_size, HDIM, HDIM) / 27.21138625

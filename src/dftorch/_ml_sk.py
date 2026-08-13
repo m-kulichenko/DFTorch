@@ -505,7 +505,7 @@ def ml_eval_channel(
     ml_ctx: dict,
     mask: torch.Tensor | slice,
     channel: int,
-    SH_shift: int,
+    SH_shift: str,
     direction: str = "IJ",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Evaluate a single SK channel for the masked subset of pairs.
@@ -529,7 +529,7 @@ def ml_eval_channel(
         Which pairs to evaluate.
     channel : int  (0-9)
         SK channel index within the H or S block.
-    SH_shift : int  (0 = H, 1 = S)
+    SH_shift : str  ("H" or "S")
         Selects Hamiltonian or Overlap head of the model.
     direction : ``'IJ'`` or ``'JI'``
         Atom ordering for the pair (affects Z1/Z2 assignment).
@@ -596,7 +596,7 @@ def ml_eval_channel(
         bare_H, bare_S = model.forward_bare(batch)
 
         # Select H or S head (bare values in Hartree / raw SKF units)
-        bare = bare_S if SH_shift == 1 else bare_H
+        bare = bare_S if SH_shift == "S" else bare_H
 
         # Compute d(bare)/d(r_norm) via autograd
         (d_bare_d_rnorm,) = torch.autograd.grad(

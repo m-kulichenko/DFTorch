@@ -3,7 +3,6 @@ import time
 import torch
 
 from ._slater_koster_pair import (
-    FAngularFormulaSourceError,
     Slater_Koster_Pair_SKF_vectorized,
     Slater_Koster_Pair_SKF_vectorized_batch,
 )
@@ -388,7 +387,7 @@ def H0_and_S_vectorized(
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
-        0,
+        "H",
         ml_ctx=_ml_ctx,
         pair_mask_HZ=pair_mask_HZ,
         pair_mask_ZH=pair_mask_ZH,
@@ -434,7 +433,7 @@ def H0_and_S_vectorized(
         neighbor_I,
         neighbor_J,
         H_INDEX_START,
-        1,
+        "S",
         ml_ctx=_ml_ctx,
         pair_mask_HZ=pair_mask_HZ,
         pair_mask_ZH=pair_mask_ZH,
@@ -634,13 +633,12 @@ def H0_and_S_vectorized_batch(
     # cover only n_orb in {1, 4, 9}, so a 16-orbital atom would be dropped from
     # every off-diagonal block without warning. Fail explicitly instead.
     if bool((valid_pairs & ((norb_I == 16) | (norb_J == 16))).any()):
-        raise FAngularFormulaSourceError(
+        raise NotImplementedError(
             "H0_and_S_vectorized_batch: batched f-orbital (n_orb == 16) H0/S "
-            "assembly is not supported. The source-locked f angular formulas "
-            "are wired into the single-system path H0_and_S_vectorized only; "
-            "the batched Slater-Koster routine still reconstructs the 1/4/9 "
-            "orbital masks alone. Refusing to return H0/S with silently "
-            "omitted f blocks."
+            "assembly is not supported. The f angular formulas are wired into "
+            "the single-system path H0_and_S_vectorized only; the batched "
+            "Slater-Koster routine still reconstructs the 1/4/9 orbital masks "
+            "alone. Refusing to return H0/S with silently omitted f blocks."
         )
 
     nn_mask = nnType != -1  # mask to exclude zero padding from the neigh list
@@ -702,7 +700,7 @@ def H0_and_S_vectorized_batch(
         safe_J,
         valid_pairs,
         H_INDEX_START,
-        0,
+        "H",
     )
 
     H0 = H0.reshape(batch_size, HDIM, HDIM)
@@ -745,7 +743,7 @@ def H0_and_S_vectorized_batch(
         safe_J,
         valid_pairs,
         H_INDEX_START,
-        1,
+        "S",
     )
 
     S = S.reshape(batch_size, HDIM, HDIM) / 27.21138625

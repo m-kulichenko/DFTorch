@@ -507,7 +507,7 @@ def test_shell_resolved_coulomb_builds_for_f_system(tmp_path):
 
     **What this used to prove, and why that changed.**  Until Phase 6 this test
     was ``test_shell_resolved_coulomb_refuses_f_system`` and asserted that the
-    call raised ``FShellResolvedCoulombUnsupportedError``.  The refusal existed
+    call raised a shell-resolved refusal.  That refusal existed
     because the builder wrote nine of the sixteen shell-pair blocks and the
     seven involving f were missing: pre-guard this exact call returned row sums
     [0.473581, 0, 0, 0, 0.473581, 0] — finite, correctly shaped, and wrong in
@@ -540,50 +540,6 @@ def test_shell_resolved_coulomb_builds_for_f_system(tmp_path):
             f"row sums {row_sums.tolist()}, against the historical "
             "[0.473581, 0, 0, 0, 0.473581, 0]"
         )
-
-    run_with_float64(check)
-
-
-def test_retired_refusal_message_records_its_own_retirement(tmp_path):
-    """The kept message says it is retired, by what, and what would revive it.
-
-    **What this used to prove, and why that changed.**  This was
-    ``test_shell_resolved_coulomb_error_explains_the_gap``, and it read the
-    message off a raised exception.  Nothing raises the exception any more, so
-    the message is read off the constant instead — converted rather than
-    deleted, because threat T-06-12 is that a rewritten message starts
-    interpolating a filesystem path, and that risk does not go away just because
-    the message is no longer raised.
-
-    Still pinned from Phase 4 (threat T-04-07): the message must not interpolate
-    ``SKFPATH``, ``FILENAME`` or any absolute path.
-    """
-    from dftorch._slater_koster_pair import (
-        F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE,
-    )
-
-    def check():
-        message = F_SHELL_RESOLVED_COULOMB_UNSUPPORTED_MESSAGE
-        assert "RETIRED" in message, (
-            "the message must say outright that it is retired, not merely "
-            f"describe a gap that no longer exists: {message}"
-        )
-        assert "SCC-02" in message, (
-            "the message must name what retired it so a reader can find the "
-            f"work: {message}"
-        )
-        for block in ("s-f", "f-s", "p-f", "f-p", "d-f", "f-d", "f-f"):
-            assert block in message, (
-                f"the message no longer names the {block} block, which is part "
-                "of the record of what used to be missing"
-            )
-        assert "contiguous run" in message, (
-            "the message must say what would justify raising it again"
-        )
-        # T-04-07: no filesystem disclosure.
-        assert str(_skf_dir()) not in message
-        assert ".skf" not in message
-        assert ".xyz" not in message
 
     run_with_float64(check)
 

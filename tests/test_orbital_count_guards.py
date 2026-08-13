@@ -313,11 +313,10 @@ def _case_esdriver_forward_unrestricted(tmp_path):
 
 
 def _case_h0_and_s_batch(tmp_path):
-    from dftorch._slater_koster_pair import FAngularFormulaSourceError
-
     _, _, const, _ = _build_eu_n(tmp_path)
-    # Eu (63) is the 16-orbital atom; N (7) is sp.
-    return FAngularFormulaSourceError, lambda: _synthetic_batch_call(const, [63, 7])
+    # Eu (63) is the 16-orbital atom; N (7) is sp.  The batched route has no f
+    # angular wiring, so it refuses with a plain NotImplementedError.
+    return NotImplementedError, lambda: _synthetic_batch_call(const, [63, 7])
 
 
 def _case_pair_grad_from_sk(tmp_path):
@@ -358,11 +357,9 @@ def _case_get_h_spin_diag(tmp_path):
 
 
 # ``ewald_real_space_vectorized_sr`` was a guard case until Phase 6.  Its
-# refusal (``FShellResolvedCoulombUnsupportedError``) is retired by requirement
-# SCC-02, which built the seven missing f shell-pair blocks, and the function
-# has no orbital-count or shell-count site left for the sweep to find.  The
-# exception class itself is deliberately kept -- the taxonomy stays at four
-# names (``test_no_new_f_exception_class_was_defined`` below) -- and
+# refusal is retired by requirement SCC-02, which built the seven missing f
+# shell-pair blocks, and the function has no orbital-count or shell-count site
+# left for the sweep to find.  Its exception class has since been deleted, and
 # ``tests/test_shell_resolved_coulomb_f.py`` now owns that function's coverage.
 GUARD_CASES = {
     "ESDriver.calc_forces": _case_esdriver_calc_forces,
@@ -379,10 +376,8 @@ def _f_error_classes():
     from dftorch import _slater_koster_pair as skp
 
     return (
-        skp.FAngularFormulaSourceError,
         skp.FDerivativeUnsupportedError,
         skp.FSpinPolarizationUnsupportedError,
-        skp.FShellResolvedCoulombUnsupportedError,
     )
 
 
@@ -752,8 +747,8 @@ def test_refusal_messages_leak_no_path(tmp_path):
 def test_no_new_f_exception_class_was_defined():
     """D-04 requires reusing the established taxonomy, not extending it.
 
-    The four classes are the whole f support policy and are meant to be
-    reviewable as one list.  A fifth added quietly would split it.
+    The two classes are the whole f support policy and are meant to be
+    reviewable as one list.  A third added quietly would split it.
     """
 
     def check():
@@ -770,9 +765,7 @@ def test_no_new_f_exception_class_was_defined():
             and obj.__module__ == skp.__name__
         )
         assert defined == [
-            "FAngularFormulaSourceError",
             "FDerivativeUnsupportedError",
-            "FShellResolvedCoulombUnsupportedError",
             "FSpinPolarizationUnsupportedError",
         ], f"the f exception taxonomy changed: {defined}"
 

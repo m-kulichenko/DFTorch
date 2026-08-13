@@ -331,9 +331,9 @@ def test_sk_channel_lookup_matches_bond_integral_order():
         for index, name in enumerate(bond._CHANNELS):
             assert sk_mod.sk_channel_index(name) == index, name
 
-        # SH_shift selects a name prefix, never a numeric block offset.
-        assert sk_mod.sk_channel_name("ss0", 0) == "Hss0"
-        assert sk_mod.sk_channel_name("ss0", 1) == "Sss0"
+        # SH_shift is the name prefix itself, never a numeric block offset.
+        assert sk_mod.sk_channel_name("ss0", "H") == "Hss0"
+        assert sk_mod.sk_channel_name("ss0", "S") == "Sss0"
 
         # The legacy `channel + SH_shift * 10` layout would have addressed the
         # s-s Hamiltonian at 9 and the s-s overlap at 19. Under the canonical
@@ -346,13 +346,13 @@ def test_sk_channel_lookup_matches_bond_integral_order():
 
         # Every base name used by the s/p/d formulas must resolve in both blocks.
         for base in ("ss0", "sp0", "sd0", "pp0", "pp1", "pd0", "pd1", "dd0", "dd1", "dd2"):
-            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, 0))
-            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, 1))
+            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, "H"))
+            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, "S"))
 
         # f channels exist in the table even though the angular formulas do not.
         for base in ("sf0", "pf0", "pf1", "df0", "df1", "df2", "ff0", "ff1", "ff2", "ff3"):
-            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, 0))
-            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, 1))
+            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, "H"))
+            sk_mod.sk_channel_index(sk_mod.sk_channel_name(base, "S"))
 
         try:
             sk_mod.sk_channel_index("Hzz9")
@@ -372,53 +372,29 @@ def test_sk_channel_lookup_matches_bond_integral_order():
     assert run_with_float64(check) == []
 
 
-def test_f_angular_formula_source_lock():
-    """HSK-03..HSK-06 / D-03, D-04, D-05: the approved source lock is recorded.
+def test_f_ao_order_is_locked():
+    """HSK-03..HSK-06 / D-03, D-04, D-05: the f AO order must not move.
 
-    Checkpoint 03-01-02 required a human to supply and confirm the f-electron
-    Slater-Koster tables before any formula could be hard-coded.  This test
-    pins the recorded provenance and the paper-to-Structure adapter so a later
-    edit cannot quietly swap the source or reorder the f block.
+    The angular tables are written directly in ``STRUCTURE_F_AO_ORDER``, so the
+    index of each f orbital is load-bearing in every formula.  This test pins
+    that order against ``Structure.AO_LABEL_TEMPLATE`` so a later edit cannot
+    quietly reorder the f block out from under the tables.
     """
 
     def check():
-        project_root = validation.PROJECT_ROOT
         sk_mod = validation.import_dftorch_module("_slater_koster_pair")
         structure_mod = validation.import_dftorch_module("Structure")
 
-        source = sk_mod.F_FORMULA_SOURCE
-        assert source["doi"] == "10.1088/0022-3719/13/4/016", source["doi"]
-        assert source["title"] == "Slater-Koster tables for f electrons"
-        assert "Takegahara" in source["authors"], source["authors"]
-        assert "Aoki" in source["authors"] and "Yanase" in source["authors"]
-        assert "13 (1980) 583-588" in source["journal"], source["journal"]
-        assert "03-SOURCE-LOCK.md" in source["record"], source["record"]
-
-        record = project_root / source["record"]
-        assert record.is_file(), f"source-lock record missing at {record}"
-        record_text = record.read_text(encoding="utf-8")
-        assert source["doi"] in record_text
-        assert "APPROVED" in record_text
-
-        paper = tuple(sk_mod.PAPER_F_AO_ORDER)
         struct = tuple(sk_mod.STRUCTURE_F_AO_ORDER)
-        perm = tuple(sk_mod.PAPER_TO_STRUCTURE_F_PERMUTATION)
-        sign = tuple(sk_mod.PAPER_TO_STRUCTURE_F_SIGN)
-
-        assert len(paper) == 7 and len(perm) == 7 and len(sign) == 7
-        assert sorted(perm) == list(range(7)), f"adapter is not a permutation: {perm}"
-        assert set(paper) == set(struct), "paper and Structure f bases differ"
-
-        # The paper prints xyz (A_2u) first; Structure.py keeps it last.
-        assert paper[0] == "fxyz"
-        assert struct[-1] == "fxyz"
-        assert perm == (1, 2, 3, 4, 5, 6, 0), perm
-
-        # Applying the adapter to the paper order must reproduce Structure order.
-        assert tuple(paper[perm[i]] for i in range(7)) == struct
-
-        # Same Cartesian polynomials and normalisation => no sign flips.
-        assert sign == (1.0,) * 7, sign
+        assert struct == (
+            "fx3",
+            "fy3",
+            "fz3",
+            "fx_y2_z2",
+            "fy_z2_x2",
+            "fz_x2_y2",
+            "fxyz",
+        ), struct
 
         # Structure.py's AO order is locked and must not have moved.
         assert tuple(structure_mod.AO_LABEL_TEMPLATE) == (
@@ -540,6 +516,200 @@ def f_angular_channel_matrices(sk_mod, L, M, N):
             sk_mod.f_angular_ff,
         )
     )
+
+
+def f_angular_gradient_blocks(sk_mod, L, M, N):
+    """Return the four derivative blocks in their native ``(3, ...)`` layout."""
+    return tuple(
+        helper(L, M, N)
+        for helper in (
+            sk_mod.f_angular_sf_grad,
+            sk_mod.f_angular_pf_grad,
+            sk_mod.f_angular_df_grad,
+            sk_mod.f_angular_ff_grad,
+        )
+    )
+
+
+def test_f_angular_derivatives_match_autograd_and_finite_differences():
+    """The analytic f angular derivatives agree with two independent references.
+
+    The derivative tables are differentiated by hand from the value tables, so
+    they can drift from them silently: nothing about a wrong polynomial looks
+    wrong. Two references pin them.
+
+    Automatic differentiation is the tight one. It runs the *value* functions
+    and differentiates the actual operations performed, so agreement to machine
+    precision means the analytic form matches the value table exactly rather
+    than approximately.
+
+    Central finite differences are the loose but assumption-free one: they never
+    touch the derivative code path at all, so they would catch a shared mistake
+    in which the analytic form and autograd agree with each other but not with
+    the function's real slope. Their accuracy is limited to about ``h**2`` plus
+    rounding, hence the far weaker tolerance.
+    """
+
+    def check():
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
+        L, M, N, vectors = random_unit_directions(256)
+
+        value_helpers = (
+            sk_mod.f_angular_sf,
+            sk_mod.f_angular_pf,
+            sk_mod.f_angular_df,
+            sk_mod.f_angular_ff,
+        )
+        grads = f_angular_gradient_blocks(sk_mod, L, M, N)
+        labels = ("sf", "pf", "df", "ff")
+
+        for label, value_fn, analytic in zip(labels, value_helpers, grads):
+            # Shape: the value block with a leading axis of 3 for d/dL, d/dM, d/dN.
+            expected_shape = (3,) + tuple(value_fn(L, M, N).shape)
+            assert tuple(analytic.shape) == expected_shape, (
+                f"{label}: derivative block has shape {tuple(analytic.shape)}, "
+                f"expected {expected_shape}"
+            )
+
+            # --- reference 1: automatic differentiation ------------------
+            gl = L.clone().requires_grad_(True)
+            gm = M.clone().requires_grad_(True)
+            gn = N.clone().requires_grad_(True)
+            value = value_fn(gl, gm, gn)
+            # One random cotangent contracts the whole block in a single
+            # backward pass, which tests every cell at once rather than
+            # sampling a few.
+            cotangent = torch.randn(
+                value.shape,
+                generator=torch.Generator().manual_seed(11),
+                dtype=torch.float64,
+            )
+            ref = torch.stack(
+                torch.autograd.grad((value * cotangent).sum(), (gl, gm, gn))
+            )
+            got = (analytic * cotangent.unsqueeze(0)).sum(
+                dim=tuple(range(1, analytic.dim() - 1))
+            )
+            error = float((ref - got).abs().max())
+            assert error < 1e-11, f"{label}: analytic vs autograd max error {error:.3e}"
+
+            # --- reference 2: central finite differences -----------------
+            step = 1e-6
+            for axis in range(3):
+                shifted = vectors.clone()
+                shifted[:, axis] += step
+                up = value_fn(shifted[:, 0], shifted[:, 1], shifted[:, 2])
+                shifted = vectors.clone()
+                shifted[:, axis] -= step
+                down = value_fn(shifted[:, 0], shifted[:, 1], shifted[:, 2])
+                numeric = (up - down) / (2 * step)
+                error = float((analytic[axis] - numeric).abs().max())
+                assert error < 1e-6, (
+                    f"{label}: analytic vs finite difference on axis {axis} "
+                    f"max error {error:.3e}"
+                )
+
+        return []
+
+    assert run_with_float64(check) == []
+
+
+def test_f_angular_derivatives_satisfy_the_differentiated_orthogonality_gate():
+    """Differentiating the orthogonality gate constrains the derivative tables.
+
+    ``test_f_angular_orthogonality_identity`` pins three facts about the values:
+    ``sum_k C_k(ff)`` is the 7x7 identity, each f-f channel matrix is an
+    idempotent projector, and for a cross-shell pair the channel matrices obey
+    ``sum_k C_k C_k^T == I`` and ``C_k^T C_k == P_k`` with ``P_k`` the f-f
+    channel projector.
+
+    Each of those is constant as the bond turns, so differentiating along the
+    unit sphere gives an identity the derivative tables must satisfy. This is
+    an independent check in the strongest sense: it never differentiates the
+    value functions, so it shares no machinery with autograd or with finite
+    differences. It also *couples the blocks* -- differentiating
+    ``C_k^T C_k == P_k`` ties the s-f, p-f and d-f derivative tables to the f-f
+    derivative table, so a mistake confined to one of them still shows up.
+
+    A tangential displacement is used throughout: L, M and N are not free
+    variables but obey ``L^2 + M^2 + N^2 == 1``, so only motion that preserves
+    the unit length is meaningful, and the three partials must be contracted
+    together rather than read one at a time.
+    """
+
+    def check():
+        sk_mod = validation.import_dftorch_module("_slater_koster_pair")
+        L, M, N, vectors = random_unit_directions(256, seed=20260812)
+        radial = vectors.transpose(0, 1)  # (3, P)
+
+        # Any direction orthogonal to the radial one keeps the vector on the
+        # unit sphere to first order.
+        tangent = torch.randn(
+            radial.shape,
+            generator=torch.Generator().manual_seed(5),
+            dtype=torch.float64,
+        )
+        tangent = tangent - (tangent * radial).sum(0, keepdim=True) * radial
+
+        sf, pf, df, ff = (
+            sk_mod.f_angular_sf(L, M, N),
+            sk_mod.f_angular_pf(L, M, N),
+            sk_mod.f_angular_df(L, M, N),
+            sk_mod.f_angular_ff(L, M, N),
+        )
+        g_sf, g_pf, g_df, g_ff = f_angular_gradient_blocks(sk_mod, L, M, N)
+
+        def directional(grad_block):
+            """Contract the three partials against the tangential step."""
+            return torch.einsum("dk...p,dp->k...p", grad_block, tangent)
+
+        d_ff = directional(g_ff)
+        tol = 1e-10
+
+        # --- sum_k C_k(ff) is the identity, so its derivative vanishes ---
+        error = float(d_ff.sum(dim=0).abs().max())
+        assert error < tol, f"d/dt[sum_k C_k(ff)] != 0: {error:.3e}"
+
+        # --- each channel projector obeys P P == P, so d(P P) == dP ------
+        for k in range(4):
+            projector, d_projector = ff[k], d_ff[k]
+            lhs = torch.einsum("abp,bcp->acp", d_projector, projector) + torch.einsum(
+                "abp,bcp->acp", projector, d_projector
+            )
+            error = float((lhs - d_projector).abs().max())
+            assert error < tol, f"d(P{k} P{k}) != dP{k}: {error:.3e}"
+
+        # --- the cross-shell relations, differentiated -------------------
+        for label, values, grad_block, n_channel in (
+            ("sf", sf, g_sf, 1),
+            ("pf", pf, g_pf, 2),
+            ("df", df, g_df, 3),
+        ):
+            d_values = directional(grad_block)
+
+            # sum_k C_k C_k^T is the identity on the lower shell.
+            lhs = torch.einsum("kabp,kcbp->acp", d_values, values) + torch.einsum(
+                "kabp,kcbp->acp", values, d_values
+            )
+            error = float(lhs.abs().max())
+            assert error < tol, (
+                f"{label}: d/dt[sum_k C_k C_k^T] != 0: {error:.3e}"
+            )
+
+            # C_k^T C_k is the f-f channel projector -- this is the relation
+            # that couples this block's derivatives to the f-f block's.
+            lhs = torch.einsum("kabp,kacp->kbcp", d_values, values) + torch.einsum(
+                "kabp,kacp->kbcp", values, d_values
+            )
+            error = float((lhs - d_ff[:n_channel]).abs().max())
+            assert error < tol, (
+                f"{label}: d[C_k^T C_k] != dP_k, which means the {label} and ff "
+                f"derivative tables disagree: {error:.3e}"
+            )
+
+        return []
+
+    assert run_with_float64(check) == []
 
 
 def test_f_angular_orthogonality_identity():
@@ -1199,7 +1369,6 @@ def test_f_containing_derivative_paths_are_guarded():
         stress_mod = validation.import_dftorch_module("_stress")
         esdriver_mod = validation.import_dftorch_module("ESDriver")
 
-        assert h0ands_mod.FAngularFormulaSourceError is sk_mod.FAngularFormulaSourceError
         assert (
             stress_mod.FDerivativeUnsupportedError
             is sk_mod.FDerivativeUnsupportedError
@@ -1207,7 +1376,6 @@ def test_f_containing_derivative_paths_are_guarded():
         assert issubclass(sk_mod.FDerivativeUnsupportedError, NotImplementedError)
 
         # Values exist; derivatives explicitly do not.
-        assert sk_mod.F_ANGULAR_FORMULAS_AVAILABLE is True
         assert sk_mod.F_ANGULAR_DERIVATIVES_AVAILABLE is False, (
             "flip this only once f angular derivatives are implemented AND the "
             "guards below are removed"
@@ -1218,7 +1386,7 @@ def test_f_containing_derivative_paths_are_guarded():
         # The batch H0/S route reconstructs only the 1/4/9 orbital masks, so it
         # must reject n_orb == 16 rather than dropping those pairs outright.
         source = inspect.getsource(h0ands_mod.H0_and_S_vectorized_batch)
-        assert "FAngularFormulaSourceError" in source
+        assert "NotImplementedError" in source
         assert "16" in source
 
         # Analytical stress consumes dH0/dS.

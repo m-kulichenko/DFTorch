@@ -68,7 +68,7 @@ The three families
     A shell-count identifier compared against 1, 2, 3 or 4 -- s / p / d / f
     angular momentum.  This family is **not** in the plan's identifier list and
     is included deliberately.  The Phase 4 shell-resolved Coulomb defect
-    (``FShellResolvedCoulombUnsupportedError``) lived at
+    lived at
     ``_coulomb_matrix.py:816-824``, which tests ``max_ang`` and never mentions
     ``n_orb``.  A sweep restricted to orbital-count names would have missed the
     exact defect this project already had to fix, so restricting it would be

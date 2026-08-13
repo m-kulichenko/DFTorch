@@ -134,7 +134,7 @@ def _pair_grad_from_sk(
     const,
     stress_weight: torch.Tensor,
     cell: torch.Tensor,
-    SH_shift: int = 0,
+    SH_shift: str = "H",
     extra_scale: float = 1.0,
 ) -> torch.Tensor:
     """Compute pairwise stress by piggybacking on the Slater-Koster builder.
@@ -190,10 +190,10 @@ def _pair_grad_from_sk(
 
     # This is a derivative-consuming path: it reconstructs only the 1/4/9
     # orbital pair masks, so a 16-orbital atom would contribute exactly zero to
-    # the stress instead of raising. Phase 3 implements source-locked f angular
-    # *values* only, so even a fully f-aware mask set would carry zero f
-    # derivatives here, and a silent zero is indistinguishable from a real
-    # result. See FAngularFormulaSourceError / FDerivativeUnsupportedError.
+    # the stress instead of raising. Only f angular *values* are implemented, so
+    # even a fully f-aware mask set would carry zero f derivatives here, and a
+    # silent zero is indistinguishable from a real result.
+    # See FDerivativeUnsupportedError.
     if bool(((nI == 16) | (nJ == 16)).any()):
         raise FDerivativeUnsupportedError(
             "_pair_grad_from_sk: f-orbital (n_orb == 16) stress contributions "
@@ -388,7 +388,7 @@ def get_electronic_stress_analytical(
             const,
             W_pulay + W_scc,
             cell,
-            SH_shift=1,
+            SH_shift="S",
             extra_scale=1.0 / hartree_to_eV,
         )
     else:
