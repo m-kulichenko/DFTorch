@@ -202,12 +202,19 @@ parsing bug.
 `tests/test_single_shot_energy.py` pins two numbers:
 
 ```
-EU_N_REFERENCE_E_TOT   = -17.510444238744924
-EU_N_REFERENCE_E_BAND0 = -16.948081509141794
+EU_N_REFERENCE_E_TOT   = -17.632412136815724
+EU_N_REFERENCE_E_BAND0 = -17.069988061410896
 ```
 
-**Both remain valid, and both belong to the one-pass path only.** They were reproduced exactly
-in the measurement above.
+**Both belong to the one-pass path only.**
+
+These were re-recorded on 2026-08-13. The previous values (`-17.510444238744924` and
+`-16.948081509141794`) were computed against a pair-mask defect in
+`src/dftorch/_slater_koster_pair.py`, where the s-with-p and p-with-s assembly blocks skipped
+the pair classes pairing a 16-orbital atom with a 4- or 9-orbital one — the Eu-N pair exactly.
+The replacements are cross-checked against DFTB+ on the same SKF fixtures; see
+`tests/f_orbital_data/README-EU-N-CASE.md`. Any prose below quoting the old numbers describes
+the pre-fix code.
 
 A reader who compares `EU_N_REFERENCE_E_TOT` against a settled energy is comparing two
 different observables. That is the single most likely way for someone to draw a wrong

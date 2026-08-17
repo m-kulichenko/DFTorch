@@ -66,11 +66,24 @@ EU_N_PARAMS = {
     "CHARGE": 0,
 }
 
-# Reference values recorded at plan time by direct computation of the algorithm
-# specified in 04-01-PLAN.md Task 1.  See
+# Reference values for the algorithm specified in 04-01-PLAN.md Task 1.  See
 # test_eu_n_single_shot_reference_energy for the interpretation of a mismatch.
-EU_N_REFERENCE_E_TOT = -17.510444238744924
-EU_N_REFERENCE_E_BAND0 = -16.948081509141794
+#
+# Re-recorded 2026-08-13, after the Slater-Koster pair-mask fix in
+# ``_slater_koster_pair.py``.  The blocks assembling s-with-p and p-with-s were
+# skipping the pair classes where one atom carries 16 orbitals and the other 4
+# or 9 -- which is exactly the Eu-N pair -- so part of the Eu-N s-p coupling was
+# never written into H0.  The previous values here (-17.510444238744924 and
+# -16.948081509141794) were recorded against that defect.
+#
+# These replacements are not self-recorded: they are cross-checked against
+# DFTB+ 25.1 on the same SKF fixtures.  DFTB+ gives -97.1794477 eV for this
+# geometry, which differs from e_tot by a CONSTANT 79.5470356 eV -- the
+# free-atom reference energy that DFTB+ includes and this code does not -- and
+# that constant reproduces across all 21 scan separations to within 1e-5 eV.
+# See "DFTB benchmarking/eu_n_compare/" for the harness.
+EU_N_REFERENCE_E_TOT = -17.632412136815724
+EU_N_REFERENCE_E_BAND0 = -17.069988061410896
 
 
 def _skf_dir() -> Path:
@@ -184,10 +197,11 @@ def test_eu_n_single_shot_has_no_coulomb_term(tmp_path):
 def test_eu_n_single_shot_reference_energy(tmp_path):
     """Pin the non-SCC energy definition to its plan-time value.
 
-    ``-17.510444238744924`` eV total and ``-16.948081509141794`` eV band energy
-    are reference values recorded at plan time by direct computation with the
-    parameter dict pinned in this module.  A mismatch here does NOT mean the
-    test went stale — it means the definition of the non-SCC energy drifted.
+    ``-17.632412136815724`` eV total and ``-17.069988061410896`` eV band energy
+    are reference values computed with the parameter dict pinned in this module
+    and cross-checked against DFTB+ 25.1 on the same SKF fixtures.  A mismatch
+    here does NOT mean the test went stale — it means the definition of the
+    non-SCC energy drifted.
     Downstream Phase 4 work (the Eu-N separation scan and the SIM-05 loose-band
     minimum gate) records numbers against exactly this definition, so a drift
     invalidates them.

@@ -145,8 +145,10 @@ indistinguishable from a correct result by shape, finiteness or symmetry, which 
 measurement exists.
 
 The case document is `tests/f_orbital_data/README-EU-N-CASE.md`; the gate is
-`tests/test_eu_n_scan.py`, a 21-point scan whose minimum sits at 2.40 A, interior to the grid
-and inside the `2.655 A +/- 20%` band.
+`tests/test_eu_n_scan.py`, a 21-point scan whose minimum sits at 2.20 A, interior to the grid
+and inside the `2.655 A +/- 20%` band. (The minimum sat at 2.40 A until 2026-08-13, when a
+pair-mask defect in the s-p and p-s assembly blocks was fixed; the curve is now cross-checked
+against DFTB+ point for point.)
 
 ### The validation depth, stated because a capability list without one is misleading
 

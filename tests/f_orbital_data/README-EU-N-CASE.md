@@ -296,31 +296,66 @@ feedback budget.
 
 `uv run pytest` is the canonical invocation (it is what CI runs). Bare `pytest` is not.
 
-## Reference curve recorded 2026-07-29
+## Reference curve recorded 2026-08-13
 
-Recorded on 2026-07-29 against the then-current implementation, with the parameters tabulated
-under *Observable*. Diff a changed curve against this table to see what moved.
+Recorded on 2026-08-13 with the parameters tabulated under *Observable*. Diff a changed curve
+against this table to see what moved.
+
+**This table replaces one recorded 2026-07-29.** That earlier curve was computed against a
+defect in `src/dftorch/_slater_koster_pair.py`: the blocks assembling s-with-p and p-with-s
+skipped the pair classes where one atom carries 16 orbitals and the other 4 or 9. Eu carries
+16 and N carries 4, so part of the Eu-N s-p coupling was never written into H0. The old curve
+put the minimum at 2.40 Å; the corrected one puts it at 2.20 Å. Do not resurrect the old
+numbers.
 
 | r (Å) | E_tot (eV) | | r (Å) | E_tot (eV) |
 |---|---|---|---|---|
-| 1.60 | -3.0061030 | | 2.70 | -17.4752833 |
-| 1.70 | -9.6876290 | | 2.80 | -17.4008853 |
-| 1.80 | -13.4703897 | | 2.90 | -17.3345468 |
-| 1.90 | -15.5570923 | | 3.00 | -17.2476120 |
-| 2.00 | -16.6777628 | | 3.10 | -17.1502735 |
-| 2.10 | -17.2570144 | | 3.20 | -17.0625603 |
-| 2.20 | -17.5183387 | | 3.30 | -16.9850053 |
-| 2.30 | -17.6207142 | | 3.40 | -16.9179804 |
-| **2.40** | **-17.6414416** | | 3.50 | -16.8614428 |
-| 2.50 | -17.6127839 | | 3.60 | -16.8148915 |
-| 2.60 | -17.5517973 | | | |
+| 1.60 | -3.1792035 | | 2.70 | -17.5612120 |
+| 1.70 | -10.0252951 | | 2.80 | -17.4219424 |
+| 1.80 | -13.9782770 | | 2.90 | -17.3112541 |
+| 1.90 | -16.1931464 | | 3.00 | -17.1982513 |
+| 2.00 | -17.3736159 | | 3.10 | -17.0895501 |
+| 2.10 | -17.9409385 | | 3.20 | -17.0010111 |
+| **2.20** | **-18.1329651** | | 3.30 | -16.9291338 |
+| 2.30 | -18.1309362 | | 3.40 | -16.8709449 |
+| 2.40 | -18.0333075 | | 3.50 | -16.8240089 |
+| 2.50 | -17.8882860 | | 3.60 | -16.7863737 |
+| 2.60 | -17.7233523 | | | |
 
-**Located minimum: 2.40 Å**, grid index 8 of 20 — strictly interior, and comfortably inside
+**Located minimum: 2.20 Å**, grid index 6 of 20 — strictly interior, and inside
 [2.124, 3.186]. Exactly one grid point attains the minimum energy, so there is no tie to
-break. The curve is a single clean well: strictly decreasing up to 2.40 Å and strictly
+break. The curve is a single clean well: strictly decreasing up to 2.20 Å and strictly
 increasing after it.
 
 For reference, the single point at the target separation itself (2.655 Å, not on the scan
-grid) gives `e_tot = -17.510444238744924` eV with `e_band0 = -16.948081509141794` eV,
-`e_coul = 0` and `e_repulsion = 0.15890937893715806` eV. That value is pinned independently
-by `tests/test_single_shot_energy.py::test_eu_n_single_shot_reference_energy`.
+grid) gives `e_tot = -17.632412136815724` eV with `e_band0 = -17.069988061410896` eV and
+`e_coul = 0`. That value is pinned independently by
+`tests/test_single_shot_energy.py::test_eu_n_single_shot_reference_energy`.
+
+### Cross-checked against DFTB+
+
+Unlike the 2026-07-29 table, this one is not self-recorded. Every point was compared against
+DFTB+ (conda-forge build, `commit a23bfb2`) reading the *same* SKF fixtures, via the harness
+in `DFTB benchmarking/eu_n_compare/`:
+
+| Series | Aligned max \|diff\| | Aligned RMS | Minimum, DFTorch / DFTB+ |
+|---|---|---|---|
+| one pass (`Scc = No`) | 9e-6 eV | 3e-6 eV | 2.20 Å / 2.20 Å |
+| settled per atom (`Scc = Yes`) | 8e-6 eV | 2e-6 eV | 2.00 Å / 2.00 Å |
+
+"Aligned" means after removing a constant offset. DFTB+ reports energies **79.5470 eV** below
+this code's, at every separation, because DFTB+'s total energy includes the free-atom
+reference energy and this code's does not. That constant is exactly
+
+```
+sum over both atoms of (shell occupation x onsite energy)
+  Eu:  7 x (-0.0559) + 2 x (-0.0968)  =  -0.5849 Ha  =  -15.9159 eV
+  N:   3 x (-0.2512) + 2 x (-0.7924)  =  -2.3384 Ha  =  -63.6311 eV
+                                     total  -2.9233 Ha  =  -79.5470 eV
+```
+
+reproducing the measured offset to 5e-6 eV. It is a difference of energy zero, not of
+physics, which is why the aligned columns are the ones that carry meaning.
+
+The shell-resolved series (`MAGNETIC_HUBBARD_LDEP = True`) is **not** cross-checked here: its
+charge loop does not converge at many separations, so there is nothing stable to compare.

@@ -108,9 +108,13 @@ EU_F_HUBBARD_U_EV = 13.605693125  # == 0.50 * 27.21138625
 #: Both flag settings.  D-16/D-23 require both paths to be exercised.
 LDEP_SETTINGS = (False, True)
 
-#: Plan 04-01's pinned single-shot reference energy for Eu-N at 2.655 A.  Used
-#: here to prove the Coulomb-path gating did not perturb the supported path.
-EU_N_REFERENCE_E_TOT = -17.510444238744924
+#: Pinned single-shot reference energy for Eu-N at 2.655 A.  Used here to prove
+#: the Coulomb-path gating did not perturb the supported path.
+#:
+#: Re-recorded 2026-08-13 alongside tests/test_single_shot_energy.py, after the
+#: Slater-Koster pair-mask fix; see that module for the full rationale and the
+#: DFTB+ cross-check.  Previous value: -17.510444238744924.
+EU_N_REFERENCE_E_TOT = -17.632412136815724
 
 
 def _skf_dir() -> Path:
@@ -653,7 +657,7 @@ def test_driver_builds_c_sr_for_f_system_when_flag_set(tmp_path):
 def test_driver_f_system_unaffected_when_flag_unset(tmp_path):
     """The supported f path is bit-for-bit what plan 04-01 pinned.
 
-    ``-17.510444238744924`` eV is plan 04-01's reference single-shot energy for
+    ``-17.632412136815724`` eV is the reference single-shot energy for
     Eu-N at 2.655 A.  A drift here would mean the Coulomb-path gating perturbed
     the per-atom path it was supposed to leave alone.
     """

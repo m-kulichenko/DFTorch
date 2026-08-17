@@ -2236,17 +2236,20 @@ def Slater_Koster_Pair_SKF_vectorized(
     ###### HSPS_all
     # Needs a p shell on atom J, i.e. n_orb(J) in {4, 9, 16}.
     # Recall the letters: H = 1 orbital, X = 4, Y = 9, Z = 16, first letter is
-    # atom I and second is atom J.  So this OR lists every pair class whose
-    # *second* atom has at least a p shell -- HX, XX, HY, YY, XY, YX, HZ, XZ,
-    # YZ, ZZ.  Absent are ZH, ZX, ZY (second atom is not a Z... but is XH, YH
-    # etc. also absent?  Yes: anything ending in H has no p on atom J).
+    # atom I and second is atom J.  The condition is on atom J ALONE: it must
+    # have a p shell, i.e. the second letter is X, Y or Z.  Atom I's class is
+    # irrelevant here, so all four values of the first letter take part and the
+    # complete list is 4 x 3 = 12 classes.  Only pairs ending in H are absent,
+    # because an H atom has no p shell to couple to.
     tmp_mask = (
         pair_mask_HX
         | pair_mask_XX
-        | pair_mask_HY
-        | pair_mask_YY
-        | pair_mask_XY
         | pair_mask_YX
+        | pair_mask_ZX
+        | pair_mask_HY
+        | pair_mask_XY
+        | pair_mask_YY
+        | pair_mask_ZY
         | pair_mask_HZ
         | pair_mask_XZ
         | pair_mask_YZ
@@ -2304,14 +2307,18 @@ def Slater_Koster_Pair_SKF_vectorized(
     # =====================================================================
     ### HPSS_all ###
     # Now it is the *first* atom that needs a p shell, so the mask lists every
-    # class whose first letter is X, Y or Z.
+    # class whose first letter is X, Y or Z -- and, mirroring block 2, atom J's
+    # class is irrelevant, so all four values of the second letter take part.
+    # 3 x 4 = 12 classes.
     tmp_mask = (
         pair_mask_XH
         | pair_mask_XX
-        | pair_mask_YH
-        | pair_mask_YY
         | pair_mask_XY
+        | pair_mask_XZ
+        | pair_mask_YH
         | pair_mask_YX
+        | pair_mask_YY
+        | pair_mask_YZ
         | pair_mask_ZH
         | pair_mask_ZX
         | pair_mask_ZY
@@ -2529,11 +2536,13 @@ def Slater_Koster_Pair_SKF_vectorized(
     # Column offsets +4..+8 are the five d orbitals in this program's fixed
     # local order: dxy, dyz, dzx, dx2-y2, dz2.
     ### s-d
-    # Needs a d shell on atom J, i.e. n_orb(J) in {9, 16}.
+    # Needs a d shell on atom J, i.e. n_orb(J) in {9, 16} -- second letter Y or
+    # Z, with atom I's class unconstrained.  4 x 2 = 8 classes.
     tmp_mask = (
         pair_mask_HY
         | pair_mask_XY
         | pair_mask_YY
+        | pair_mask_ZY
         | pair_mask_HZ
         | pair_mask_XZ
         | pair_mask_YZ
@@ -2618,10 +2627,12 @@ def Slater_Koster_Pair_SKF_vectorized(
     # "pd1").  The variable names read H_<p orbital>_<d orbital>, so H_X_YZ is
     # px against dyz.
     ### p-d
-    # Needs a p shell on atom I and a d shell on atom J.
+    # Needs a p shell on atom I and a d shell on atom J -- first letter X, Y or
+    # Z, second letter Y or Z.  3 x 2 = 6 classes.
     tmp_mask = (
         pair_mask_XY
         | pair_mask_YY
+        | pair_mask_ZY
         | pair_mask_XZ
         | pair_mask_YZ
         | pair_mask_ZZ
@@ -2957,11 +2968,13 @@ def Slater_Koster_Pair_SKF_vectorized(
     # sum of the two shells' angular momenta (s = 0, p = 1, d = 2, f = 3): s-p
     # gives -1, s-d gives +1, p-d gives -1, d-d gives +1.
     ### d-s
-    # Needs a d shell on atom I, i.e. n_orb(I) in {9, 16}.
+    # Needs a d shell on atom I, i.e. n_orb(I) in {9, 16} -- first letter Y or
+    # Z, with atom J's class unconstrained.  2 x 4 = 8 classes.
     tmp_mask = (
         pair_mask_YH
         | pair_mask_YX
         | pair_mask_YY
+        | pair_mask_YZ
         | pair_mask_ZH
         | pair_mask_ZX
         | pair_mask_ZY
@@ -3040,10 +3053,12 @@ def Slater_Koster_Pair_SKF_vectorized(
     # wrapping is literal -- ``H_XY_X`` is exactly ``-H_X_XY`` from block 6 --
     # which is why these read as negated copies rather than fresh algebra.
     ### d-p
-    # Needs a d shell on atom I and a p shell on atom J.
+    # Needs a d shell on atom I and a p shell on atom J -- first letter Y or Z,
+    # second letter X, Y or Z.  2 x 3 = 6 classes.
     tmp_mask = (
         pair_mask_YX
         | pair_mask_YY
+        | pair_mask_YZ
         | pair_mask_ZX
         | pair_mask_ZY
         | pair_mask_ZZ
