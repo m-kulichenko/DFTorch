@@ -1,3 +1,4 @@
+# ruff: noqa
 '''
 module load miniconda3
 conda create -p $HOME/conda/metis -c conda-forge metis -y
